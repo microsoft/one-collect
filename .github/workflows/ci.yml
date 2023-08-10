@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build_debug:
+    name: Build and Test (Debug)
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+    - name: Build
+      working-directory: one_collect
+      run: cargo build --verbose
+    - name: Run tests
+      working-directory: one_collect
+      run: cargo test --verbose
+
+  build_release:
+    name: Build and Test (Release)
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+    - name: Build
+      working-directory: one_collect
+      run: cargo build --release --verbose
+    - name: Run tests
+      working-directory: one_collect
+      run: cargo test --release --verbose
+
+  bench:
+    name: Run Benchmarks
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+    - name: Run benchmarks
+      working-directory: one_collect
+      run: cargo bench --verbose
