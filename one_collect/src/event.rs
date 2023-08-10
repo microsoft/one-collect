@@ -2,14 +2,18 @@ static EMPTY: &[u8] = &[];
 
 type BoxedCallback = Box<dyn FnMut(&EventFormat, &[u8])>;
 
-pub enum FieldType {
+#[derive(Debug)]
+#[derive(PartialEq)]
+pub enum LocationType {
     Static,
-    RelativeLocation,
+    DynRelative,
+    DynAbsolute,
 }
 
 pub struct EventField {
     pub name: String,
-    pub ftype: FieldType,
+    pub type_name: String,
+    pub location: LocationType,
     pub offset: usize,
     pub size: usize,
 }
@@ -17,12 +21,14 @@ pub struct EventField {
 impl EventField {
     pub fn new(
         name: String,
-        ftype: FieldType,
+        type_name: String,
+        location: LocationType,
         offset: usize,
         size: usize) -> Self {
         Self {
             name,
-            ftype,
+            type_name,
+            location,
             offset,
             size,
         }
@@ -52,6 +58,10 @@ impl EventFormat {
         self.fields.push(field);
     }
 
+    pub fn fields(&self) -> &[EventField] {
+        &self.fields
+    }
+
     pub fn get_field_ref(
         &self,
         name: &str) -> Option<usize> {
@@ -74,8 +84,8 @@ impl EventFormat {
 
         let field = &self.fields[field_ref];
 
-        match &field.ftype {
-            FieldType::Static => {
+        match &field.location {
+            LocationType::Static => {
                 let end = field.offset + field.size;
 
                 if end > data.len() {
@@ -85,8 +95,12 @@ impl EventFormat {
                 &data[field.offset .. end]
             },
 
-            FieldType::RelativeLocation => {
+            LocationType::DynRelative => {
                 todo!("Need to support relative location");
+            },
+
+            LocationType::DynAbsolute => {
+                todo!("Need to support absolute location");
             }
         }
     }
@@ -152,9 +166,18 @@ mod tests {
         let mut e = Event::new(1, "test".into());
         let format = e.format_mut();
 
-        format.add_field(EventField::new("1".into(), FieldType::Static, 0, 1));
-        format.add_field(EventField::new("2".into(), FieldType::Static, 1, 1));
-        format.add_field(EventField::new("3".into(), FieldType::Static, 2, 1));
+        format.add_field(
+            EventField::new(
+                "1".into(), "unsigned char".into(),
+                LocationType::Static, 0, 1));
+        format.add_field(
+            EventField::new(
+                "2".into(), "unsigned char".into(),
+                LocationType::Static, 1, 1));
+        format.add_field(
+            EventField::new(
+                "3".into(), "unsigned char".into(),
+                LocationType::Static, 2, 1));
 
         e
     }
