@@ -1,0 +1,307 @@
+use std::io::{Result, Error, BufRead, BufReader, ErrorKind};
+use std::path::PathBuf;
+use std::fs::File;
+
+use crate::event::*;
+
+pub struct TraceFS {
+    root: String,
+}
+
+impl TraceFS {
+    pub fn open() -> Result<TraceFS> {
+        let mounts = File::open("/proc/mounts")?;
+        let reader = BufReader::new(mounts);
+
+        for line in reader.lines().flatten() {
+            let mut parts = line.split_whitespace();
+
+            /* Format: fsspec path vfstype */
+            if let Some(path) = parts.nth(1) {
+                if let Some(fstype) = parts.next() {
+                    if fstype == "tracefs" {
+                        return Self::open_at(path);
+                    }
+                }
+            }
+        }
+
+        Err(
+            Error::new(
+                ErrorKind::Other,
+                concat!(
+                    "It appears tracefs is not mounted. ",
+                    "You can mount it by running ",
+                    "mount -t tracefs nodev /sys/kernel/tracing.")))
+    }
+
+    pub fn open_at(path: &str) -> Result<TraceFS> {
+        /* Ensure we have access */
+        let _ = std::fs::metadata(format!("{}/README", path))?;
+
+        let tracefs = Self {
+            root: path.into(),
+        };
+
+        Ok(tracefs)
+    }
+
+    fn field_from_line(
+        line: &str) -> Result<EventField> {
+        /* Split upon ';' */
+        let parts = line.split(';');
+
+        /* Parse field */
+        let mut fname: Option<String> = None;
+        let mut ftype: Option<String> = None;
+        let mut floc = LocationType::Static;
+        let mut foffset: Option<usize> = None;
+        let mut fsize: Option<usize> = None;
+
+        for (i, part) in parts.enumerate() {
+            let part = part.trim();
+
+            match i {
+                0 => {
+                    /* <Type ...> <Name> */
+                    if let Some(name_index) = part.rfind(' ') {
+                        let parts = part.split_at(name_index);
+                        let mut type_part = parts.0;
+                        let mut name_part = parts.1.trim();
+
+                        /* Types can start with special markers */
+                        if type_part.starts_with("__rel_loc ") {
+                            /* Relative dynamic data size */
+                            floc = LocationType::DynRelative;
+                            type_part = type_part.split_at(10).1;
+                        } else if type_part.starts_with("__dyn_loc ") {
+                            /* Absolute dynamic data size */
+                            floc = LocationType::DynAbsolute;
+                            type_part = type_part.split_at(10).1;
+                        }
+
+                        /*
+                         * Remove [] from name as sometimes it encodes the 
+                         * data size, which could change from version to
+                         * version.
+                         */
+                        if let Some(bracket_index) = name_part.find('[') {
+                            name_part = name_part.split_at(bracket_index).0;
+                        }
+
+                        fname = Some(name_part.into());
+                        ftype = Some(type_part.into());
+                    } else {
+                        return Err(Error::new(
+                            ErrorKind::Other,
+                            "Field name has no type."));
+                    }
+                },
+
+                1 => {
+                    /* offset:<Offset> */
+                    let offset = part.split_at(7).1;
+                    foffset = offset.parse::<usize>().ok();
+                },
+
+                2 => {
+                    /* size:<Size> */
+                    let size = part.split_at(5).1;
+                    fsize = size.parse::<usize>().ok();
+                },
+
+                _ => {
+                    /* Don't need any more, stop */
+                    break;
+                }
+            }
+        }
+
+        /* Odd/incomplete field */
+        if fname.is_none() || ftype.is_none() ||
+           foffset.is_none() || fsize.is_none() {
+            return Err(Error::new(
+                ErrorKind::Other,
+                "Field is missing one of: type, name, offset, size."));
+        }
+
+        Ok(EventField::new(
+            fname.unwrap(),
+            ftype.unwrap(),
+            floc,
+            foffset.unwrap(),
+            fsize.unwrap()))
+    }
+
+    #[allow(clippy::while_let_on_iterator)]
+    fn event_from_format(
+        system: &str,
+        name: &str,
+        reader: &mut impl BufRead) -> Result<Event> {
+        let mut lines = reader.lines();
+        let mut id: Option<usize> = None;
+        let mut read_format = false;
+
+        /* Read in pre-format lines */
+        while let Some(line) = lines.next() {
+            if let Ok(line) = line {
+                if line.starts_with("ID: ") {
+                    /* Read the ID and bail if it's not in the right format */
+                    if let Ok(read_id) = line.split_at(4).1.parse::<usize>() {
+                        id = Some(read_id);
+                    } else {
+                        return Err(Error::new(
+                            ErrorKind::Other,
+                            "ID was not an integer."));
+                    }
+                } else if line.starts_with("format:") {
+                    /* The rest of the lines are format lines */
+                    read_format = true;
+                    break;
+                }
+            }
+        }
+
+        /* Ensure we read ID and format */
+        if id.is_none() || !read_format {
+            return Err(Error::new(
+                ErrorKind::Other,
+                "Format is missing ID or format prefix."));
+        }
+
+        let mut event = Event::new(
+            id.unwrap(),
+            format!("{}/{}", system, name));
+
+        let format = event.format_mut();
+
+        /* Read in format lines */
+        while let Some(line) = lines.next() {
+            if let Ok(line) = line {
+                /* Skip non-field lines */
+                if !line.starts_with("\tfield:") {
+                    continue;
+                }
+
+                /* Remove "field:" */
+                let line = line.split_at(7).1;
+
+                /* Parse and add */
+                let field = Self::field_from_line(line)?;
+
+                format.add_field(field);
+            }
+        }
+
+        Ok(event)
+    }
+
+    pub fn find_event(
+        &self,
+        system: &str,
+        name: &str) -> Result<Event> {
+        let mut path_buf = PathBuf::new();
+
+        path_buf.push(&self.root);
+        path_buf.push("events");
+        path_buf.push(system);
+        path_buf.push(name);
+        path_buf.push("format");
+
+        let format = File::open(path_buf)?;
+        let mut reader = BufReader::new(format);
+
+        Self::event_from_format(
+            system,
+            name,
+            &mut reader)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Write, BufWriter};
+
+    #[test]
+    fn it_works() {
+        let mut data = Vec::new();
+        let mut buffer = BufWriter::new(&mut data);
+
+        write!(buffer, "ID: {}\n", 123).unwrap();
+        write!(buffer, "format:\n").unwrap();
+        write!(buffer, "\tfield:unsigned char a;\toffset:0;\tsize:1;\tsigned:0;\n").unwrap();
+        write!(buffer, "\tfield:unsigned char b;\toffset:1;\tsize:1;\tsigned:0;\n").unwrap();
+        write!(buffer, "\tfield:unsigned char c;\toffset:2;\tsize:1;\tsigned:0;\n").unwrap();
+        write!(buffer, "\tfield:__dyn_loc char dyn_c[];\toffset:3;\tsize:4;\tsigned:0;\n").unwrap();
+        write!(buffer, "\tfield:__rel_loc char rel_c[];\toffset:7;\tsize:4;\tsigned:0;\n").unwrap();
+        buffer.flush().unwrap();
+        drop(buffer);
+
+        let data = data;
+        let mut reader = BufReader::new(data.as_slice());
+        let event = TraceFS::event_from_format("unit_test", "test", &mut reader).unwrap();
+
+        assert_eq!("unit_test/test", event.name());
+        assert_eq!(123, event.id());
+
+        let format = event.format();
+        let fields = format.fields();
+        assert_eq!(5, fields.len());
+
+        let a = format.get_field_ref("a").unwrap();
+        assert_eq!("a", fields[a].name);
+        assert_eq!("unsigned char", fields[a].type_name);
+        assert!(LocationType::Static == fields[a].location);
+        assert_eq!(0, fields[a].offset);
+        assert_eq!(1, fields[a].size);
+
+        let b = format.get_field_ref("b").unwrap();
+        assert_eq!("b", fields[b].name);
+        assert_eq!("unsigned char", fields[b].type_name);
+        assert!(LocationType::Static == fields[b].location);
+        assert_eq!(1, fields[b].offset);
+        assert_eq!(1, fields[b].size);
+
+        let c = format.get_field_ref("c").unwrap();
+        assert_eq!("c", fields[c].name);
+        assert_eq!("unsigned char", fields[c].type_name);
+        assert!(LocationType::Static == fields[c].location);
+        assert_eq!(2, fields[c].offset);
+        assert_eq!(1, fields[c].size);
+
+        let dyn_c = format.get_field_ref("dyn_c").unwrap();
+        assert_eq!("dyn_c", fields[dyn_c].name);
+        assert_eq!("char", fields[dyn_c].type_name);
+        assert_eq!(LocationType::DynAbsolute, fields[dyn_c].location);
+        assert_eq!(3, fields[dyn_c].offset);
+        assert_eq!(4, fields[dyn_c].size);
+
+        let rel_c = format.get_field_ref("rel_c").unwrap();
+        assert_eq!("rel_c", fields[rel_c].name);
+        assert_eq!("char", fields[rel_c].type_name);
+        assert_eq!(LocationType::DynRelative, fields[rel_c].location);
+        assert_eq!(7, fields[rel_c].offset);
+        assert_eq!(4, fields[rel_c].size);
+    }
+
+    #[test]
+    #[ignore]
+    fn tracefs_open_find() {
+        println!("NOTE: Requires sudo/SYS_CAP_ADMIN/tracefs access.");
+        let tracefs = TraceFS::open().unwrap();
+
+        let sched = tracefs.find_event("sched", "sched_waking").unwrap();
+        assert_eq!("sched/sched_waking", sched.name());
+
+        let format = sched.format();
+        let fields = format.fields();
+
+        /* This field always exists on sched_waking */
+        let comm_ref = format.get_field_ref("comm").unwrap();
+        let comm = &fields[comm_ref];
+        assert_eq!("comm", comm.name);
+        assert_eq!("char", comm.type_name);
+        assert_eq!(16, comm.size);
+    }
+}
