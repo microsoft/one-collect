@@ -5,9 +5,17 @@ pub fn criterion_benchmark(c: &mut Criterion) {
     let mut e = Event::new(1, "test".into());
     let format = e.format_mut();
 
-    format.add_field(EventField::new("1".into(), FieldType::Static, 0, 1));
-    format.add_field(EventField::new("2".into(), FieldType::Static, 1, 1));
-    format.add_field(EventField::new("3".into(), FieldType::Static, 2, 1));
+    format.add_field(
+        EventField::new("1".into(), "unsigned char".into(),
+        LocationType::Static, 0, 1));
+
+    format.add_field(
+        EventField::new("2".into(), "unsigned char".into(),
+        LocationType::Static, 1, 1));
+
+    format.add_field(
+        EventField::new("3".into(), "unsigned char".into(),
+        LocationType::Static, 2, 1));
 
     let first = format.get_field_ref("1").unwrap();
     let second = format.get_field_ref("2").unwrap();
