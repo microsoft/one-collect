@@ -249,35 +249,35 @@ mod tests {
         let fields = format.fields();
         assert_eq!(5, fields.len());
 
-        let a = format.get_field_ref("a").unwrap();
+        let a: usize = format.get_field_ref("a").unwrap().into();
         assert_eq!("a", fields[a].name);
         assert_eq!("unsigned char", fields[a].type_name);
         assert!(LocationType::Static == fields[a].location);
         assert_eq!(0, fields[a].offset);
         assert_eq!(1, fields[a].size);
 
-        let b = format.get_field_ref("b").unwrap();
+        let b: usize = format.get_field_ref("b").unwrap().into();
         assert_eq!("b", fields[b].name);
         assert_eq!("unsigned char", fields[b].type_name);
         assert!(LocationType::Static == fields[b].location);
         assert_eq!(1, fields[b].offset);
         assert_eq!(1, fields[b].size);
 
-        let c = format.get_field_ref("c").unwrap();
+        let c: usize = format.get_field_ref("c").unwrap().into();
         assert_eq!("c", fields[c].name);
         assert_eq!("unsigned char", fields[c].type_name);
         assert!(LocationType::Static == fields[c].location);
         assert_eq!(2, fields[c].offset);
         assert_eq!(1, fields[c].size);
 
-        let dyn_c = format.get_field_ref("dyn_c").unwrap();
+        let dyn_c: usize = format.get_field_ref("dyn_c").unwrap().into();
         assert_eq!("dyn_c", fields[dyn_c].name);
         assert_eq!("char", fields[dyn_c].type_name);
         assert_eq!(LocationType::DynAbsolute, fields[dyn_c].location);
         assert_eq!(3, fields[dyn_c].offset);
         assert_eq!(4, fields[dyn_c].size);
 
-        let rel_c = format.get_field_ref("rel_c").unwrap();
+        let rel_c: usize = format.get_field_ref("rel_c").unwrap().into();
         assert_eq!("rel_c", fields[rel_c].name);
         assert_eq!("char", fields[rel_c].type_name);
         assert_eq!(LocationType::DynRelative, fields[rel_c].location);
@@ -298,7 +298,7 @@ mod tests {
         let fields = format.fields();
 
         /* This field always exists on sched_waking */
-        let comm_ref = format.get_field_ref("comm").unwrap();
+        let comm_ref: usize = format.get_field_ref("comm").unwrap().into();
         let comm = &fields[comm_ref];
         assert_eq!("comm", comm.name);
         assert_eq!("char", comm.type_name);
