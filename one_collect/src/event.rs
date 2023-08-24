@@ -1,6 +1,122 @@
+use std::cell::Cell;
+use std::rc::Rc;
+
 static EMPTY: &[u8] = &[];
 
-type BoxedCallback = Box<dyn FnMut(&EventFormat, &[u8])>;
+type BoxedCallback = Box<dyn FnMut(&[u8], &EventFormat, &[u8])>;
+
+#[derive(Clone)]
+pub struct DataFieldRef(Rc<Cell<DataField>>);
+
+impl DataFieldRef {
+    pub fn new() -> Self {
+        DataFieldRef(Rc::new(Cell::new(DataField::default())))
+    }
+
+    pub fn get(&self) -> DataField {
+        (*self.0).get()
+    }
+
+    pub fn get_data<'a>(
+        &self,
+        data: &'a [u8]) -> &'a [u8] {
+        /* Get a copy of the field at this point in time */
+        let field = self.get();
+
+        /* Use it to slice the data */
+        &data[field.start() .. field.end()]
+    }
+
+    pub fn try_get_u64(
+        &self,
+        data: &[u8]) -> Option<u64> {
+        let slice = self.get_data(data);
+
+        if slice.len() < 8 { return None; }
+
+        match slice[0..8].try_into() {
+            Ok(slice) => Some(u64::from_ne_bytes(slice)),
+            Err(_) => None,
+        }
+    }
+
+    pub fn try_get_u32(
+        &self,
+        data: &[u8]) -> Option<u32> {
+        let slice = self.get_data(data);
+
+        if slice.len() < 4 { return None; }
+
+        match slice[0..4].try_into() {
+            Ok(slice) => Some(u32::from_ne_bytes(slice)),
+            Err(_) => None,
+        }
+    }
+
+    pub fn try_get_u16(
+        &self,
+        data: &[u8]) -> Option<u16> {
+        let slice = self.get_data(data);
+
+        if slice.len() < 2 { return None; }
+
+        match slice[0..2].try_into() {
+            Ok(slice) => Some(u16::from_ne_bytes(slice)),
+            Err(_) => None,
+        }
+    }
+
+    pub fn reset(&self) {
+        self.update(0, 0);
+    }
+
+    pub fn update(
+        &self,
+        start: usize,
+        len: usize) -> usize {
+        let end = start + len;
+        /* New copy of data for consumers to use */
+        self.0.set(DataField::new(start as u32, end as u32));
+        len
+    }
+}
+
+impl Default for DataFieldRef {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone)]
+#[derive(Copy)]
+#[derive(Default)]
+pub struct DataField(u32, u32);
+
+impl DataField {
+    fn new(
+        start: u32,
+        end: u32) -> Self {
+        Self(start, end)
+    }
+
+    fn start(&self) -> usize {
+        self.0 as usize
+    }
+
+    fn end(&self) -> usize {
+        self.1 as usize
+    }
+}
+
+#[derive(Clone)]
+#[derive(Copy)]
+pub struct EventFieldRef(usize);
+
+impl From<EventFieldRef> for usize {
+    fn from(val: EventFieldRef) -> Self {
+        val.0
+    }
+}
 
 #[derive(Debug)]
 #[derive(PartialEq)]
@@ -64,10 +180,10 @@ impl EventFormat {
 
     pub fn get_field_ref(
         &self,
-        name: &str) -> Option<usize> {
+        name: &str) -> Option<EventFieldRef> {
         for (i, field) in self.fields.iter().enumerate() {
             if field.name == name {
-                return Some(i);
+                return Some(EventFieldRef(i));
             }
         }
 
@@ -76,13 +192,15 @@ impl EventFormat {
 
     pub fn get_data<'a>(
             &self,
-            field_ref: usize,
+            field_ref: EventFieldRef,
             data: &'a [u8]) -> &'a [u8] {
-        if field_ref >= self.fields.len() {
+        let index: usize = field_ref.into();
+
+        if index >= self.fields.len() {
             return EMPTY;
         }
 
-        let field = &self.fields[field_ref];
+        let field = &self.fields[index];
 
         match &field.location {
             LocationType::Static => {
@@ -102,6 +220,48 @@ impl EventFormat {
             LocationType::DynAbsolute => {
                 todo!("Need to support absolute location");
             }
+        }
+    }
+
+    pub fn try_get_u64(
+        &self,
+        field_ref: EventFieldRef,
+        data: &[u8]) -> Option<u64> {
+        let slice = self.get_data(field_ref, data);
+
+        if slice.len() < 8 { return None; }
+
+        match slice[0..8].try_into() {
+            Ok(slice) => Some(u64::from_ne_bytes(slice)),
+            Err(_) => None,
+        }
+    }
+
+    pub fn try_get_u32(
+        &self,
+        field_ref: EventFieldRef,
+        data: &[u8]) -> Option<u32> {
+        let slice = self.get_data(field_ref, data);
+
+        if slice.len() < 4 { return None; }
+
+        match slice[0..4].try_into() {
+            Ok(slice) => Some(u32::from_ne_bytes(slice)),
+            Err(_) => None,
+        }
+    }
+
+    pub fn try_get_u16(
+        &self,
+        field_ref: EventFieldRef,
+        data: &[u8]) -> Option<u16> {
+        let slice = self.get_data(field_ref, data);
+
+        if slice.len() < 2 { return None; }
+
+        match slice[0..2].try_into() {
+            Ok(slice) => Some(u16::from_ne_bytes(slice)),
+            Err(_) => None,
         }
     }
 }
@@ -143,15 +303,16 @@ impl Event {
 
     pub fn set_callback(
         &mut self,
-        callback: impl FnMut(&EventFormat, &[u8]) + 'static) {
+        callback: impl FnMut(&[u8], &EventFormat, &[u8]) + 'static) {
         self.callback = Some(Box::new(callback));
     }
 
     pub fn process(
         &mut self,
-        data: &[u8]) {
+        full_data: &[u8],
+        event_data: &[u8]) {
         if let Some(callback) = &mut self.callback {
-            (callback)(&self.format, data);
+            (callback)(full_data, &self.format, event_data);
         }
     }
 }
@@ -189,10 +350,10 @@ mod tests {
         let second = format.get_field_ref("2").unwrap();
         let third = format.get_field_ref("3").unwrap();
 
-        e.set_callback(move |format, data| {
-            let a = format.get_data(first, data);
-            let b = format.get_data(second, data);
-            let c = format.get_data(third, data);
+        e.set_callback(move |_full_data, format, event_data| {
+            let a = format.get_data(first, event_data);
+            let b = format.get_data(second, event_data);
+            let c = format.get_data(third, event_data);
 
             assert!(a[0] == 1u8);
             assert!(b[0] == 2u8);
@@ -216,9 +377,30 @@ mod tests {
         let slice = data.as_slice();
 
         assert_eq!(count.load(Ordering::Relaxed), 0);
-        e.process(slice);
+        e.process(slice, slice);
         assert_eq!(count.load(Ordering::Relaxed), 1);
-        e.process(slice);
+        e.process(slice, slice);
         assert_eq!(count.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn data_refs() {
+        let field = DataFieldRef::new();
+        let field2 = field.clone();
+        let field3 = field2.clone();
+
+        field.update(0, 1);
+
+        let test = field.get();
+        assert_eq!(0, test.start());
+        assert_eq!(1, test.end());
+
+        let test = field2.get();
+        assert_eq!(0, test.start());
+        assert_eq!(1, test.end());
+
+        let test = field3.get();
+        assert_eq!(0, test.start());
+        assert_eq!(1, test.end());
     }
 }
