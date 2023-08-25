@@ -32,6 +32,14 @@ impl AncillaryData {
         self.cpu
     }
 
+    pub fn config(&self) -> u64 {
+        self.attributes.config
+    }
+
+    pub fn event_type(&self) -> u32 {
+        self.attributes.event_type
+    }
+
     pub fn sample_type(&self) -> u64 {
         self.attributes.sample_type
     }
@@ -169,7 +177,8 @@ pub struct PerfSession {
     read_timeout: Duration,
 
     /* Events */
-    profile_event: Event,
+    cpu_profile_event: Event,
+    cswitch_profile_event: Event,
 
     /* Ancillary data */
     ancillary: Writable<AncillaryData>,
@@ -199,7 +208,8 @@ impl PerfSession {
             read_timeout: Duration::from_millis(15),
 
             /* Events */
-            profile_event: Event::new(0, "__profile".into()),
+            cpu_profile_event: Event::new(0, "__cpu_profile".into()),
+            cswitch_profile_event: Event::new(0, "__cswitch_profile".into()),
 
             /* Ancillary data */
             ancillary: Writable::new(AncillaryData::default()),
@@ -210,8 +220,12 @@ impl PerfSession {
         self.ancillary.read_only()
     }
 
-    pub fn profile_event(&mut self) -> &mut Event {
-        &mut self.profile_event
+    pub fn cpu_profile_event(&mut self) -> &mut Event {
+        &mut self.cpu_profile_event
+    }
+
+    pub fn cswitch_profile_event(&mut self) -> &mut Event {
+        &mut self.cswitch_profile_event
     }
 
     pub fn ip_data_ref(&self) -> DataFieldRef {
@@ -422,11 +436,33 @@ impl PerfSession {
                                 event.process(full_data, event_data);
                             }
                         } else {
-                            /* TODO: Is it a profile or cswitch */
                             /* Non-event profile sample */
-                            self.profile_event.process(
-                                perf_data.raw_data,
-                                perf_data.raw_data);
+                            match perf_data.ancillary.event_type() {
+                                /* Software */
+                                PERF_TYPE_SOFTWARE => {
+                                    match perf_data.ancillary.config() {
+                                        /* CPU */
+                                        PERF_COUNT_SW_CPU_CLOCK => {
+                                            self.cpu_profile_event.process(
+                                                perf_data.raw_data,
+                                                perf_data.raw_data);
+                                        },
+
+                                        /* CSWITCH */
+                                        PERF_COUNT_SW_CONTEXT_SWITCHES => {
+                                            self.cswitch_profile_event.process(
+                                                perf_data.raw_data,
+                                                perf_data.raw_data);
+                                        },
+
+                                        /* Unsupported */
+                                        _ => { },
+                                    }
+                                },
+
+                                /* Unsupported */
+                                _ => { },
+                            }
                         }
                     },
 

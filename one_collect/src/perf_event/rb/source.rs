@@ -539,7 +539,7 @@ mod tests {
         let ancillary = session.ancillary_data();
 
         /* Setup event logic w/context */
-        let prof_event = session.profile_event();
+        let prof_event = session.cpu_profile_event();
 
         let atomic_time = Arc::new(AtomicUsize::new(0));
 
