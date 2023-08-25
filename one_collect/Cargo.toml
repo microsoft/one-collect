@@ -1,5 +1,6 @@
 [package]
 name = "one_collect"
+description = "Collect a system-wide performance trace."
 version = "0.1.0"
 edition = "2021"
 
@@ -7,6 +8,7 @@ edition = "2021"
 
 [dependencies]
 syscalls = { version = "0.6.13", features = ["x86_64", "arm"] }
+clap = { version = "4.3.21", features = ["cargo"] }
 
 [dev-dependencies]
 criterion = "0.3"
