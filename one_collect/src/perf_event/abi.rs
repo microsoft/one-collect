@@ -67,6 +67,95 @@ pub const PERF_FORMAT_ID: u64 = 1 << 2;
 pub const PERF_FORMAT_GROUP: u64 = 1 << 3;
 pub const PERF_FORMAT_LOST: u64 = 1 << 4;
 
+pub const FLAG_DISABLED: u64 = 1 << 0;
+pub const FLAG_INHERIT: u64 = 1 << 1;
+pub const FLAG_PINNED: u64 = 1 << 2;
+pub const FLAG_EXCLUSIVE: u64 = 1 << 3;
+pub const FLAG_EXCLUDE_USER: u64 = 1 << 4;
+pub const FLAG_EXCLUDE_KERNEL: u64 = 1 << 5;
+pub const FLAG_EXCLUDE_HV: u64 = 1 << 6;
+pub const FLAG_EXCLUDE_IDLE: u64 = 1 << 7;
+pub const FLAG_MMAP: u64 = 1 << 8;
+pub const FLAG_COMM: u64 = 1 << 9;
+pub const FLAG_FREQ: u64 = 1 << 10;
+pub const FLAG_INHERIT_STAT: u64 = 1 << 11;
+pub const FLAG_ENABLE_ON_EXEC: u64 = 1 << 12;
+pub const FLAG_TASK: u64 = 1 << 13;
+pub const FLAG_WATERMARK: u64 = 1 << 14;
+pub const FLAG_PRECISE_IP: u64 = 1 << 15;
+pub const FLAG_PRECISE_NO_SKID: u64 = 1 << 16;
+pub const FLAG_MMAP_DATA: u64 = 1 << 17;
+pub const FLAG_SAMPLE_ID_ALL: u64 = 1 << 18;
+pub const FLAG_EXCLUDE_HOST: u64 = 1 << 19;
+pub const FLAG_EXCLUDE_GUEST: u64 = 1 << 20;
+pub const FLAG_EXCLUDE_CALLCHAIN_KERNEL: u64 = 1 << 21;
+pub const FLAG_EXCLUDE_CALLCHAIN_USER: u64 = 1 << 22;
+pub const FLAG_MMAP2: u64 = 1 << 23;
+pub const FLAG_COMM_EXEC: u64 = 1 << 24;
+pub const FLAG_USE_CLOCKID: u64 = 1 << 25;
+pub const FLAG_CONTEXT_SWITCH: u64 = 1 << 26;
+pub const FLAG_WRITE_BACKWARD: u64 = 1 << 27;
+pub const FLAG_NAMESPACES: u64 = 1 << 28;
+pub const FLAG_KSYMBOL: u64 = 1 << 29;
+pub const FLAG_BPF_EVENT: u64 = 1 << 30;
+pub const FLAG_AUX_OUTPUT: u64 = 1 << 31;
+pub const FLAG_CGROUP: u64 = 1 << 32;
+pub const FLAG_TEXT_POKE: u64 = 1 << 33;
+
+pub const CLOCK_REALTIME: i32 = 0;
+pub const CLOCK_MONOTONIC_RAW: i32 = 4;
+
+pub const PERF_TYPE_HARDWARE: u32 = 0;
+pub const PERF_TYPE_SOFTWARE: u32 = 1;
+pub const PERF_TYPE_TRACEPOINT: u32 = 2;
+
+pub const PERF_EVENT_IOC_ENABLE: i32 = 9216;
+pub const PERF_EVENT_IOC_DISABLE: i32 = 9217;
+pub const PERF_EVENT_IOC_SET_OUTPUT: i32 = 9221;
+
+pub const PERF_COUNT_SW_CPU_CLOCK: u64 = 0;
+pub const PERF_COUNT_SW_CONTEXT_SWITCHES: u64 = 3;
+pub const PERF_COUNT_SW_DUMMY: u64 = 9;
+
+pub const PERF_ATTR_SIZE_VER4: u32 = 104;
+
+#[repr(C)]
+#[derive(Copy)]
+#[derive(Clone)]
+#[derive(Default)]
+pub struct perf_event_attr {
+   pub event_type: u32,
+   pub size: u32,
+   pub config: u64,
+   pub sample_period_freq: u64,
+   pub sample_type: u64,
+   pub read_format: u64,
+   pub flags: u64,
+   pub wakeup_events_watermark: u32,
+   pub bp_type: u32,
+   pub bp_addr: u64,
+   pub bp_len: u64,
+   pub branch_sample_type: u64,
+   pub sample_regs_user: u64,
+   pub sample_stack_user: u32,
+   pub clockid: i32,
+   pub sample_regs_intr: u64,
+}
+
+impl perf_event_attr {
+    pub fn has_format(
+        &self,
+        format: u64) -> bool {
+        (self.sample_type & format) == format
+    }
+
+    pub fn has_read_format(
+        &self,
+        format: u64) -> bool {
+        (self.read_format & format) == format
+    }
+}
+
 pub struct Header<'a> {
     pub entry_type: u32,
     pub misc: u16,

@@ -29,90 +29,6 @@ unsafe fn mb() {
     asm!("dsb sy");
 }
 
-/* All Archs */
-const FLAG_DISABLED: u64 = 1 << 0;
-const _FLAG_INHERIT: u64 = 1 << 1;
-const _FLAG_PINNED: u64 = 1 << 2;
-const _FLAG_EXCLUSIVE: u64 = 1 << 3;
-const _FLAG_EXCLUDE_USER: u64 = 1 << 4;
-const _FLAG_EXCLUDE_KERNEL: u64 = 1 << 5;
-const FLAG_EXCLUDE_HV: u64 = 1 << 6;
-const FLAG_EXCLUDE_IDLE: u64 = 1 << 7;
-const _FLAG_MMAP: u64 = 1 << 8;
-const FLAG_COMM: u64 = 1 << 9;
-const FLAG_FREQ: u64 = 1 << 10;
-const _FLAG_INHERIT_STAT: u64 = 1 << 11;
-const _FLAG_ENABLE_ON_EXEC: u64 = 1 << 12;
-const FLAG_TASK: u64 = 1 << 13;
-const _FLAG_WATERMARK: u64 = 1 << 14;
-const _FLAG_PRECISE_IP: u64 = 1 << 15;
-const _FLAG_PRECISE_NO_SKID: u64 = 1 << 16;
-const _FLAG_MMAP_DATA: u64 = 1 << 17;
-const FLAG_SAMPLE_ID_ALL: u64 = 1 << 18;
-const _FLAG_EXCLUDE_HOST: u64 = 1 << 19;
-const _FLAG_EXCLUDE_GUEST: u64 = 1 << 20;
-const FLAG_EXCLUDE_CALLCHAIN_KERNEL: u64 = 1 << 21;
-const FLAG_EXCLUDE_CALLCHAIN_USER: u64 = 1 << 22;
-const FLAG_MMAP2: u64 = 1 << 23;
-const FLAG_COMM_EXEC: u64 = 1 << 24;
-const FLAG_USE_CLOCKID: u64 = 1 << 25;
-const FLAG_CONTEXT_SWITCH: u64 = 1 << 26;
-const _FLAG_WRITE_BACKWARD: u64 = 1 << 27;
-const _FLAG_NAMESPACES: u64 = 1 << 28;
-const _FLAG_KSYMBOL: u64 = 1 << 29;
-const _FLAG_BPF_EVENT: u64 = 1 << 30;
-const _FLAG_AUX_OUTPUT: u64 = 1 << 31;
-const _FLAG_CGROUP: u64 = 1 << 32;
-const _FLAG_TEXT_POKE: u64 = 1 << 33;
-
-const _CLOCK_REALTIME: i32 = 0;
-const CLOCK_MONOTONIC_RAW: i32 = 4;
-
-const _PERF_TYPE_HARDWARE: u32 = 0;
-const PERF_TYPE_SOFTWARE: u32 = 1;
-const PERF_TYPE_TRACEPOINT: u32 = 2;
-
-const PERF_EVENT_IOC_ENABLE: i32 = 9216;
-const PERF_EVENT_IOC_DISABLE: i32 = 9217;
-const PERF_EVENT_IOC_SET_OUTPUT: i32 = 9221;
-
-const PERF_COUNT_SW_CPU_CLOCK: u64 = 0;
-const PERF_COUNT_SW_CONTEXT_SWITCHES: u64 = 3;
-const PERF_COUNT_SW_DUMMY: u64 = 9;
-
-const PERF_ATTR_SIZE_VER4: u32 = 104;
-
-#[repr(C)]
-#[derive(Copy)]
-#[derive(Clone)]
-#[derive(Default)]
-pub(crate) struct perf_event_attr {
-   event_type: u32,
-   size: u32,
-   config: u64,
-   sample_period_freq: u64,
-   sample_type: u64,
-   read_format: u64,
-   flags: u64,
-   wakeup_events_watermark: u32,
-   bp_type: u32,
-   bp_addr: u64,
-   bp_len: u64,
-   branch_sample_type: u64,
-   sample_regs_user: u64,
-   sample_stack_user: u32,
-   clockid: i32,
-   sample_regs_intr: u64,
-}
-
-impl perf_event_attr {
-    pub fn has_format(
-        &self,
-        format: u64) -> bool {
-        (self.sample_type & format) == format
-    }
-}
-
 pub struct RingBufOptions {
     attributes: perf_event_attr,
 }
@@ -657,6 +573,13 @@ impl CpuRingBuf {
         }
     }
 
+    pub fn ancillary(&self) -> AncillaryData {
+        AncillaryData {
+            cpu: self.cpu,
+            attributes: self.attributes.clone(),
+        }
+    }
+
     fn read_id(&self) -> IOResult<u64> {
         match &self.fd {
             Some(fd) => {
@@ -683,22 +606,6 @@ impl CpuRingBuf {
 
     pub fn sample_time_offset(&self) -> u16 {
         self.sample_time_offset
-    }
-
-    pub fn sample_format(&self) -> u64 {
-        self.attributes.sample_type
-    }
-
-    pub fn flags(&self) -> u64 {
-        self.attributes.flags
-    }
-
-    pub fn user_regs(&self) -> u64 {
-        self.attributes.sample_regs_user
-    }
-
-    pub fn read_format(&self) -> u64 {
-        self.attributes.read_format
     }
 
     pub fn id(&self) -> Option<u64> {

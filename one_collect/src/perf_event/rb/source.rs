@@ -421,11 +421,7 @@ impl PerfDataSource for RingBufDataSource {
         let cpu = self.oldest_cpu.unwrap();
         let reader = &self.readers[cpu];
         let cursor = &mut self.cursors[cpu];
-
-        let sample_format: u64;
-        let flags: u64;
-        let user_regs: u64;
-        let read_format: u64;
+        let ancillary: AncillaryData;
 
         /* Ensure current entry is still under the limit */
         match Self::read_time(
@@ -441,11 +437,8 @@ impl PerfDataSource for RingBufDataSource {
                     }
                 }
 
-                /* Under limit, save off format details */
-                sample_format = rb.sample_format();
-                flags = rb.flags();
-                user_regs = rb.user_regs();
-                read_format = rb.read_format();
+                /* Under limit, save off ancillary details */
+                ancillary = rb.ancillary();
             },
             /* No data left, stop */
             None => {
@@ -459,11 +452,7 @@ impl PerfDataSource for RingBufDataSource {
             &mut self.temp) {
             Ok(raw_data) => {
                 let perf_data = PerfData {
-                    cpu: cpu as u32,
-                    sample_format,
-                    flags,
-                    user_regs,
-                    read_format,
+                    ancillary,
                     raw_data,
                 };
 
@@ -545,8 +534,11 @@ mod tests {
 
         let callback_samples = samples.clone();
 
+        /* Context from session for callback */
         let time_data = session.time_data_ref();
+        let ancillary = session.ancillary_data();
 
+        /* Setup event logic w/context */
         let prof_event = session.profile_event();
 
         let atomic_time = Arc::new(AtomicUsize::new(0));
@@ -554,6 +546,11 @@ mod tests {
         prof_event.set_callback(move |full_data,_format,_event_data| {
             let time = time_data.try_get_u64(full_data).unwrap() as usize;
             let prev = atomic_time.load(Ordering::Relaxed);
+            let mut cpu: u32 = 0;
+
+            ancillary.read(|ancillary| {
+                cpu = ancillary.cpu();
+            });
 
             /* Ensure in order */
             assert!(time >= prev);
