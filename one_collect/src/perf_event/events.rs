@@ -78,6 +78,41 @@ pub fn exit() -> Event {
     event
 }
 
+pub fn fork() -> Event {
+    let mut event = Event::new(0, "__fork".into());
+    let mut offset: usize = 0;
+    let mut len: usize;
+    let format = event.format_mut();
+
+    len = 4;
+    format.add_field(EventField::new(
+        "pid".into(), "u32".into(),
+        LocationType::Static, offset, len));
+    offset += len;
+
+    format.add_field(EventField::new(
+        "ppid".into(), "u32".into(),
+        LocationType::Static, offset, len));
+    offset += len;
+
+    format.add_field(EventField::new(
+        "tid".into(), "u32".into(),
+        LocationType::Static, offset, len));
+    offset += len;
+
+    format.add_field(EventField::new(
+        "ptid".into(), "u32".into(),
+        LocationType::Static, offset, len));
+    offset += len;
+
+    len = 8;
+    format.add_field(EventField::new(
+        "time".into(), "u64".into(),
+        LocationType::Static, offset, len));
+
+    event
+}
+
 pub fn mmap() -> Event {
     let mut event = Event::new(0, "__mmap".into());
     let mut offset: usize = 0;

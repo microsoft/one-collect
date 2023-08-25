@@ -183,6 +183,7 @@ pub struct PerfSession {
     lost_event: Event,
     comm_event: Event,
     exit_event: Event,
+    fork_event: Event,
     mmap_event: Event,
 
     /* Ancillary data */
@@ -218,6 +219,7 @@ impl PerfSession {
             lost_event: events::lost(),
             comm_event: events::comm(),
             exit_event: events::exit(),
+            fork_event: events::fork(),
             mmap_event: events::mmap(),
 
             /* Ancillary data */
@@ -247,6 +249,10 @@ impl PerfSession {
 
     pub fn exit_event(&mut self) -> &mut Event {
         &mut self.exit_event
+    }
+
+    pub fn fork_event(&mut self) -> &mut Event {
+        &mut self.fork_event
     }
 
     pub fn mmap_event(&mut self) -> &mut Event {
@@ -511,6 +517,14 @@ impl PerfSession {
                         let offset = abi::Header::data_offset();
 
                         self.exit_event.process(
+                            perf_data.raw_data,
+                            &perf_data.raw_data[offset..]);
+                    },
+
+                    abi::PERF_RECORD_FORK => {
+                        let offset = abi::Header::data_offset();
+
+                        self.fork_event.process(
                             perf_data.raw_data,
                             &perf_data.raw_data[offset..]);
                     },

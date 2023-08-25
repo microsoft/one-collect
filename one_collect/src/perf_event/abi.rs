@@ -61,6 +61,7 @@ pub const PERF_SAMPLE_CGROUP: u64 = 1 << 21;
 pub const PERF_RECORD_LOST: u32 = 2;
 pub const PERF_RECORD_COMM: u32 = 3;
 pub const PERF_RECORD_EXIT: u32 = 4;
+pub const PERF_RECORD_FORK: u32 = 7;
 pub const PERF_RECORD_SAMPLE: u32 = 9;
 pub const PERF_RECORD_MMAP2: u32 = 10;
 
