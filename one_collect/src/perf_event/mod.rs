@@ -5,6 +5,16 @@ use std::collections::HashMap;
 use crate::event::*;
 
 pub mod abi;
+pub mod rb;
+
+pub type IOResult<T> = std::io::Result<T>;
+pub type IOError = std::io::Error;
+
+pub fn io_error(message: &str) -> IOError {
+    IOError::new(
+        std::io::ErrorKind::Other,
+        message)
+}
 
 static EMPTY: &[u8] = &[];
 
@@ -12,21 +22,25 @@ pub struct PerfData<'a> {
     pub cpu: u32,
     pub sample_format: u64,
     pub read_format: u64,
+    pub flags: u64,
+    pub user_regs: u64,
     pub raw_data: &'a [u8],
 }
 
-impl Default for PerfData<'_> {
+impl<'a> Default for PerfData<'a> {
     fn default() -> Self {
         Self {
             cpu: Default::default(),
             sample_format: 0,
             read_format: 0,
+            flags: 0,
+            user_regs: 0,
             raw_data: EMPTY,
         }
     }
 }
 
-impl PerfData<'_> {
+impl<'a> PerfData<'a> {
     fn has_format(
         &self,
         format: u64) -> bool {
@@ -91,9 +105,21 @@ impl PerfData<'_> {
 }
 
 pub trait PerfDataSource {
+    fn enable(&mut self) -> IOResult<()>;
+
+    fn disable(&mut self) -> IOResult<()>;
+
+    fn add_event(
+        &mut self,
+        event: &Event) -> IOResult<()>;
+
+    fn begin_reading(&mut self);
+
     fn read(
         &mut self,
         timeout: Duration) -> Option<PerfData<'_>>;
+
+    fn end_reading(&mut self);
 
     fn more(&self) -> bool;
 }
@@ -113,6 +139,8 @@ pub struct PerfSession {
     callchain_field: DataFieldRef,
     raw_field: DataFieldRef,
     read_timeout: Duration,
+
+    profile_event: Event,
 }
 
 impl PerfSession {
@@ -132,8 +160,13 @@ impl PerfSession {
             read_field: DataFieldRef::new(),
             callchain_field: DataFieldRef::new(),
             raw_field: DataFieldRef::new(),
-            read_timeout: Duration::from_millis(100),
+            read_timeout: Duration::from_millis(15),
+            profile_event: Event::new(0, "__profile".into()),
         }
+    }
+
+    pub fn profile_event(&mut self) -> &mut Event {
+        &mut self.profile_event
     }
 
     pub fn ip_data_ref(&self) -> DataFieldRef {
@@ -188,12 +221,24 @@ impl PerfSession {
 
     pub fn add_event(
         &mut self,
-        event: Event) {
+        event: Event) -> IOResult<()> {
+        self.source.add_event(&event)?;
+
         self.events.insert(event.id(), event);
+
+        Ok(())
+    }
+
+    pub fn enable(&mut self) -> IOResult<()> {
+        self.source.enable()
+    }
+
+    pub fn disable(&mut self) -> IOResult<()> {
+        self.source.disable()
     }
 
     pub fn parse_all(&mut self) -> Result<(), TryFromSliceError> {
-        self.parse_until(|| true )
+        self.parse_until(|| false)
     }
 
     pub fn parse_for_duration(
@@ -210,13 +255,23 @@ impl PerfSession {
         loop {
             let mut i: u32 = 0;
 
-            while let Some(perf_data) = self.source.read(self.read_timeout) {
+            self.source.begin_reading();
+
+            while let Some(perf_data) = self.source.read(
+                self.read_timeout) {
                 let header = abi::Header::from_slice(perf_data.raw_data)?;
 
                 match header.entry_type {
                     abi::PERF_RECORD_SAMPLE => {
                         let mut offset: usize = abi::Header::data_offset();
                         let mut id: Option<usize> = None;
+
+                        /* PERF_SAMPLE_IDENTIFER */
+                        if perf_data.has_format(abi::PERF_SAMPLE_IDENTIFIER) {
+                            offset += self.id_field.update(offset, 8);
+                        } else {
+                            self.id_field.reset();
+                        }
 
                         /* PERF_SAMPLE_IP */
                         if perf_data.has_format(abi::PERF_SAMPLE_IP) {
@@ -317,6 +372,12 @@ impl PerfSession {
 
                                 event.process(full_data, event_data);
                             }
+                        } else {
+                            /* TODO: Is it a profile or cswitch */
+                            /* Non-event profile sample */
+                            self.profile_event.process(
+                                perf_data.raw_data,
+                                perf_data.raw_data);
                         }
                     },
 
@@ -332,6 +393,8 @@ impl PerfSession {
 
                 i += 1;
             }
+
+            self.source.end_reading();
 
             if should_stop() || !self.source.more() {
                 break;
@@ -387,9 +450,19 @@ mod tests {
     }
 
     impl PerfDataSource for MockData {
-        fn read<'a>(
-            &'a mut self,
-            _timeout: Duration) -> Option<PerfData<'a>> {
+        fn enable(&mut self) -> IOResult<()> { Ok(()) }
+
+        fn disable(&mut self) -> IOResult<()> { Ok(()) }
+
+        fn add_event(
+            &mut self,
+            _event: &Event) -> IOResult<()> { Ok(()) }
+
+        fn begin_reading(&mut self) { }
+
+        fn read(
+            &mut self,
+            _timeout: Duration) -> Option<PerfData<'_>> {
             if !self.more() {
                 return None;
             }
@@ -405,9 +478,13 @@ mod tests {
                 cpu: 0,
                 sample_format: self.sample_format,
                 read_format: self.read_format,
+                flags: 0,
+                user_regs: 0,
                 raw_data: &self.data[start .. end],
             })
         }
+
+        fn end_reading(&mut self) { }
 
         fn more(&self) -> bool {
             self.index < self.entries.len()
@@ -453,7 +530,7 @@ mod tests {
             count.fetch_add(1, Ordering::Relaxed);
         });
 
-        session.add_event(e);
+        session.add_event(e).unwrap();
     }
 
     #[test]
@@ -559,7 +636,7 @@ mod tests {
         });
 
         /* Add the event to the session now that we setup the rules */
-        session.add_event(e);
+        session.add_event(e).unwrap();
 
         /* Parse until more() returns false in the source (MockData) */
         session.parse_all().unwrap();

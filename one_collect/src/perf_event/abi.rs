@@ -1,6 +1,7 @@
 use std::array::TryFromSliceError;
 
 // Current possible sample layout:
+// u64    id;          /* if PERF_SAMPLE_IDENTIFIER */
 // u64    ip;          /* if PERF_SAMPLE_IP */
 // u32    pid, tid;    /* if PERF_SAMPLE_TID */
 // u64    time;        /* if PERF_SAMPLE_TIME */
@@ -49,9 +50,11 @@ pub const PERF_SAMPLE_REGS_USER: u64 = 1 << 12;
 pub const PERF_SAMPLE_STACK_USER: u64 = 1 << 13;
 pub const PERF_SAMPLE_WEIGHT: u64 = 1 << 14;
 pub const PERF_SAMPLE_DATA_SRC: u64 = 1 << 15;
+pub const PERF_SAMPLE_IDENTIFIER: u64 = 1 << 16;
 pub const PERF_SAMPLE_TRANSACTION: u64 = 1 << 17;
 pub const PERF_SAMPLE_REGS_INTR: u64 = 1 << 18;
 pub const PERF_SAMPLE_PHYS_ADDR: u64 = 1 << 19;
+pub const PERF_SAMPLE_AUX: u64 = 1 << 20;
 pub const PERF_SAMPLE_CGROUP: u64 = 1 << 21;
 
 // Supported record types (header.entry_type)
