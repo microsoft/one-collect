@@ -59,6 +59,7 @@ pub const PERF_SAMPLE_CGROUP: u64 = 1 << 21;
 
 // Supported record types (header.entry_type)
 pub const PERF_RECORD_SAMPLE: u32 = 9;
+pub const PERF_RECORD_MMAP2: u32 = 10;
 
 // Known read formats
 pub const PERF_FORMAT_TOTAL_TIME_ENABLED: u64 = 1 << 0;

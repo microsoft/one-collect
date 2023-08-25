@@ -7,6 +7,7 @@ use crate::event::*;
 
 pub mod abi;
 pub mod rb;
+mod events;
 
 use abi::*;
 
@@ -179,6 +180,7 @@ pub struct PerfSession {
     /* Events */
     cpu_profile_event: Event,
     cswitch_profile_event: Event,
+    mmap_event: Event,
 
     /* Ancillary data */
     ancillary: Writable<AncillaryData>,
@@ -210,6 +212,7 @@ impl PerfSession {
             /* Events */
             cpu_profile_event: Event::new(0, "__cpu_profile".into()),
             cswitch_profile_event: Event::new(0, "__cswitch_profile".into()),
+            mmap_event: events::mmap(),
 
             /* Ancillary data */
             ancillary: Writable::new(AncillaryData::default()),
@@ -226,6 +229,10 @@ impl PerfSession {
 
     pub fn cswitch_profile_event(&mut self) -> &mut Event {
         &mut self.cswitch_profile_event
+    }
+
+    pub fn mmap_event(&mut self) -> &mut Event {
+        &mut self.mmap_event
     }
 
     pub fn ip_data_ref(&self) -> DataFieldRef {
@@ -464,6 +471,14 @@ impl PerfSession {
                                 _ => { },
                             }
                         }
+                    },
+
+                    abi::PERF_RECORD_MMAP2 => {
+                        let offset = abi::Header::data_offset();
+
+                        self.mmap_event.process(
+                            perf_data.raw_data,
+                            &perf_data.raw_data[offset..]);
                     },
 
                     _ => {

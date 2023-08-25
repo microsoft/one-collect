@@ -199,6 +199,7 @@ impl From<EventFieldRef> for usize {
 #[derive(PartialEq)]
 pub enum LocationType {
     Static,
+    StaticString,
     DynRelative,
     DynAbsolute,
 }
@@ -288,6 +289,21 @@ impl EventFormat {
                 }
 
                 &data[field.offset .. end]
+            },
+
+            LocationType::StaticString => {
+                let slice = &data[field.offset..];
+                let mut len = 0usize;
+                
+                for b in slice {
+                    if *b == 0 {
+                        break;
+                    }
+
+                    len += 1;
+                }
+
+                &slice[0..len]
             },
 
             LocationType::DynRelative => {
