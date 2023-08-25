@@ -185,3 +185,17 @@ pub fn mmap() -> Event {
 
     event
 }
+
+pub fn lost_samples() -> Event {
+    let mut event = Event::new(0, "__lost_samples".into());
+    let offset: usize = 0;
+    let len: usize;
+    let format = event.format_mut();
+
+    len = 8;
+    format.add_field(EventField::new(
+        "lost".into(), "u64".into(),
+        LocationType::Static, offset, len));
+
+    event
+}
