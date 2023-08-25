@@ -19,6 +19,30 @@ pub fn lost() -> Event {
     event
 }
 
+pub fn comm() -> Event {
+    let mut event = Event::new(0, "__comm".into());
+    let mut offset: usize = 0;
+    let len: usize;
+    let format = event.format_mut();
+
+    len = 4;
+    format.add_field(EventField::new(
+        "pid".into(), "u32".into(),
+        LocationType::Static, offset, len));
+    offset += len;
+
+    format.add_field(EventField::new(
+        "tid".into(), "u32".into(),
+        LocationType::Static, offset, len));
+    offset += len;
+
+    format.add_field(EventField::new(
+        "comm[]".into(), "char".into(),
+        LocationType::StaticString, offset, 0));
+
+    event
+}
+
 pub fn mmap() -> Event {
     let mut event = Event::new(0, "__mmap".into());
     let mut offset: usize = 0;
