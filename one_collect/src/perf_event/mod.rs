@@ -180,6 +180,7 @@ pub struct PerfSession {
     /* Events */
     cpu_profile_event: Event,
     cswitch_profile_event: Event,
+    lost_event: Event,
     mmap_event: Event,
 
     /* Ancillary data */
@@ -212,6 +213,7 @@ impl PerfSession {
             /* Events */
             cpu_profile_event: Event::new(0, "__cpu_profile".into()),
             cswitch_profile_event: Event::new(0, "__cswitch_profile".into()),
+            lost_event: events::lost(),
             mmap_event: events::mmap(),
 
             /* Ancillary data */
@@ -229,6 +231,10 @@ impl PerfSession {
 
     pub fn cswitch_profile_event(&mut self) -> &mut Event {
         &mut self.cswitch_profile_event
+    }
+
+    pub fn lost_event(&mut self) -> &mut Event {
+        &mut self.lost_event
     }
 
     pub fn mmap_event(&mut self) -> &mut Event {
@@ -471,6 +477,14 @@ impl PerfSession {
                                 _ => { },
                             }
                         }
+                    },
+
+                    abi::PERF_RECORD_LOST => {
+                        let offset = abi::Header::data_offset();
+
+                        self.lost_event.process(
+                            perf_data.raw_data,
+                            &perf_data.raw_data[offset..]);
                     },
 
                     abi::PERF_RECORD_MMAP2 => {

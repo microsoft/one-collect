@@ -1,5 +1,24 @@
 use super::{EventField, Event, LocationType};
 
+pub fn lost() -> Event {
+    let mut event = Event::new(0, "__lost".into());
+    let mut offset: usize = 0;
+    let len: usize;
+    let format = event.format_mut();
+
+    len = 8;
+    format.add_field(EventField::new(
+        "id".into(), "u64".into(),
+        LocationType::Static, offset, len));
+    offset += len;
+
+    format.add_field(EventField::new(
+        "lost".into(), "u64".into(),
+        LocationType::Static, offset, len));
+
+    event
+}
+
 pub fn mmap() -> Event {
     let mut event = Event::new(0, "__mmap".into());
     let mut offset: usize = 0;

@@ -58,6 +58,7 @@ pub const PERF_SAMPLE_AUX: u64 = 1 << 20;
 pub const PERF_SAMPLE_CGROUP: u64 = 1 << 21;
 
 // Supported record types (header.entry_type)
+pub const PERF_RECORD_LOST: u32 = 2;
 pub const PERF_RECORD_SAMPLE: u32 = 9;
 pub const PERF_RECORD_MMAP2: u32 = 10;
 
