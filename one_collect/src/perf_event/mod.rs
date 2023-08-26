@@ -186,6 +186,7 @@ pub struct PerfSession {
     fork_event: Event,
     mmap_event: Event,
     lost_samples_event: Event,
+    cswitch_event: Event,
 
     /* Ancillary data */
     ancillary: Writable<AncillaryData>,
@@ -223,6 +224,7 @@ impl PerfSession {
             fork_event: events::fork(),
             mmap_event: events::mmap(),
             lost_samples_event: events::lost_samples(),
+            cswitch_event: events::cswitch(),
 
             /* Ancillary data */
             ancillary: Writable::new(AncillaryData::default()),
@@ -263,6 +265,10 @@ impl PerfSession {
 
     pub fn lost_samples_event(&mut self) -> &mut Event {
         &mut self.lost_samples_event
+    }
+
+    pub fn cswitch_event(&mut self) -> &mut Event {
+        &mut self.cswitch_event
     }
 
     pub fn ip_data_ref(&self) -> DataFieldRef {
@@ -547,6 +553,14 @@ impl PerfSession {
                         let offset = abi::Header::data_offset();
 
                         self.lost_samples_event.process(
+                            perf_data.raw_data,
+                            &perf_data.raw_data[offset..]);
+                    },
+
+                    abi::PERF_RECORD_SWITCH_CPU_WIDE => {
+                        let offset = abi::Header::data_offset();
+
+                        self.cswitch_event.process(
                             perf_data.raw_data,
                             &perf_data.raw_data[offset..]);
                     },

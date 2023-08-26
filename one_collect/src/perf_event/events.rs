@@ -199,3 +199,22 @@ pub fn lost_samples() -> Event {
 
     event
 }
+
+pub fn cswitch() -> Event {
+    let mut event = Event::new(0, "__cswitch".into());
+    let mut offset: usize = 0;
+    let len: usize;
+    let format = event.format_mut();
+
+    len = 4;
+    format.add_field(EventField::new(
+        "next_prev_pid".into(), "u32".into(),
+        LocationType::Static, offset, len));
+    offset += len;
+
+    format.add_field(EventField::new(
+        "next_prev_tid".into(), "u32".into(),
+        LocationType::Static, offset, len));
+
+    event
+}
