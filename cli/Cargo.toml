@@ -1,5 +1,5 @@
 [package]
-name = "one_collect"
+name = "one_collect_cli"
 description = "Collect a system-wide performance trace."
 version = "0.1.0"
 edition = "2021"
@@ -7,11 +7,5 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-syscalls = { version = "0.6.13", features = ["x86_64", "arm"] }
-
-[dev-dependencies]
-criterion = "0.3"
-
-[[bench]]
-name = "event"
-harness = false
+clap = { version = "4.3.21", features = ["cargo"] }
+one_collect = { path = "../one_collect" }

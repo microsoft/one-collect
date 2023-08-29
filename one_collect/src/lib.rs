@@ -1,4 +1,3 @@
-pub mod commandline;
 pub mod configuration;
 pub mod event;
 pub mod tracefs;

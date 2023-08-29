@@ -1,7 +1,7 @@
 use clap::{Arg, command, Command};
-use crate::configuration::{OneCollectSession, SessionStorage, FileSessionArgs};
+use one_collect::configuration::{OneCollectSession, SessionStorage, FileSessionArgs};
 
-pub struct CommandLineParser{
+pub (crate) struct CommandLineParser{
     cmd : Command,
 }
 
