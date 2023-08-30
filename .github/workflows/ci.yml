@@ -16,11 +16,17 @@ jobs:
 
     steps:
     - uses: actions/checkout@v3
-    - name: Build
+    - name: 'one_collect: Build'
       working-directory: one_collect
       run: cargo build --verbose
-    - name: Run tests
+    - name: 'one_collect: Run tests'
       working-directory: one_collect
+      run: cargo test --verbose
+    - name: 'cli: Build'
+      working-directory: cli
+      run: cargo build --verbose
+    - name: 'cli: Run tests'
+      working-directory: cli
       run: cargo test --verbose
 
   build_release:
@@ -29,11 +35,17 @@ jobs:
 
     steps:
     - uses: actions/checkout@v3
-    - name: Build
+    - name: 'one_collect: Build'
       working-directory: one_collect
       run: cargo build --release --verbose
-    - name: Run tests
+    - name: 'one_collect: Run tests'
       working-directory: one_collect
+      run: cargo test --release --verbose
+    - name: 'cli: Build'
+      working-directory: cli
+      run: cargo build --release --verbose
+    - name: 'cli: Run tests'
+      working-directory: cli
       run: cargo test --release --verbose
 
   bench:
