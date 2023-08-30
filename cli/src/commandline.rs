@@ -1,5 +1,5 @@
 use clap::{Arg, command, Command};
-use one_collect::configuration::{OneCollectSession, SessionStorage, FileSessionArgs};
+use one_collect::session::{SessionBuilder, SessionEgress, FileSessionEgress};
 
 pub (crate) struct CommandLineParser{
     cmd : Command,
@@ -28,22 +28,23 @@ impl CommandLineParser{
         let matches = self.cmd.get_matches();
 
         if let Some(_subcommand) = matches.subcommand_matches("collect") {
-            let config;
+            let builder;
             if let Some(path) = _subcommand.get_one::<String>("path") {
-                config = OneCollectSession::new(SessionStorage::File(FileSessionArgs::new(path)));
+                builder = SessionBuilder::new(SessionEgress::File(FileSessionEgress::new(path)));
             }
             else {
-                config = OneCollectSession::new(SessionStorage::InMemory);
+                builder = SessionBuilder::new(SessionEgress::Live);
             }
 
-            match config.get_storage() {
-                SessionStorage::File(args) => {
-                    println!("[FileSession] path = {}", args.get_path());
+            let session = builder.build();
+            match session.get_egress_info() {
+                SessionEgress::File(f) => {
+                    println!("Requested session egress - file: {}", f.get_path());
                 }
-                SessionStorage::InMemory => {
-                    println!("[InMemorySession] no path");
+                SessionEgress::Live => {
+                    println!("Requested session egress - live");
                 }
             }
-        };
+        }
     }
 }
