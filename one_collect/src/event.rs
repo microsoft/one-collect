@@ -47,6 +47,15 @@ impl<T> SharedData<T, DataOwner> {
     }
 }
 
+impl<T> Clone for SharedData<T, DataOwner> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            state: self.state,
+        }
+    }
+}
+
 impl<T: Copy> SharedData<T, DataOwner> {
     pub fn set(
         &self,
