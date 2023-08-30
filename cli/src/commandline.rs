@@ -48,3 +48,15 @@ impl CommandLineParser{
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::commandline::CommandLineParser;
+
+    // Most testing can be done via a call to debug_assert() per
+    // https://docs.rs/clap/latest/clap/_tutorial/index.html#testing
+    #[test]
+    fn verify_cmd() {
+        CommandLineParser::build().cmd.debug_assert();
+    }
+}
