@@ -173,7 +173,7 @@ impl RingBufDataSource {
          * redirect them to the kernel leader buffers on the
          * same CPU.
          */
-        for i in 0..common_buf.cpu_count() {
+        for i in 0..cpu_count() {
             let leader_id = leader_ids[&i];
             let leader = &ring_bufs[&leader_id];
             let mut cpu_buf = common_buf.for_cpu(i);
@@ -203,7 +203,7 @@ impl RingBufDataSource {
             .build();
 
         /* Build the kernel only dummy rings first */
-        for i in 0..common.cpu_count() {
+        for i in 0..cpu_count() {
             let mut cpu_buf = common.for_cpu(i);
 
             cpu_buf.open(self.target_pid)?;
