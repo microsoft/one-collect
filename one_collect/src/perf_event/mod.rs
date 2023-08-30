@@ -707,7 +707,7 @@ mod tests {
         let second = format.get_field_ref("2").unwrap();
         let third = format.get_field_ref("3").unwrap();
 
-        e.set_callback(move |_full_data, format, event_data| {
+        e.add_callback(move |_full_data, format, event_data| {
             let a = format.get_data(first, event_data);
             let b = format.get_data(second, event_data);
             let c = format.get_data(third, event_data);
@@ -814,7 +814,7 @@ mod tests {
         let magic_ref = format.get_field_ref("magic").unwrap();
 
         /* Parse upon being read with this code */
-        e.set_callback(move |full_data, format, event_data| {
+        e.add_callback(move |full_data, format, event_data| {
             let read_time = time_data.try_get_u64(full_data).unwrap();
             let read_magic = format.try_get_u64(magic_ref, event_data).unwrap();
 

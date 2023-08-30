@@ -21,7 +21,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
     let second = format.get_field_ref("2").unwrap();
     let third = format.get_field_ref("3").unwrap();
 
-    e.set_callback(move |_full_data, format, data| {
+    e.add_callback(move |_full_data, format, data| {
         let a = format.get_data(first, data);
         let b = format.get_data(second, data);
         let c = format.get_data(third, data);

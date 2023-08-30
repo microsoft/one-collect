@@ -285,7 +285,7 @@ impl EventFormat {
 pub struct Event {
     id: usize,
     name: String,
-    callback: Option<BoxedCallback>,
+    callbacks: Vec<BoxedCallback>,
     format: EventFormat,
 }
 
@@ -296,7 +296,7 @@ impl Event {
         Self {
             id,
             name,
-            callback: None,
+            callbacks: Vec::new(),
             format: EventFormat::new(),
         }
     }
@@ -317,17 +317,17 @@ impl Event {
         &self.format
     }
 
-    pub fn set_callback(
+    pub fn add_callback(
         &mut self,
         callback: impl FnMut(&[u8], &EventFormat, &[u8]) + 'static) {
-        self.callback = Some(Box::new(callback));
+        self.callbacks.push(Box::new(callback));
     }
 
     pub fn process(
         &mut self,
         full_data: &[u8],
         event_data: &[u8]) {
-        if let Some(callback) = &mut self.callback {
+        for callback in &mut self.callbacks {
             (callback)(full_data, &self.format, event_data);
         }
     }
@@ -367,7 +367,7 @@ mod tests {
         let second = format.get_field_ref("2").unwrap();
         let third = format.get_field_ref("3").unwrap();
 
-        e.set_callback(move |_full_data, format, event_data| {
+        e.add_callback(move |_full_data, format, event_data| {
             let a = format.get_data(first, event_data);
             let b = format.get_data(second, event_data);
             let c = format.get_data(third, event_data);
