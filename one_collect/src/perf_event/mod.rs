@@ -3,6 +3,7 @@ use std::array::TryFromSliceError;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use crate::sharing::*;
 use crate::event::*;
 
 pub mod abi;
@@ -19,6 +20,10 @@ pub fn io_error(message: &str) -> IOError {
         std::io::ErrorKind::Other,
         message)
 }
+
+pub use rb::source::RingBufSessionBuilder;
+pub use rb::{RingBufOptions, RingBufBuilder};
+pub use rb::cpu_count;
 
 static EMPTY: &[u8] = &[];
 
