@@ -1,11 +1,14 @@
 use std::time::Duration;
 use std::array::TryFromSliceError;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use crate::event::*;
 
 pub mod abi;
 pub mod rb;
+
+use abi::*;
 
 pub type IOResult<T> = std::io::Result<T>;
 pub type IOError = std::io::Error;
@@ -18,23 +21,44 @@ pub fn io_error(message: &str) -> IOError {
 
 static EMPTY: &[u8] = &[];
 
+#[derive(Default)]
+pub struct AncillaryData {
+    cpu: u32,
+    attributes: Rc<perf_event_attr>,
+}
+
+impl AncillaryData {
+    pub fn cpu(&self) -> u32 {
+        self.cpu
+    }
+
+    pub fn sample_type(&self) -> u64 {
+        self.attributes.sample_type
+    }
+
+    pub fn read_format(&self) -> u64 {
+        self.attributes.read_format
+    }
+}
+
+impl Clone for AncillaryData {
+    fn clone(&self) -> Self {
+        Self {
+            cpu: self.cpu,
+            attributes: self.attributes.clone(),
+        }
+    }
+}
+
 pub struct PerfData<'a> {
-    pub cpu: u32,
-    pub sample_format: u64,
-    pub read_format: u64,
-    pub flags: u64,
-    pub user_regs: u64,
+    pub ancillary: AncillaryData,
     pub raw_data: &'a [u8],
 }
 
 impl<'a> Default for PerfData<'a> {
     fn default() -> Self {
         Self {
-            cpu: Default::default(),
-            sample_format: 0,
-            read_format: 0,
-            flags: 0,
-            user_regs: 0,
+            ancillary: AncillaryData::default(),
             raw_data: EMPTY,
         }
     }
@@ -44,13 +68,13 @@ impl<'a> PerfData<'a> {
     fn has_format(
         &self,
         format: u64) -> bool {
-        (self.sample_format & format) == format
+        self.ancillary.attributes.has_format(format)
     }
 
     fn has_read_format(
         &self,
         format: u64) -> bool {
-        (self.read_format & format) == format
+        self.ancillary.attributes.has_read_format(format)
     }
 
     fn read_format_size(&self) -> usize {
@@ -127,6 +151,8 @@ pub trait PerfDataSource {
 pub struct PerfSession {
     source: Box<dyn PerfDataSource>,
     events: HashMap<usize, Event>,
+
+    /* Raw data fields */
     ip_field: DataFieldRef,
     tid_field: DataFieldRef,
     time_field: DataFieldRef,
@@ -138,9 +164,15 @@ pub struct PerfSession {
     read_field: DataFieldRef,
     callchain_field: DataFieldRef,
     raw_field: DataFieldRef,
+
+    /* Options */
     read_timeout: Duration,
 
+    /* Events */
     profile_event: Event,
+
+    /* Ancillary data */
+    ancillary: Writable<AncillaryData>,
 }
 
 impl PerfSession {
@@ -149,6 +181,8 @@ impl PerfSession {
         Self {
             source,
             events: HashMap::new(),
+
+            /* Events */
             ip_field: DataFieldRef::new(),
             tid_field: DataFieldRef::new(),
             time_field: DataFieldRef::new(),
@@ -160,9 +194,20 @@ impl PerfSession {
             read_field: DataFieldRef::new(),
             callchain_field: DataFieldRef::new(),
             raw_field: DataFieldRef::new(),
+
+            /* Options */
             read_timeout: Duration::from_millis(15),
+
+            /* Events */
             profile_event: Event::new(0, "__profile".into()),
+
+            /* Ancillary data */
+            ancillary: Writable::new(AncillaryData::default()),
         }
+    }
+
+    pub fn ancillary_data(&self) -> ReadOnly<AncillaryData> {
+        self.ancillary.read_only()
     }
 
     pub fn profile_event(&mut self) -> &mut Event {
@@ -260,6 +305,10 @@ impl PerfSession {
             while let Some(perf_data) = self.source.read(
                 self.read_timeout) {
                 let header = abi::Header::from_slice(perf_data.raw_data)?;
+
+                self.ancillary.write(|value| {
+                    *value = perf_data.ancillary.clone();
+                });
 
                 match header.entry_type {
                     abi::PERF_RECORD_SAMPLE => {
@@ -413,25 +462,26 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
-    use crate::perf_event::abi::*;
-
     struct MockData {
         data: Vec<u8>,
         entries: Vec<(usize, usize)>,
-        sample_format: u64,
-        read_format: u64,
+        attr: Rc<perf_event_attr>,
         index: usize,
     }
 
     impl MockData {
         pub fn new(
-            sample_format: u64,
+            sample_type: u64,
             read_format: u64) -> Self {
+            let mut attr = perf_event_attr::default();
+
+            attr.sample_type = sample_type;
+            attr.read_format = read_format;
+
             Self {
                 data: Vec::new(),
                 entries: Vec::new(),
-                sample_format,
-                read_format,
+                attr: Rc::new(attr),
                 index: 0,
             }
         }
@@ -475,11 +525,10 @@ mod tests {
             let end = start + entry.1;
 
             Some(PerfData {
-                cpu: 0,
-                sample_format: self.sample_format,
-                read_format: self.read_format,
-                flags: 0,
-                user_regs: 0,
+                ancillary: AncillaryData {
+                    cpu: 0,
+                    attributes: self.attr.clone(),
+                },
                 raw_data: &self.data[start .. end],
             })
         }
