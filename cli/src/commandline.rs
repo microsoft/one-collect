@@ -15,7 +15,7 @@ impl CommandLineParser{
                 Command::new("collect")
                     .about("Collects a trace")
                     .arg(Arg::new("path")
-                            .required(false)
+                            .required(true)
                             .help("Path to store the collected trace"))
             );
         
@@ -27,23 +27,17 @@ impl CommandLineParser{
     pub fn parse(self) {
         let matches = self.cmd.get_matches();
 
-        if let Some(_subcommand) = matches.subcommand_matches("collect") {
-            let builder;
-            if let Some(path) = _subcommand.get_one::<String>("path") {
-                builder = SessionBuilder::new(SessionEgress::File(FileSessionEgress::new(path)));
-            }
-            else {
-                builder = SessionBuilder::new(SessionEgress::Live);
-            }
+        if let Some(subcommand) = matches.subcommand_matches("collect") {
+            let path = subcommand.get_one::<String>("path").unwrap();
+            let builder = SessionBuilder::new(SessionEgress::File(FileSessionEgress::new(path)));
 
             let session = builder.build();
-            match session.get_egress_info() {
-                SessionEgress::File(f) => {
-                    println!("Requested session egress - file: {}", f.get_path());
-                }
-                SessionEgress::Live => {
-                    println!("Requested session egress - live");
-                }
+            let egress_info = session.egress_info();
+            if let SessionEgress::File(f) = egress_info {
+                println!("Requested session egress - file: {}", f.path());
+            }
+            else {
+                unreachable!("egress_info == SessionEgress::Live");
             }
         }
     }

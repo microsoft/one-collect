@@ -9,12 +9,12 @@ pub struct FileSessionEgress<'a> {
 
 impl<'a> FileSessionEgress<'a> {
     pub fn new(path: &'a str) -> Self {
-        FileSessionEgress {
+        Self {
             path
         }
     }
 
-    pub fn get_path(&self) -> &str {
+    pub fn path(&self) -> &str {
         self.path
     }
 }
@@ -25,7 +25,7 @@ pub struct SessionBuilder<'a> {
 
 impl<'a> SessionBuilder<'a> {
     pub fn new(egress: SessionEgress<'a>) -> Self {
-        SessionBuilder {
+        Self {
             egress
         }
     }
@@ -41,12 +41,12 @@ pub struct Session<'a> {
 
 impl<'a> Session<'a> {
     pub(crate) fn new(builder: SessionBuilder<'a>) -> Self {
-        Session {
+        Self {
             egress: builder.egress
         }
     }
 
-    pub fn get_egress_info(&self) -> &SessionEgress<'a> {
+    pub fn egress_info(&self) -> &SessionEgress<'a> {
         &self.egress
     }
 }
