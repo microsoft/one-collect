@@ -16,8 +16,10 @@ impl CommandLineParser{
                     .about("Collects a trace")
                     .arg(Arg::new("path")
                             .required(true)
-                            .help("Path to store the collected trace"))
-            );
+                            .help("Path to store the collected trace")))
+            .subcommand(
+                Command::new("debug")
+                    .about("Prints raw trace data to the console"));
         
         CommandLineParser {
             cmd,
@@ -39,6 +41,15 @@ impl CommandLineParser{
             else {
                 unreachable!("egress_info == SessionEgress::Live");
             }
+        }
+
+        if let Some(subcommand) = matches.subcommand_matches("debug") {
+            let builder = SessionBuilder::new(SessionEgress::Live)
+                .with_profiling(1000)
+                .with_call_stacks();
+
+            let mut session = builder.build();
+            session = session.enable();
         }
     }
 }
