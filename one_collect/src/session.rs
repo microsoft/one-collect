@@ -1,5 +1,7 @@
+use std::io;
 use crate::perf_event::PerfSession;
 use crate::perf_event::rb::{RingBufOptions, RingBufBuilder, source::RingBufSessionBuilder};
+pub type IOResult<T> = std::io::Result<T>;
 
 pub enum SessionEgress<'a> {
     File(FileSessionEgress<'a>),
@@ -54,8 +56,8 @@ impl<'a> SessionBuilder<'a> {
         }
     }
 
-    pub fn build(self) -> Session<'a> {
-        Session::new(self)
+    pub fn build(self) -> Result<Session<'a>, io::Error> {
+        Session::build(self)
     }
 }
 
@@ -65,19 +67,22 @@ pub struct Session<'a> {
 }
 
 impl<'a> Session<'a> {
-    pub(crate) fn new(builder: SessionBuilder<'a>) -> Self {
+    pub(crate) fn build(builder: SessionBuilder<'a>) -> Result<Self, io::Error> {
         let perf_session: Option<PerfSession>;
         if builder.with_profiling {
-            perf_session = Some(Self::build_perf_session(&builder));
+            match Self::build_perf_session(&builder) {
+                Ok(session) => perf_session = Some(session),
+                Err(e) => return Err(e),
+            }
         }
         else {
             perf_session = None;
         }
 
-        Self {
+        Ok(Self {
             egress: builder.egress,
             perf_session
-        }
+        })
     }
 
     pub fn egress_info(&self) -> &SessionEgress<'a> {
@@ -87,7 +92,7 @@ impl<'a> Session<'a> {
     pub fn enable(self) -> Self {
         let perf_session : Option<PerfSession>;
         if let Some(mut session) = self.perf_session {
-            session.profile_event().set_callback(move |full_data,format,event_data| {
+            session.profile_event().set_callback(move |_full_data,_format,event_data| {
                 println!("Event: {:#?}", event_data);
             });
 
@@ -108,7 +113,7 @@ impl<'a> Session<'a> {
         }
     }
 
-    fn build_perf_session(builder: &SessionBuilder<'a>) -> PerfSession {
+    fn build_perf_session(builder: &SessionBuilder<'a>) -> IOResult<PerfSession> {
         let mut options = RingBufOptions::new();
 
         if builder.with_call_stacks {
@@ -119,15 +124,10 @@ impl<'a> Session<'a> {
             &options,
             builder.profiling_frequency);
 
-        let session = RingBufSessionBuilder::new()
+        RingBufSessionBuilder::new()
             .with_page_count(8)
             .with_profiling_events(profiling_builder)
             .build()
-            .unwrap();
-
-        // TODO: Set profiling callback.
-
-        session
     }
 
 }

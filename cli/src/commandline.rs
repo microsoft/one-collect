@@ -33,7 +33,10 @@ impl CommandLineParser{
             let path = subcommand.get_one::<String>("path").unwrap();
             let builder = SessionBuilder::new(SessionEgress::File(FileSessionEgress::new(path)));
 
-            let session = builder.build();
+            let session = builder.build().unwrap_or_else( |error| {
+                println!("Error building perf_events session: {}", error);
+                std::process::exit(1);
+            });
             let egress_info = session.egress_info();
             if let SessionEgress::File(f) = egress_info {
                 println!("Requested session egress - file: {}", f.path());
@@ -43,13 +46,16 @@ impl CommandLineParser{
             }
         }
 
-        if let Some(subcommand) = matches.subcommand_matches("debug") {
+        if let Some(_subcommand) = matches.subcommand_matches("debug") {
             let builder = SessionBuilder::new(SessionEgress::Live)
                 .with_profiling(1000)
                 .with_call_stacks();
 
-            let mut session = builder.build();
-            session = session.enable();
+            let mut _session = builder.build().unwrap_or_else( |error| {
+                println!("Error building perf_events session: {}", error);
+                std::process::exit(1);
+            });
+            _session = _session.enable();
         }
     }
 }
