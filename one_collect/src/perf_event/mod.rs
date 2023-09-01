@@ -3,10 +3,12 @@ use std::array::TryFromSliceError;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use crate::sharing::*;
 use crate::event::*;
 
 pub mod abi;
 pub mod rb;
+mod events;
 
 use abi::*;
 
@@ -19,6 +21,10 @@ pub fn io_error(message: &str) -> IOError {
         message)
 }
 
+pub use rb::source::RingBufSessionBuilder;
+pub use rb::{RingBufOptions, RingBufBuilder};
+pub use rb::cpu_count;
+
 static EMPTY: &[u8] = &[];
 
 #[derive(Default)]
@@ -30,6 +36,14 @@ pub struct AncillaryData {
 impl AncillaryData {
     pub fn cpu(&self) -> u32 {
         self.cpu
+    }
+
+    pub fn config(&self) -> u64 {
+        self.attributes.config
+    }
+
+    pub fn event_type(&self) -> u32 {
+        self.attributes.event_type
     }
 
     pub fn sample_type(&self) -> u64 {
@@ -169,7 +183,15 @@ pub struct PerfSession {
     read_timeout: Duration,
 
     /* Events */
-    profile_event: Event,
+    cpu_profile_event: Event,
+    cswitch_profile_event: Event,
+    lost_event: Event,
+    comm_event: Event,
+    exit_event: Event,
+    fork_event: Event,
+    mmap_event: Event,
+    lost_samples_event: Event,
+    cswitch_event: Event,
 
     /* Ancillary data */
     ancillary: Writable<AncillaryData>,
@@ -199,7 +221,15 @@ impl PerfSession {
             read_timeout: Duration::from_millis(15),
 
             /* Events */
-            profile_event: Event::new(0, "__profile".into()),
+            cpu_profile_event: Event::new(0, "__cpu_profile".into()),
+            cswitch_profile_event: Event::new(0, "__cswitch_profile".into()),
+            lost_event: events::lost(),
+            comm_event: events::comm(),
+            exit_event: events::exit(),
+            fork_event: events::fork(),
+            mmap_event: events::mmap(),
+            lost_samples_event: events::lost_samples(),
+            cswitch_event: events::cswitch(),
 
             /* Ancillary data */
             ancillary: Writable::new(AncillaryData::default()),
@@ -210,8 +240,40 @@ impl PerfSession {
         self.ancillary.read_only()
     }
 
-    pub fn profile_event(&mut self) -> &mut Event {
-        &mut self.profile_event
+    pub fn cpu_profile_event(&mut self) -> &mut Event {
+        &mut self.cpu_profile_event
+    }
+
+    pub fn cswitch_profile_event(&mut self) -> &mut Event {
+        &mut self.cswitch_profile_event
+    }
+
+    pub fn lost_event(&mut self) -> &mut Event {
+        &mut self.lost_event
+    }
+
+    pub fn comm_event(&mut self) -> &mut Event {
+        &mut self.comm_event
+    }
+
+    pub fn exit_event(&mut self) -> &mut Event {
+        &mut self.exit_event
+    }
+
+    pub fn fork_event(&mut self) -> &mut Event {
+        &mut self.fork_event
+    }
+
+    pub fn mmap_event(&mut self) -> &mut Event {
+        &mut self.mmap_event
+    }
+
+    pub fn lost_samples_event(&mut self) -> &mut Event {
+        &mut self.lost_samples_event
+    }
+
+    pub fn cswitch_event(&mut self) -> &mut Event {
+        &mut self.cswitch_event
     }
 
     pub fn ip_data_ref(&self) -> DataFieldRef {
@@ -422,12 +484,90 @@ impl PerfSession {
                                 event.process(full_data, event_data);
                             }
                         } else {
-                            /* TODO: Is it a profile or cswitch */
                             /* Non-event profile sample */
-                            self.profile_event.process(
-                                perf_data.raw_data,
-                                perf_data.raw_data);
+                            match perf_data.ancillary.event_type() {
+                                /* Software */
+                                PERF_TYPE_SOFTWARE => {
+                                    match perf_data.ancillary.config() {
+                                        /* CPU */
+                                        PERF_COUNT_SW_CPU_CLOCK => {
+                                            self.cpu_profile_event.process(
+                                                perf_data.raw_data,
+                                                perf_data.raw_data);
+                                        },
+
+                                        /* CSWITCH */
+                                        PERF_COUNT_SW_CONTEXT_SWITCHES => {
+                                            self.cswitch_profile_event.process(
+                                                perf_data.raw_data,
+                                                perf_data.raw_data);
+                                        },
+
+                                        /* Unsupported */
+                                        _ => { },
+                                    }
+                                },
+
+                                /* Unsupported */
+                                _ => { },
+                            }
                         }
+                    },
+
+                    abi::PERF_RECORD_LOST => {
+                        let offset = abi::Header::data_offset();
+
+                        self.lost_event.process(
+                            perf_data.raw_data,
+                            &perf_data.raw_data[offset..]);
+                    },
+
+                    abi::PERF_RECORD_COMM => {
+                        let offset = abi::Header::data_offset();
+
+                        self.comm_event.process(
+                            perf_data.raw_data,
+                            &perf_data.raw_data[offset..]);
+                    },
+
+                    abi::PERF_RECORD_EXIT => {
+                        let offset = abi::Header::data_offset();
+
+                        self.exit_event.process(
+                            perf_data.raw_data,
+                            &perf_data.raw_data[offset..]);
+                    },
+
+                    abi::PERF_RECORD_FORK => {
+                        let offset = abi::Header::data_offset();
+
+                        self.fork_event.process(
+                            perf_data.raw_data,
+                            &perf_data.raw_data[offset..]);
+                    },
+
+                    abi::PERF_RECORD_MMAP2 => {
+                        let offset = abi::Header::data_offset();
+
+                        self.mmap_event.process(
+                            perf_data.raw_data,
+                            &perf_data.raw_data[offset..]);
+                    },
+
+                    abi::PERF_RECORD_LOST_SAMPLES => {
+                        let offset = abi::Header::data_offset();
+
+                        self.lost_samples_event.process(
+                            perf_data.raw_data,
+                            &perf_data.raw_data[offset..]);
+                    },
+
+                    abi::PERF_RECORD_SWITCH_CPU_WIDE => {
+                        let offset = abi::Header::data_offset();
+
+                        self.cswitch_event.process(
+                            perf_data.raw_data,
+                            &perf_data.raw_data[offset..]);
                     },
 
                     _ => {
@@ -567,7 +707,7 @@ mod tests {
         let second = format.get_field_ref("2").unwrap();
         let third = format.get_field_ref("3").unwrap();
 
-        e.set_callback(move |_full_data, format, event_data| {
+        e.add_callback(move |_full_data, format, event_data| {
             let a = format.get_data(first, event_data);
             let b = format.get_data(second, event_data);
             let c = format.get_data(third, event_data);
@@ -674,7 +814,7 @@ mod tests {
         let magic_ref = format.get_field_ref("magic").unwrap();
 
         /* Parse upon being read with this code */
-        e.set_callback(move |full_data, format, event_data| {
+        e.add_callback(move |full_data, format, event_data| {
             let read_time = time_data.try_get_u64(full_data).unwrap();
             let read_magic = format.try_get_u64(magic_ref, event_data).unwrap();
 

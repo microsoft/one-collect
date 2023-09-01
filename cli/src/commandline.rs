@@ -67,7 +67,7 @@ impl CommandLineParser{
 
                 let ancillary = perf_session.ancillary_data();
 
-                perf_session.profile_event().set_callback(move |_full_data,_format,_event_data| {
+                perf_session.cpu_profile_event().add_callback(move |_full_data,_format,_event_data| {
                     let mut cpu = 0;
                     ancillary.read( |values| {
                         cpu = values.cpu();
