@@ -28,6 +28,12 @@ jobs:
     - name: 'cli: Run tests'
       working-directory: cli
       run: cargo test --verbose
+    - name: 'ruwind: Build'
+      working-directory: ruwind
+      run: cargo build --verbose
+    - name: 'ruwind: Run tests'
+      working-directory: ruwind
+      run: cargo test --verbose
 
   build_release:
     name: Build and Test (Release)
@@ -46,6 +52,12 @@ jobs:
       run: cargo build --release --verbose
     - name: 'cli: Run tests'
       working-directory: cli
+      run: cargo test --release --verbose
+    - name: 'ruwind: Build'
+      working-directory: ruwind
+      run: cargo build --release --verbose
+    - name: 'ruwind: Run tests'
+      working-directory: ruwind
       run: cargo test --release --verbose
 
   bench:
