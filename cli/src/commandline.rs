@@ -63,8 +63,15 @@ impl CommandLineParser{
             });
 
             if let Some(perf_session) = session.perf_session_mut() {
-                perf_session.profile_event().set_callback(move |_full_data,_format,event_data| {
-                    println!("Event: {:#?}", event_data);
+
+                let ancillary = perf_session.ancillary_data();
+
+                perf_session.profile_event().set_callback(move |_full_data,_format,_event_data| {
+                    let mut cpu = 0;
+                    ancillary.read( |values| {
+                        cpu = values.cpu();
+                    });
+                    println!("event: cpu-clock, cpu: {cpu}");
                 });
 
                 perf_session.enable().unwrap();
