@@ -173,7 +173,7 @@ impl RingBufDataSource {
          * redirect them to the kernel leader buffers on the
          * same CPU.
          */
-        for i in 0..common_buf.cpu_count() {
+        for i in 0..cpu_count() {
             let leader_id = leader_ids[&i];
             let leader = &ring_bufs[&leader_id];
             let mut cpu_buf = common_buf.for_cpu(i);
@@ -203,7 +203,7 @@ impl RingBufDataSource {
             .build();
 
         /* Build the kernel only dummy rings first */
-        for i in 0..common.cpu_count() {
+        for i in 0..cpu_count() {
             let mut cpu_buf = common.for_cpu(i);
 
             cpu_buf.open(self.target_pid)?;
@@ -539,11 +539,11 @@ mod tests {
         let ancillary = session.ancillary_data();
 
         /* Setup event logic w/context */
-        let prof_event = session.profile_event();
+        let prof_event = session.cpu_profile_event();
 
         let atomic_time = Arc::new(AtomicUsize::new(0));
 
-        prof_event.set_callback(move |full_data,_format,_event_data| {
+        prof_event.add_callback(move |full_data,_format,_event_data| {
             let time = time_data.try_get_u64(full_data).unwrap() as usize;
             let prev = atomic_time.load(Ordering::Relaxed);
             let mut cpu: u32 = 0;

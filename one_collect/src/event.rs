@@ -1,86 +1,9 @@
-use std::marker::PhantomData;
-use std::cell::{RefCell, Cell};
+use std::cell::Cell;
 use std::rc::Rc;
 
 static EMPTY: &[u8] = &[];
 
 type BoxedCallback = Box<dyn FnMut(&[u8], &EventFormat, &[u8])>;
-
-pub struct DataOwner;
-pub struct DataReader;
-
-pub type Writable<T> = SharedData<T, DataOwner>;
-pub type ReadOnly<T> = SharedData<T, DataReader>;
-
-pub struct SharedData<T, S = DataOwner> {
-    inner: Rc<RefCell<T>>,
-    state: PhantomData<S>,
-}
-
-impl<T> SharedData<T> {
-    pub fn new(value: T) -> SharedData<T, DataOwner> {
-        SharedData::<T, DataOwner> {
-            inner: Rc::new(RefCell::new(value)),
-            state: PhantomData::<DataOwner>,
-        }
-    }
-}
-
-impl<T> SharedData<T, DataOwner> {
-    pub fn read(
-        &self,
-        f: impl FnOnce(&T)) {
-        f(&self.inner.borrow());
-    }
-
-    pub fn write(
-        &self,
-        f: impl FnOnce(&mut T)) {
-        f(&mut self.inner.borrow_mut());
-    }
-
-    pub fn read_only(&self) -> SharedData<T, DataReader> {
-        SharedData::<T, DataReader> {
-            inner: self.inner.clone(),
-            state: PhantomData::<DataReader>,
-        }
-    }
-}
-
-impl<T: Copy> SharedData<T, DataOwner> {
-    pub fn set(
-        &self,
-        value: T) {
-        *self.inner.borrow_mut() = value;
-    }
-
-    pub fn value(&self) -> T {
-        *self.inner.borrow()
-    }
-}
-
-impl<T> SharedData<T, DataReader> {
-    pub fn read(
-        &self,
-        f: impl FnOnce(&T)) {
-        f(&self.inner.borrow());
-    }
-}
-
-impl<T> Clone for SharedData<T, DataReader> {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-            state: self.state,
-        }
-    }
-}
-
-impl<T: Copy> SharedData<T, DataReader> {
-    pub fn value(&self) -> T {
-        *self.inner.borrow()
-    }
-}
 
 #[derive(Clone)]
 pub struct DataFieldRef(Rc<Cell<DataField>>);
@@ -199,6 +122,7 @@ impl From<EventFieldRef> for usize {
 #[derive(PartialEq)]
 pub enum LocationType {
     Static,
+    StaticString,
     DynRelative,
     DynAbsolute,
 }
@@ -290,6 +214,21 @@ impl EventFormat {
                 &data[field.offset .. end]
             },
 
+            LocationType::StaticString => {
+                let slice = &data[field.offset..];
+                let mut len = 0usize;
+                
+                for b in slice {
+                    if *b == 0 {
+                        break;
+                    }
+
+                    len += 1;
+                }
+
+                &slice[0..len]
+            },
+
             LocationType::DynRelative => {
                 todo!("Need to support relative location");
             },
@@ -346,7 +285,7 @@ impl EventFormat {
 pub struct Event {
     id: usize,
     name: String,
-    callback: Option<BoxedCallback>,
+    callbacks: Vec<BoxedCallback>,
     format: EventFormat,
 }
 
@@ -357,7 +296,7 @@ impl Event {
         Self {
             id,
             name,
-            callback: None,
+            callbacks: Vec::new(),
             format: EventFormat::new(),
         }
     }
@@ -378,17 +317,17 @@ impl Event {
         &self.format
     }
 
-    pub fn set_callback(
+    pub fn add_callback(
         &mut self,
         callback: impl FnMut(&[u8], &EventFormat, &[u8]) + 'static) {
-        self.callback = Some(Box::new(callback));
+        self.callbacks.push(Box::new(callback));
     }
 
     pub fn process(
         &mut self,
         full_data: &[u8],
         event_data: &[u8]) {
-        if let Some(callback) = &mut self.callback {
+        for callback in &mut self.callbacks {
             (callback)(full_data, &self.format, event_data);
         }
     }
@@ -397,6 +336,7 @@ impl Event {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sharing::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -427,7 +367,7 @@ mod tests {
         let second = format.get_field_ref("2").unwrap();
         let third = format.get_field_ref("3").unwrap();
 
-        e.set_callback(move |_full_data, format, event_data| {
+        e.add_callback(move |_full_data, format, event_data| {
             let a = format.get_data(first, event_data);
             let b = format.get_data(second, event_data);
             let c = format.get_data(third, event_data);

@@ -58,7 +58,14 @@ pub const PERF_SAMPLE_AUX: u64 = 1 << 20;
 pub const PERF_SAMPLE_CGROUP: u64 = 1 << 21;
 
 // Supported record types (header.entry_type)
+pub const PERF_RECORD_LOST: u32 = 2;
+pub const PERF_RECORD_COMM: u32 = 3;
+pub const PERF_RECORD_EXIT: u32 = 4;
+pub const PERF_RECORD_FORK: u32 = 7;
 pub const PERF_RECORD_SAMPLE: u32 = 9;
+pub const PERF_RECORD_MMAP2: u32 = 10;
+pub const PERF_RECORD_LOST_SAMPLES: u32 = 13;
+pub const PERF_RECORD_SWITCH_CPU_WIDE: u32 = 15;
 
 // Known read formats
 pub const PERF_FORMAT_TOTAL_TIME_ENABLED: u64 = 1 << 0;

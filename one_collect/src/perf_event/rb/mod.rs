@@ -125,6 +125,14 @@ impl RingBufOptions {
     }
 }
 
+pub fn cpu_count() -> u32 {
+    unsafe {
+        const SC_NPROCESSORS_ONLN: i32 = 84;
+
+        sysconf(SC_NPROCESSORS_ONLN) as u32
+    }
+}
+
 fn perf_event_open(
     attr: &perf_event_attr,
     pid: i32,
@@ -335,14 +343,6 @@ impl CommonRingBuf {
         attributes: perf_event_attr) -> Self {
         Self {
             attributes: Rc::new(attributes),
-        }
-    }
-
-    pub fn cpu_count(&self) -> u32 {
-        unsafe {
-            const SC_NPROCESSORS_ONLN: i32 = 84;
-
-            sysconf(SC_NPROCESSORS_ONLN) as u32
         }
     }
 
