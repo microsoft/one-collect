@@ -21,7 +21,8 @@ impl CommandLineParser{
                 Command::new("debug")
                     .about("Prints raw trace data to the console")
                     .arg(Arg::new("seconds")
-                            .short('d')
+                            .short('s')
+                            .long("seconds")
                             .help("Specify the duration of the session in seconds")
                             .value_parser(value_parser!(u64))
                             .default_value("1")));
