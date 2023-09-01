@@ -74,7 +74,10 @@ impl CommandLineParser{
                     println!("event: cpu-clock, cpu: {cpu}");
                 });
 
-                perf_session.enable().unwrap();
+                perf_session.enable().unwrap_or_else( |error| {
+                    println!("Error enabling perf_events session: {}", error);
+                    std::process::exit(1);
+                });
 
                 perf_session.parse_for_duration(
                     std::time::Duration::from_secs(*seconds)).unwrap();
