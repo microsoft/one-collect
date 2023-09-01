@@ -1,4 +1,4 @@
-use clap::{Arg, command, Command};
+use clap::{Arg, command, Command, value_parser};
 use one_collect::session::{SessionBuilder, SessionEgress, FileSessionEgress};
 
 pub (crate) struct CommandLineParser{
@@ -19,7 +19,12 @@ impl CommandLineParser{
                             .help("Path to store the collected trace")))
             .subcommand(
                 Command::new("debug")
-                    .about("Prints raw trace data to the console"));
+                    .about("Prints raw trace data to the console")
+                    .arg(Arg::new("seconds")
+                            .short('d')
+                            .help("Specify the duration of the session in seconds")
+                            .value_parser(value_parser!(u64))
+                            .default_value("1")));
         
         CommandLineParser {
             cmd,
@@ -46,16 +51,31 @@ impl CommandLineParser{
             }
         }
 
-        if let Some(_subcommand) = matches.subcommand_matches("debug") {
+        if let Some(subcommand) = matches.subcommand_matches("debug") {
+            let seconds = subcommand.get_one::<u64>("seconds").expect("required");
             let builder = SessionBuilder::new(SessionEgress::Live)
                 .with_profiling(1000)
                 .with_call_stacks();
 
-            let mut _session = builder.build().unwrap_or_else( |error| {
+            let mut session = builder.build().unwrap_or_else( |error| {
                 println!("Error building perf_events session: {}", error);
                 std::process::exit(1);
             });
-            _session = _session.enable();
+
+            if let Some(perf_session) = session.perf_session_mut() {
+                perf_session.profile_event().set_callback(move |_full_data,_format,event_data| {
+                    println!("Event: {:#?}", event_data);
+                });
+
+                perf_session.enable().unwrap();
+
+                perf_session.parse_for_duration(
+                    std::time::Duration::from_secs(*seconds)).unwrap();
+                perf_session.disable().unwrap();
+            }
+            else {
+                unreachable!("perf_session == None");
+            }
         }
     }
 }

@@ -89,28 +89,8 @@ impl<'a> Session<'a> {
         &self.egress
     }
 
-    pub fn enable(self) -> Self {
-        let perf_session : Option<PerfSession>;
-        if let Some(mut session) = self.perf_session {
-            session.profile_event().set_callback(move |_full_data,_format,event_data| {
-                println!("Event: {:#?}", event_data);
-            });
-
-            session.enable().unwrap();
-            session.parse_for_duration(
-                std::time::Duration::from_secs(1)).unwrap();
-            session.disable().unwrap();
-
-            perf_session = Some(session);
-        }
-        else {
-            perf_session = None;
-        }
-
-        Self {
-            perf_session,
-            ..self
-        }
+    pub fn perf_session_mut(&mut self) -> &mut Option<PerfSession> {
+        &mut self.perf_session
     }
 
     fn build_perf_session(builder: &SessionBuilder<'a>) -> IOResult<PerfSession> {
