@@ -1,7 +1,8 @@
 use std::io;
+
+use super::*;
 use crate::perf_event::PerfSession;
 use crate::perf_event::rb::{RingBufOptions, RingBufBuilder, source::RingBufSessionBuilder};
-pub type IOResult<T> = std::io::Result<T>;
 
 pub enum SessionEgress<'a> {
     File(FileSessionEgress<'a>),

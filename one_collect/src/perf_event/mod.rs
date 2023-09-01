@@ -3,6 +3,7 @@ use std::array::TryFromSliceError;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use super::*;
 use crate::sharing::*;
 use crate::event::*;
 
@@ -11,15 +12,6 @@ pub mod rb;
 mod events;
 
 use abi::*;
-
-pub type IOResult<T> = std::io::Result<T>;
-pub type IOError = std::io::Error;
-
-pub fn io_error(message: &str) -> IOError {
-    IOError::new(
-        std::io::ErrorKind::Other,
-        message)
-}
 
 pub use rb::source::RingBufSessionBuilder;
 pub use rb::{RingBufOptions, RingBufBuilder};
