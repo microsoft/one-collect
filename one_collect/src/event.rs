@@ -1,9 +1,86 @@
-use std::cell::Cell;
+use std::marker::PhantomData;
+use std::cell::{RefCell, Cell};
 use std::rc::Rc;
 
 static EMPTY: &[u8] = &[];
 
 type BoxedCallback = Box<dyn FnMut(&[u8], &EventFormat, &[u8])>;
+
+pub struct DataOwner;
+pub struct DataReader;
+
+pub type Writable<T> = SharedData<T, DataOwner>;
+pub type ReadOnly<T> = SharedData<T, DataReader>;
+
+pub struct SharedData<T, S = DataOwner> {
+    inner: Rc<RefCell<T>>,
+    state: PhantomData<S>,
+}
+
+impl<T> SharedData<T> {
+    pub fn new(value: T) -> SharedData<T, DataOwner> {
+        SharedData::<T, DataOwner> {
+            inner: Rc::new(RefCell::new(value)),
+            state: PhantomData::<DataOwner>,
+        }
+    }
+}
+
+impl<T> SharedData<T, DataOwner> {
+    pub fn read(
+        &self,
+        f: impl FnOnce(&T)) {
+        f(&self.inner.borrow());
+    }
+
+    pub fn write(
+        &self,
+        f: impl FnOnce(&mut T)) {
+        f(&mut self.inner.borrow_mut());
+    }
+
+    pub fn read_only(&self) -> SharedData<T, DataReader> {
+        SharedData::<T, DataReader> {
+            inner: self.inner.clone(),
+            state: PhantomData::<DataReader>,
+        }
+    }
+}
+
+impl<T: Copy> SharedData<T, DataOwner> {
+    pub fn set(
+        &self,
+        value: T) {
+        *self.inner.borrow_mut() = value;
+    }
+
+    pub fn value(&self) -> T {
+        *self.inner.borrow()
+    }
+}
+
+impl<T> SharedData<T, DataReader> {
+    pub fn read(
+        &self,
+        f: impl FnOnce(&T)) {
+        f(&self.inner.borrow());
+    }
+}
+
+impl<T> Clone for SharedData<T, DataReader> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            state: self.state,
+        }
+    }
+}
+
+impl<T: Copy> SharedData<T, DataReader> {
+    pub fn value(&self) -> T {
+        *self.inner.borrow()
+    }
+}
 
 #[derive(Clone)]
 pub struct DataFieldRef(Rc<Cell<DataField>>);
@@ -403,4 +480,32 @@ mod tests {
         assert_eq!(0, test.start());
         assert_eq!(1, test.end());
     }
+
+    #[test]
+    fn shared_data() {
+        /* Writable view */
+        let owner: Writable<u64> = Writable::new(0u64);
+
+        owner.write(|value| { *value = 321; });
+        owner.read(|value| { assert_eq!(321, *value); });
+
+        /* Simple set/value for Copy traits */
+        owner.set(123);
+        assert_eq!(123, owner.value());
+
+        /* Read view */
+        let reader: ReadOnly<u64> = owner.read_only();
+        let mut copy: u64 = 0;
+
+        reader.read(|value| { assert_eq!(123, *value); });
+
+        /* Ensure read closure capture */
+        reader.read(|value| { copy = *value; });
+
+        /* Compare outside closure to ensure capture */
+        assert_eq!(123, copy);
+
+        /* Ensure simple read works */
+        assert_eq!(123, reader.value());
+    } 
 }
