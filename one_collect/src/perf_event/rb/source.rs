@@ -1,5 +1,32 @@
 use super::*;
 
+type BoxedBuilderHook = Box<dyn FnOnce(&mut RingBufSessionBuilder)>;
+type BoxedSessionHook = Box<dyn FnOnce(&mut PerfSession)>;
+
+struct RingBufSessionHook {
+    builder_hook: Option<BoxedBuilderHook>,
+    session_hook: Option<BoxedSessionHook>,
+}
+
+impl RingBufSessionHook {
+    pub fn new(
+        builder_hook: impl FnOnce(&mut RingBufSessionBuilder) + 'static,
+        session_hook: impl FnOnce(&mut PerfSession) + 'static) -> Self {
+        Self {
+            builder_hook: Some(Box::new(builder_hook)),
+            session_hook: Some(Box::new(session_hook)),
+        }
+    }
+
+    pub fn builder_hook(&mut self) -> Option<BoxedBuilderHook> {
+        self.builder_hook.take()
+    }
+
+    pub fn session_hook(&mut self) -> Option<BoxedSessionHook> {
+        self.session_hook.take()
+    }
+}
+
 pub struct RingBufSessionBuilder {
     pages: usize,
     target_pid: Option<i32>,
@@ -7,6 +34,7 @@ pub struct RingBufSessionBuilder {
     event_builder: Option<RingBufBuilder<Tracepoint>>,
     profiling_builder: Option<RingBufBuilder<Profiling>>,
     cswitch_builder: Option<RingBufBuilder<ContextSwitches>>,
+    hooks: Option<Vec<RingBufSessionHook>>,
 }
 
 impl Default for RingBufSessionBuilder {
@@ -24,6 +52,7 @@ impl RingBufSessionBuilder {
             event_builder: None,
             profiling_builder: None,
             cswitch_builder: None,
+            hooks: None,
         }
     }
 
@@ -37,6 +66,7 @@ impl RingBufSessionBuilder {
             event_builder: self.event_builder.take(),
             profiling_builder: self.profiling_builder.take(),
             cswitch_builder: self.cswitch_builder.take(),
+            hooks: self.hooks.take(),
         }
     }
 
@@ -50,6 +80,7 @@ impl RingBufSessionBuilder {
             event_builder: self.event_builder.take(),
             profiling_builder: self.profiling_builder.take(),
             cswitch_builder: self.cswitch_builder.take(),
+            hooks: self.hooks.take(),
         }
     }
 
@@ -63,7 +94,19 @@ impl RingBufSessionBuilder {
             event_builder: self.event_builder.take(),
             profiling_builder: self.profiling_builder.take(),
             cswitch_builder: self.cswitch_builder.take(),
+            hooks: self.hooks.take(),
         }
+    }
+
+    pub fn take_kernel_events(
+        &mut self) -> Option<RingBufBuilder<Kernel>> {
+        self.kernel_builder.take()
+    }
+
+    pub fn replace_kernel_events(
+        &mut self,
+        builder: RingBufBuilder<Kernel>) -> Option<RingBufBuilder<Kernel>> {
+        self.kernel_builder.replace(builder)
     }
 
     pub fn with_tracepoint_events(
@@ -76,7 +119,19 @@ impl RingBufSessionBuilder {
             event_builder: Some(builder),
             profiling_builder: self.profiling_builder.take(),
             cswitch_builder: self.cswitch_builder.take(),
+            hooks: self.hooks.take(),
         }
+    }
+
+    pub fn take_tracepoint_events(
+        &mut self) -> Option<RingBufBuilder<Tracepoint>> {
+        self.event_builder.take()
+    }
+
+    pub fn replace_tracepoint_events(
+        &mut self,
+        builder: RingBufBuilder<Tracepoint>) -> Option<RingBufBuilder<Tracepoint>> {
+        self.event_builder.replace(builder)
     }
 
     pub fn with_profiling_events(
@@ -89,7 +144,19 @@ impl RingBufSessionBuilder {
             event_builder: self.event_builder.take(),
             profiling_builder: Some(builder),
             cswitch_builder: self.cswitch_builder.take(),
+            hooks: self.hooks.take(),
         }
+    }
+
+    pub fn take_profiling_events(
+        &mut self) -> Option<RingBufBuilder<Profiling>> {
+        self.profiling_builder.take()
+    }
+
+    pub fn replace_profiling_events(
+        &mut self,
+        builder: RingBufBuilder<Profiling>) -> Option<RingBufBuilder<Profiling>> {
+        self.profiling_builder.replace(builder)
     }
 
     pub fn with_cswitch_events(
@@ -102,10 +169,54 @@ impl RingBufSessionBuilder {
             event_builder: self.event_builder.take(),
             profiling_builder: self.profiling_builder.take(),
             cswitch_builder: Some(builder),
+            hooks: self.hooks.take(),
+        }
+    }
+
+    pub fn take_cswitch_events(
+        &mut self) -> Option<RingBufBuilder<ContextSwitches>> {
+        self.cswitch_builder.take()
+    }
+
+    pub fn replace_cswitch_events(
+        &mut self,
+        builder: RingBufBuilder<ContextSwitches>) -> Option<RingBufBuilder<ContextSwitches>> {
+        self.cswitch_builder.replace(builder)
+    }
+
+    pub fn with_hooks(
+        &mut self,
+        builder_hook: impl FnOnce(&mut RingBufSessionBuilder) + 'static,
+        session_hook: impl FnOnce(&mut PerfSession) + 'static) -> Self {
+        let mut hooks = self.hooks.take().unwrap_or_default();
+
+        hooks.push(
+            RingBufSessionHook::new(
+                Box::new(builder_hook),
+                Box::new(session_hook)));
+
+        Self {
+            pages: self.pages,
+            target_pid: self.target_pid.take(),
+            kernel_builder: self.kernel_builder.take(),
+            event_builder: self.event_builder.take(),
+            profiling_builder: self.profiling_builder.take(),
+            cswitch_builder: self.cswitch_builder.take(),
+            hooks: Some(hooks),
         }
     }
 
     pub fn build(&mut self) -> IOResult<PerfSession> {
+        let mut hooks = self.hooks.take();
+
+        if let Some(hooks) = &mut hooks {
+            for hook in hooks {
+                if let Some(hook) = hook.builder_hook() {
+                    (hook)(self);
+                }
+            }
+        }
+
         let mut source = RingBufDataSource::new(
             self.pages,
             self.target_pid.take(),
@@ -116,7 +227,17 @@ impl RingBufSessionBuilder {
 
         source.build()?;
 
-        Ok(PerfSession::new(Box::new(source)))
+        let mut session = PerfSession::new(Box::new(source));
+
+        if let Some(hooks) = &mut hooks {
+            for hook in hooks {
+                if let Some(hook) = hook.session_hook() {
+                    (hook)(&mut session);
+                }
+            }
+        }
+
+        Ok(session)
     }
 }
 
