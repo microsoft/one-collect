@@ -55,8 +55,7 @@ impl CommandLineParser{
         if let Some(subcommand) = matches.subcommand_matches("debug") {
             let seconds = subcommand.get_one::<u64>("seconds").expect("required");
             let builder = SessionBuilder::new(SessionEgress::Live)
-                .with_profiling(1000)
-                .with_call_stacks();
+                .with_profiling(1000);
 
             let mut session = builder.build().unwrap_or_else( |error| {
                 println!("Error building perf_events session: {}", error);
@@ -65,14 +64,59 @@ impl CommandLineParser{
 
             if let Some(perf_session) = session.perf_session_mut() {
 
-                let ancillary = perf_session.ancillary_data();
+                let ancillary = perf_session.ancillary_data().clone();
+                let time_data = perf_session.time_data_ref().clone();
 
-                perf_session.cpu_profile_event().add_callback(move |_full_data,_format,_event_data| {
+                perf_session.comm_event().add_callback( move |full_data,format,_event_data| {
+
+                    // timestamp
+                    let time = time_data.try_get_u64(full_data).unwrap_or(0) as usize;
+
+                    // cpu
                     let mut cpu = 0;
                     ancillary.read( |values| {
                         cpu = values.cpu();
                     });
-                    println!("event: cpu-clock, cpu: {cpu}");
+
+                    // pid
+                    let pid_ref = format.get_field_ref("pid").unwrap();
+                    let pid_data = format.get_data(pid_ref, _event_data);
+                    let pid = u32::from_ne_bytes(<[u8; 4]>::try_from(pid_data)
+                                    .unwrap_or([0, 0, 0, 0]));
+
+                    // tid
+                    let tid_ref = format.get_field_ref("tid").unwrap();
+                    let tid_data = format.get_data(tid_ref, _event_data);
+                    let tid = u32::from_ne_bytes(<[u8; 4]>::try_from(tid_data)
+                                    .unwrap_or([0, 0, 0, 0]));
+
+                    // comm
+                    let comm_ref = format.get_field_ref("comm[]").unwrap();
+                    let comm_data = format.get_data(comm_ref, _event_data);
+                    let mut vec : Vec<u8> = Vec::new();
+                    vec.extend_from_slice(comm_data);
+                    let comm_value = String::from_utf8(vec).unwrap_or_else(|_error |{
+                        String::from("<Unknown>")
+                    });
+
+                    println!("timestamp: {time}, event: comm, cpu: {cpu}, pid: {pid}, tid: {tid}, comm: {comm_value}");
+                });
+
+                let time_data = perf_session.time_data_ref();
+                let ancillary = perf_session.ancillary_data();
+
+                perf_session.cpu_profile_event().add_callback( move |full_data,_format,_event_data| {
+
+                    // timestamp
+                    let time = time_data.try_get_u64(full_data).unwrap_or(0) as usize;
+
+                    // cpu
+                    let mut cpu = 0;
+                    ancillary.read( |values| {
+                        cpu = values.cpu();
+                    });
+
+                    println!("timestamp: {time}, event: cpu_profile, cpu: {cpu}");
                 });
 
                 perf_session.enable().unwrap_or_else( |error| {

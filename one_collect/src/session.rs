@@ -95,20 +95,31 @@ impl<'a> Session<'a> {
     }
 
     fn build_perf_session(builder: &SessionBuilder<'a>) -> IOResult<PerfSession> {
+        let mut ring_buf_builder = RingBufSessionBuilder::new()
+            .with_page_count(8);
+
+        // Enable comm events by default.
+        let kernel_builder = RingBufBuilder::for_kernel()
+            .with_comm_records();
+        ring_buf_builder = ring_buf_builder.with_kernel_events(kernel_builder);
+
+        // Enable call stacks if requested.
         let mut options = RingBufOptions::new();
 
         if builder.with_call_stacks {
             options = options.with_callchain_data();
         }
 
-        let profiling_builder = RingBufBuilder::for_profiling(
-            &options,
-            builder.profiling_frequency);
+        // Enable profiling if requested.
+        if builder.with_profiling {
+            let profiling_builder = RingBufBuilder::for_profiling(
+                &options,
+                builder.profiling_frequency);
 
-        RingBufSessionBuilder::new()
-            .with_page_count(8)
-            .with_profiling_events(profiling_builder)
-            .build()
+            ring_buf_builder = ring_buf_builder.with_profiling_events(profiling_builder);
+        }
+
+        ring_buf_builder.build()
     }
 
 }
