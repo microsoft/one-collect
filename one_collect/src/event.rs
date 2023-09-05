@@ -293,7 +293,7 @@ impl EventFormat {
         data: &'a [u8]) -> Option<&'a str> {
         let slice = self.get_data(field_ref, data);
 
-        if slice.len() <= 0 { return Some(""); }
+        if slice.is_empty() { return Some(""); }
 
         match std::str::from_utf8(slice) {
             Ok(str) => Some(str),
