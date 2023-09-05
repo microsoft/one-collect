@@ -286,6 +286,20 @@ impl EventFormat {
             Err(_) => None,
         }
     }
+
+    pub fn try_get_str<'a>(
+        &self,
+        field_ref: EventFieldRef,
+        data: &'a [u8]) -> Option<&'a str> {
+        let slice = self.get_data(field_ref, data);
+
+        if slice.len() <= 0 { return None; }
+
+        match std::str::from_utf8(slice) {
+            Ok(str) => Some(str),
+            Err(_) => None,
+        }
+    }
 }
 
 pub struct Event {
