@@ -67,6 +67,11 @@ impl CommandLineParser{
                 let ancillary = perf_session.ancillary_data().clone();
                 let time_data = perf_session.time_data_ref().clone();
 
+                let comm_event_format = perf_session.comm_event().format();
+                let comm_pid_ref = comm_event_format.get_field_ref_unchecked("pid");
+                let comm_tid_ref = comm_event_format.get_field_ref_unchecked("tid");
+                let comm_comm_ref = comm_event_format.get_field_ref_unchecked("comm[]");
+
                 perf_session.comm_event().add_callback( move |full_data,format,event_data| {
 
                     // timestamp
@@ -79,16 +84,13 @@ impl CommandLineParser{
                     });
 
                     // pid
-                    let pid_ref = format.get_field_ref_unchecked("pid");
-                    let pid = format.try_get_u32(pid_ref, event_data).unwrap_or(0);
+                    let pid = format.try_get_u32(comm_pid_ref, event_data).unwrap_or(0);
 
                     // tid
-                    let tid_ref = format.get_field_ref_unchecked("tid");
-                    let tid = format.try_get_u32(tid_ref, event_data).unwrap_or(0);
+                    let tid = format.try_get_u32(comm_tid_ref, event_data).unwrap_or(0);
 
                     // comm
-                    let comm_ref = format.get_field_ref_unchecked("comm[]");
-                    let comm_value = format.try_get_str(comm_ref, event_data).unwrap_or("");
+                    let comm_value = format.try_get_str(comm_comm_ref, event_data).unwrap_or("");
 
                     println!("timestamp: {time}, event: comm, cpu: {cpu}, pid: {pid}, tid: {tid}, comm: {comm_value}");
                 });
