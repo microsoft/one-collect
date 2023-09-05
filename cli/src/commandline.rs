@@ -79,19 +79,19 @@ impl CommandLineParser{
                     });
 
                     // pid
-                    let pid_ref = format.get_field_ref("pid").unwrap();
+                    let pid_ref = format.get_field_ref_unchecked("pid");
                     let pid_data = format.get_data(pid_ref, _event_data);
                     let pid = u32::from_ne_bytes(<[u8; 4]>::try_from(pid_data)
                                     .unwrap_or([0, 0, 0, 0]));
 
                     // tid
-                    let tid_ref = format.get_field_ref("tid").unwrap();
+                    let tid_ref = format.get_field_ref_unchecked("tid");
                     let tid_data = format.get_data(tid_ref, _event_data);
                     let tid = u32::from_ne_bytes(<[u8; 4]>::try_from(tid_data)
                                     .unwrap_or([0, 0, 0, 0]));
 
                     // comm
-                    let comm_ref = format.get_field_ref("comm[]").unwrap();
+                    let comm_ref = format.get_field_ref_unchecked("comm[]");
                     let comm_data = format.get_data(comm_ref, _event_data);
                     let mut vec : Vec<u8> = Vec::new();
                     vec.extend_from_slice(comm_data);
