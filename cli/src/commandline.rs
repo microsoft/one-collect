@@ -67,7 +67,12 @@ impl CommandLineParser{
                 let ancillary = perf_session.ancillary_data().clone();
                 let time_data = perf_session.time_data_ref().clone();
 
-                perf_session.comm_event().add_callback( move |full_data,format,_event_data| {
+                let comm_event_format = perf_session.comm_event().format();
+                let comm_pid_ref = comm_event_format.get_field_ref_unchecked("pid");
+                let comm_tid_ref = comm_event_format.get_field_ref_unchecked("tid");
+                let comm_comm_ref = comm_event_format.get_field_ref_unchecked("comm[]");
+
+                perf_session.comm_event().add_callback( move |full_data,format,event_data| {
 
                     // timestamp
                     let time = time_data.try_get_u64(full_data).unwrap_or(0) as usize;
@@ -79,25 +84,13 @@ impl CommandLineParser{
                     });
 
                     // pid
-                    let pid_ref = format.get_field_ref("pid").unwrap();
-                    let pid_data = format.get_data(pid_ref, _event_data);
-                    let pid = u32::from_ne_bytes(<[u8; 4]>::try_from(pid_data)
-                                    .unwrap_or([0, 0, 0, 0]));
+                    let pid = format.try_get_u32(comm_pid_ref, event_data).unwrap_or(0);
 
                     // tid
-                    let tid_ref = format.get_field_ref("tid").unwrap();
-                    let tid_data = format.get_data(tid_ref, _event_data);
-                    let tid = u32::from_ne_bytes(<[u8; 4]>::try_from(tid_data)
-                                    .unwrap_or([0, 0, 0, 0]));
+                    let tid = format.try_get_u32(comm_tid_ref, event_data).unwrap_or(0);
 
                     // comm
-                    let comm_ref = format.get_field_ref("comm[]").unwrap();
-                    let comm_data = format.get_data(comm_ref, _event_data);
-                    let mut vec : Vec<u8> = Vec::new();
-                    vec.extend_from_slice(comm_data);
-                    let comm_value = String::from_utf8(vec).unwrap_or_else(|_error |{
-                        String::from("<Unknown>")
-                    });
+                    let comm_value = format.try_get_str(comm_comm_ref, event_data).unwrap_or("");
 
                     println!("timestamp: {time}, event: comm, cpu: {cpu}, pid: {pid}, tid: {tid}, comm: {comm_value}");
                 });

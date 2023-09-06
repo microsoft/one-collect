@@ -179,6 +179,12 @@ impl EventFormat {
         &self.fields
     }
 
+    pub fn get_field_ref_unchecked(
+        &self,
+        name: &str) -> EventFieldRef {
+        self.get_field_ref(name).unwrap()
+    }
+
     pub fn get_field_ref(
         &self,
         name: &str) -> Option<EventFieldRef> {
@@ -277,6 +283,20 @@ impl EventFormat {
 
         match slice[0..2].try_into() {
             Ok(slice) => Some(u16::from_ne_bytes(slice)),
+            Err(_) => None,
+        }
+    }
+
+    pub fn try_get_str<'a>(
+        &self,
+        field_ref: EventFieldRef,
+        data: &'a [u8]) -> Option<&'a str> {
+        let slice = self.get_data(field_ref, data);
+
+        if slice.is_empty() { return Some(""); }
+
+        match std::str::from_utf8(slice) {
+            Ok(str) => Some(str),
             Err(_) => None,
         }
     }
