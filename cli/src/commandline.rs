@@ -95,6 +95,33 @@ impl CommandLineParser{
                     println!("timestamp: {time}, event: comm, cpu: {cpu}, pid: {pid}, tid: {tid}, comm: {comm_value}");
                 });
 
+                let ancillary = perf_session.ancillary_data().clone();
+                let time_data = perf_session.time_data_ref().clone();
+
+                let exit_event_format = perf_session.exit_event().format();
+                let exit_pid_ref = exit_event_format.get_field_ref_unchecked("pid");
+                let exit_tid_ref = exit_event_format.get_field_ref_unchecked("tid");
+
+                perf_session.exit_event().add_callback( move |full_data,format,event_data| {
+
+                    // timestamp
+                    let time = time_data.try_get_u64(full_data).unwrap_or(0) as usize;
+
+                    // cpu
+                    let mut cpu = 0;
+                    ancillary.read( |values| {
+                        cpu = values.cpu();
+                    });
+
+                    // pid
+                    let pid = format.try_get_u32(exit_pid_ref, event_data).unwrap_or(0);
+
+                    // tid
+                    let tid = format.try_get_u32(exit_tid_ref, event_data).unwrap_or(0);
+
+                    println!("timestamp: {time}, event: exit, cpu: {cpu}, pid: {pid}, tid: {tid}");
+                });
+
                 let time_data = perf_session.time_data_ref();
                 let ancillary = perf_session.ancillary_data();
 
