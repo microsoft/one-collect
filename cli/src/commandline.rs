@@ -124,6 +124,8 @@ impl CommandLineParser{
 
                 let time_data = perf_session.time_data_ref();
                 let ancillary = perf_session.ancillary_data();
+                let pid_field = perf_session.pid_field_ref();
+                let tid_field = perf_session.tid_data_ref();
 
                 perf_session.cpu_profile_event().add_callback( move |full_data,_format,_event_data| {
 
@@ -136,7 +138,13 @@ impl CommandLineParser{
                         cpu = values.cpu();
                     });
 
-                    println!("timestamp: {time}, event: cpu_profile, cpu: {cpu}");
+                    // pid
+                    let pid = pid_field.try_get_u32(full_data).unwrap_or(0);
+
+                    // tid
+                    let tid = tid_field.try_get_u32(full_data).unwrap_or(0);
+
+                    println!("timestamp: {time}, event: cpu_profile, cpu: {cpu}, pid: {pid}, tid: {tid}");
                 });
 
                 perf_session.enable().unwrap_or_else( |error| {
