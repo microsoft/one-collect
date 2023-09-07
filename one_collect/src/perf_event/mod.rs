@@ -160,6 +160,7 @@ pub struct PerfSession {
 
     /* Raw data fields */
     ip_field: DataFieldRef,
+    pid_field: DataFieldRef,
     tid_field: DataFieldRef,
     time_field: DataFieldRef,
     address_field: DataFieldRef,
@@ -198,6 +199,7 @@ impl PerfSession {
 
             /* Events */
             ip_field: DataFieldRef::new(),
+            pid_field: DataFieldRef::new(),
             tid_field: DataFieldRef::new(),
             time_field: DataFieldRef::new(),
             address_field: DataFieldRef::new(),
@@ -270,6 +272,10 @@ impl PerfSession {
 
     pub fn ip_data_ref(&self) -> DataFieldRef {
         self.ip_field.clone()
+    }
+
+    pub fn pid_field_ref(&self) -> DataFieldRef {
+        self.pid_field.clone()
     }
 
     pub fn tid_data_ref(&self) -> DataFieldRef {
@@ -385,8 +391,10 @@ impl PerfSession {
 
                         /* PERF_SAMPLE_TID */
                         if perf_data.has_format(abi::PERF_SAMPLE_TID) {
-                            offset += self.tid_field.update(offset, 8);
+                            offset += self.pid_field.update(offset, 4);
+                            offset += self.tid_field.update(offset, 4);
                         } else {
+                            self.pid_field.reset();
                             self.tid_field.reset();
                         }
 
