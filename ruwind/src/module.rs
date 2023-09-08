@@ -59,16 +59,6 @@ impl Module {
             anon: true,
         }
     }
-
-    pub fn copy(&self) -> Self {
-        Self {
-            start: self.start,
-            end: self.end,
-            offset: self.offset,
-            key: self.key,
-            anon: self.anon,
-        }
-    }
 }
 
 impl Ord for Module {

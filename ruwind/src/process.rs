@@ -14,7 +14,7 @@ impl Process {
         let mut child = Self::new();
 
         for module in &self.mods {
-            child.mods.push(module.copy());
+            child.mods.push(*module);
         }
 
         child

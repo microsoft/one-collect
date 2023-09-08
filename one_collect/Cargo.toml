@@ -8,6 +8,7 @@ edition = "2021"
 
 [dependencies]
 syscalls = { version = "0.6.13", features = ["x86_64", "arm"] }
+ruwind = { path = "../ruwind" }
 
 [dev-dependencies]
 criterion = "0.3"

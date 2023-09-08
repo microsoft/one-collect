@@ -4,6 +4,7 @@ pub mod tracefs;
 pub mod perf_event;
 pub mod session;
 pub mod state;
+pub mod helpers;
 
 pub use sharing::{Writable, ReadOnly};
 

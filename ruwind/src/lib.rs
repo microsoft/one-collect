@@ -67,7 +67,7 @@ pub trait ModuleAccessor {
         key: &ModuleKey) -> Option<File>;
 }
 
-#[derive(Eq)]
+#[derive(Eq, Clone, Copy)]
 pub struct Module {
     start: u64,
     end: u64,
