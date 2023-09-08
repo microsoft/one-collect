@@ -95,8 +95,8 @@ impl CommandLineParser{
                     println!("timestamp: {time}, event: comm, cpu: {cpu}, pid: {pid}, tid: {tid}, comm: {comm_value}");
                 });
 
-                let ancillary = perf_session.ancillary_data().clone();
-                let time_data = perf_session.time_data_ref().clone();
+                let ancillary = perf_session.ancillary_data();
+                let time_data = perf_session.time_data_ref();
 
                 let exit_event_format = perf_session.exit_event().format();
                 let exit_pid_ref = exit_event_format.get_field_ref_unchecked("pid");

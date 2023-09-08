@@ -27,10 +27,14 @@ impl ProcessState {
     pub(crate) fn set_name(&mut self, name: &str) {
         self.name = Some(String::from(name));
     }
+
+    fn reset(&mut self) {
+        self.name = None;
+    }
 }
 
 pub struct SessionState {
-    live_processes: HashMap<u32, Box<ProcessState>>,
+    live_processes: HashMap<u32, ProcessState>,
 }
 
 impl SessionState {
@@ -41,9 +45,9 @@ impl SessionState {
     }
 
     pub(crate) fn new_process(&mut self, pid: u32) -> &mut ProcessState {
-        let state = Box::new(ProcessState::new(pid));
-        self.live_processes.insert(pid, state);
-        self.live_processes.get_mut(&pid).unwrap()
+        self.live_processes.entry(pid)
+            .and_modify(|proc| { proc.reset() })
+            .or_insert_with(|| ProcessState::new(pid))
     }
 
     pub(crate) fn drop_process(&mut self, pid: u32) {
@@ -51,17 +55,11 @@ impl SessionState {
     }
 
     pub fn process(&self, pid: u32) -> Option<&ProcessState> {
-        match self.live_processes.get(&pid) {
-            Some(state) => Some(state),
-            None => None,
-        }
+        self.live_processes.get(&pid)
     }
 
     pub fn process_mut(&mut self, pid: u32) -> Option<&mut ProcessState> {
-        match self.live_processes.get_mut(&pid) {
-            Some(state) => Some(state),
-            None => None,
-        }
+        self.live_processes.get_mut(&pid)
     }
 }
 
