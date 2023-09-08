@@ -122,6 +122,7 @@ impl CommandLineParser{
                     println!("timestamp: {time}, event: exit, cpu: {cpu}, pid: {pid}, tid: {tid}");
                 });
 
+                let session_state = perf_session.session_state();
                 let time_data = perf_session.time_data_ref();
                 let ancillary = perf_session.ancillary_data();
                 let pid_field = perf_session.pid_field_ref();
@@ -144,7 +145,19 @@ impl CommandLineParser{
                     // tid
                     let tid = tid_field.try_get_u32(full_data).unwrap_or(0);
 
-                    println!("timestamp: {time}, event: cpu_profile, cpu: {cpu}, pid: {pid}, tid: {tid}");
+                    // session state
+                    // NOTE: This is what will be required in order to consume tracked state.
+                    // I expect that if the user doesn't ask for session state (not yet possible),
+                    // then session_state will still exist, but all calls to SessionState::process will return None.
+                    session_state.read(|state| {
+                        if let Some(proc) = state.process(pid) {
+                            let name = proc.name();
+                            println!("timestamp: {time}, event: cpu_profile, cpu: {cpu}, pid: {pid}, comm: {name}, tid: {tid}");
+                        }
+                        else {
+                            println!("timestamp: {time}, event: cpu_profile, cpu: {cpu}, pid: {pid}, tid: {tid}");
+                        }
+                    });
                 });
 
                 perf_session.enable().unwrap_or_else( |error| {
