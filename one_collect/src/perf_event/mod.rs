@@ -6,6 +6,7 @@ use std::rc::Rc;
 use super::*;
 use crate::sharing::*;
 use crate::event::*;
+use crate::state::*;
 
 pub mod abi;
 pub mod rb;
@@ -157,9 +158,11 @@ pub trait PerfDataSource {
 pub struct PerfSession {
     source: Box<dyn PerfDataSource>,
     events: HashMap<usize, Event>,
+    state: Writable<SessionState>,
 
     /* Raw data fields */
     ip_field: DataFieldRef,
+    pid_field: DataFieldRef,
     tid_field: DataFieldRef,
     time_field: DataFieldRef,
     address_field: DataFieldRef,
@@ -192,12 +195,14 @@ pub struct PerfSession {
 impl PerfSession {
     pub fn new(
         source: Box<dyn PerfDataSource>) -> Self {
-        Self {
+        let mut session = Self {
             source,
             events: HashMap::new(),
+            state: Writable::new(SessionState::new()),
 
             /* Events */
             ip_field: DataFieldRef::new(),
+            pid_field: DataFieldRef::new(),
             tid_field: DataFieldRef::new(),
             time_field: DataFieldRef::new(),
             address_field: DataFieldRef::new(),
@@ -225,11 +230,66 @@ impl PerfSession {
 
             /* Ancillary data */
             ancillary: Writable::new(AncillaryData::default()),
-        }
+        };
+
+        // TODO: Make this opt-in.
+        session.enable_session_state();
+
+        session
+    }
+
+    fn enable_session_state(&mut self) {
+        let session_state = self.state.clone();
+        let comm_event = self.comm_event();
+        let comm_event_format = comm_event.format();
+        let pid_field = comm_event_format.get_field_ref_unchecked("pid");
+        let tid_field = comm_event_format.get_field_ref_unchecked("tid");
+        let comm_field = comm_event_format.get_field_ref_unchecked("comm[]");
+
+        comm_event.add_callback(move |_full_data, format, event_data| {
+            let pid = format.try_get_u32(pid_field, event_data).unwrap_or(0);
+            let tid = format.try_get_u32(tid_field, event_data).unwrap_or(0);
+
+            // When pid == tid, the process is new.  Otherwise, it is a new thread.
+            // Ignore swapper (pid 0).
+            if (pid == tid) && (pid != 0) {
+                let comm = format.try_get_str(comm_field, event_data);
+
+                session_state.write(|state| {
+                    let proc = state.new_process(pid);
+                    if let Some(proc_name) = comm {
+                        proc.set_name(proc_name);
+                    }
+                });
+            }
+        });
+
+        let session_state = self.state.clone();
+        let exit_event = self.exit_event();
+        let exit_event_format = exit_event.format();
+        let pid_field = exit_event_format.get_field_ref_unchecked("pid");
+        let tid_field = exit_event_format.get_field_ref_unchecked("tid");
+
+        self.exit_event().add_callback(move |_full_data, format, event_data| {
+           let pid = format.try_get_u32(pid_field, event_data).unwrap_or(0);
+           let tid = format.try_get_u32(tid_field, event_data).unwrap_or(0);
+
+           // When pid == tid, the process has died.  Otherwise it is a thread death.
+           // Ignore swapper (pid 0).
+           if (pid == tid) && (pid != 0) {
+               session_state.write(|state| {
+                   state.drop_process(pid);
+               });
+           }
+        });
     }
 
     pub fn ancillary_data(&self) -> ReadOnly<AncillaryData> {
         self.ancillary.read_only()
+    }
+
+    pub fn session_state(&self) -> ReadOnly<SessionState> {
+        self.state.read_only()
     }
 
     pub fn cpu_profile_event(&mut self) -> &mut Event {
@@ -270,6 +330,10 @@ impl PerfSession {
 
     pub fn ip_data_ref(&self) -> DataFieldRef {
         self.ip_field.clone()
+    }
+
+    pub fn pid_field_ref(&self) -> DataFieldRef {
+        self.pid_field.clone()
     }
 
     pub fn tid_data_ref(&self) -> DataFieldRef {
@@ -385,8 +449,10 @@ impl PerfSession {
 
                         /* PERF_SAMPLE_TID */
                         if perf_data.has_format(abi::PERF_SAMPLE_TID) {
-                            offset += self.tid_field.update(offset, 8);
+                            offset += self.pid_field.update(offset, 4);
+                            offset += self.tid_field.update(offset, 4);
                         } else {
+                            self.pid_field.reset();
                             self.tid_field.reset();
                         }
 

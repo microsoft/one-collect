@@ -95,8 +95,38 @@ impl CommandLineParser{
                     println!("timestamp: {time}, event: comm, cpu: {cpu}, pid: {pid}, tid: {tid}, comm: {comm_value}");
                 });
 
+                let ancillary = perf_session.ancillary_data();
+                let time_data = perf_session.time_data_ref();
+
+                let exit_event_format = perf_session.exit_event().format();
+                let exit_pid_ref = exit_event_format.get_field_ref_unchecked("pid");
+                let exit_tid_ref = exit_event_format.get_field_ref_unchecked("tid");
+
+                perf_session.exit_event().add_callback( move |full_data,format,event_data| {
+
+                    // timestamp
+                    let time = time_data.try_get_u64(full_data).unwrap_or(0) as usize;
+
+                    // cpu
+                    let mut cpu = 0;
+                    ancillary.read( |values| {
+                        cpu = values.cpu();
+                    });
+
+                    // pid
+                    let pid = format.try_get_u32(exit_pid_ref, event_data).unwrap_or(0);
+
+                    // tid
+                    let tid = format.try_get_u32(exit_tid_ref, event_data).unwrap_or(0);
+
+                    println!("timestamp: {time}, event: exit, cpu: {cpu}, pid: {pid}, tid: {tid}");
+                });
+
+                let session_state = perf_session.session_state();
                 let time_data = perf_session.time_data_ref();
                 let ancillary = perf_session.ancillary_data();
+                let pid_field = perf_session.pid_field_ref();
+                let tid_field = perf_session.tid_data_ref();
 
                 perf_session.cpu_profile_event().add_callback( move |full_data,_format,_event_data| {
 
@@ -109,7 +139,25 @@ impl CommandLineParser{
                         cpu = values.cpu();
                     });
 
-                    println!("timestamp: {time}, event: cpu_profile, cpu: {cpu}");
+                    // pid
+                    let pid = pid_field.try_get_u32(full_data).unwrap_or(0);
+
+                    // tid
+                    let tid = tid_field.try_get_u32(full_data).unwrap_or(0);
+
+                    // session state
+                    // NOTE: This is what will be required in order to consume tracked state.
+                    // I expect that if the user doesn't ask for session state (not yet possible),
+                    // then session_state will still exist, but all calls to SessionState::process will return None.
+                    session_state.read(|state| {
+                        if let Some(proc) = state.process(pid) {
+                            let name = proc.name();
+                            println!("timestamp: {time}, event: cpu_profile, cpu: {cpu}, pid: {pid}, comm: {name}, tid: {tid}");
+                        }
+                        else {
+                            println!("timestamp: {time}, event: cpu_profile, cpu: {cpu}, pid: {pid}, tid: {tid}");
+                        }
+                    });
                 });
 
                 perf_session.enable().unwrap_or_else( |error| {
