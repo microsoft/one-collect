@@ -6,6 +6,7 @@ use std::rc::Rc;
 use super::*;
 use crate::sharing::*;
 use crate::event::*;
+use crate::state::*;
 
 pub mod abi;
 pub mod rb;
@@ -157,6 +158,7 @@ pub trait PerfDataSource {
 pub struct PerfSession {
     source: Box<dyn PerfDataSource>,
     events: HashMap<usize, Event>,
+    state: Writable<SessionState>,
 
     /* Raw data fields */
     ip_field: DataFieldRef,
@@ -193,9 +195,10 @@ pub struct PerfSession {
 impl PerfSession {
     pub fn new(
         source: Box<dyn PerfDataSource>) -> Self {
-        Self {
+        let mut session = Self {
             source,
             events: HashMap::new(),
+            state: Writable::new(SessionState::new()),
 
             /* Events */
             ip_field: DataFieldRef::new(),
@@ -227,11 +230,68 @@ impl PerfSession {
 
             /* Ancillary data */
             ancillary: Writable::new(AncillaryData::default()),
-        }
+        };
+
+        // TODO: Make this opt-in.
+        Self::enable_session_state(&mut session);
+
+        session
+    }
+
+    fn enable_session_state(session: &mut PerfSession) {
+        let session_state = session.state.clone();
+
+        session.comm_event().add_callback(move |_full_data, format, event_data| {
+
+            // TODO: Need a better way to get the pid and comm field refs.
+            // Because these are part of the ABI, we could just hardcode the index,
+            // but it would be nice if we can find a way to generalize this.
+            let pid_field = format.get_field_ref_unchecked("pid");
+            let pid = format.try_get_u32(pid_field, event_data).unwrap_or(0);
+
+            let tid_field = format.get_field_ref_unchecked("tid");
+            let tid = format.try_get_u32(tid_field, event_data).unwrap_or(0);
+
+            // When pid == tid, the process is new.  Otherwise, it is a new thread.
+            // Ignore swapper (pid 0).
+            if (pid == tid) && (pid != 0) {
+                let comm_field = format.get_field_ref_unchecked("comm[]");
+                let comm = format.try_get_str(comm_field, event_data);
+
+                session_state.write(|state| {
+                    let proc = state.new_process(pid);
+                    if let Some(proc_name) = comm {
+                        proc.set_name(proc_name);
+                    }
+                });
+            }
+        });
+
+        let session_state = session.state.clone();
+
+        session.exit_event().add_callback(move |_full_data, format, event_data| {
+           let pid_field = format.get_field_ref_unchecked("pid");
+           let pid = format.try_get_u32(pid_field, event_data).unwrap_or(0);
+
+           let tid_field = format.get_field_ref_unchecked("tid");
+           let tid = format.try_get_u32(tid_field, event_data).unwrap_or(0);
+
+           // When pid == tid, the process has died.  Otherwise it is a thread death.
+           // Ignore swapper (pid 0).
+           if (pid == tid) && (pid != 0) {
+               session_state.write(|state| {
+                   state.drop_process(pid);
+               });
+           }
+        });
     }
 
     pub fn ancillary_data(&self) -> ReadOnly<AncillaryData> {
         self.ancillary.read_only()
+    }
+
+    pub fn session_state(&self) -> ReadOnly<SessionState> {
+        self.state.read_only()
     }
 
     pub fn cpu_profile_event(&mut self) -> &mut Event {

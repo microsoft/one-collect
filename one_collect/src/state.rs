@@ -40,23 +40,24 @@ impl SessionState {
         }
     }
 
-    fn new_process(&mut self, pid: u32) {
+    pub(crate) fn new_process(&mut self, pid: u32) -> &mut ProcessState {
         let state = Box::new(ProcessState::new(pid));
         self.live_processes.insert(pid, state);
+        self.live_processes.get_mut(&pid).unwrap()
     }
 
-    fn drop_process(&mut self, pid: u32) {
+    pub(crate) fn drop_process(&mut self, pid: u32) {
         self.live_processes.remove(&pid);
     }
 
-    fn process(&self, pid: u32) -> Option<&ProcessState> {
+    pub fn process(&self, pid: u32) -> Option<&ProcessState> {
         match self.live_processes.get(&pid) {
             Some(state) => Some(state),
             None => None,
         }
     }
 
-    fn process_mut(&mut self, pid: u32) -> Option<&mut ProcessState> {
+    pub fn process_mut(&mut self, pid: u32) -> Option<&mut ProcessState> {
         match self.live_processes.get_mut(&pid) {
             Some(state) => Some(state),
             None => None,
