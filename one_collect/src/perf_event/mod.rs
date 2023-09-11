@@ -265,6 +265,21 @@ impl PerfSession {
         });
 
         let session_state = self.state.clone();
+        let fork_event = self.fork_event();
+        let fork_event_format = fork_event.format();
+        let pid_field: EventFieldRef = fork_event_format.get_field_ref_unchecked("pid");
+        let ppid_field = fork_event_format.get_field_ref_unchecked("ppid");
+
+        fork_event.add_callback(move |_full_data, format, event_data| {
+            let pid = format.try_get_u32(pid_field, event_data).unwrap_or(0);
+            let ppid = format.try_get_u32(ppid_field, event_data).unwrap_or(0);
+
+            session_state.write(|state| {
+                state.fork_process(pid, ppid);
+            })
+        });
+
+        let session_state = self.state.clone();
         let exit_event = self.exit_event();
         let exit_event_format = exit_event.format();
         let pid_field = exit_event_format.get_field_ref_unchecked("pid");
