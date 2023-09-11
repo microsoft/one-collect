@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::time::Duration;
 use std::array::TryFromSliceError;
 use std::collections::HashMap;
@@ -246,6 +247,9 @@ impl PerfSession {
         let tid_field = comm_event_format.get_field_ref_unchecked("tid");
         let comm_field = comm_event_format.get_field_ref_unchecked("comm[]");
 
+        let mut path_buf = PathBuf::new();
+        path_buf.push("/proc");
+
         comm_event.add_callback(move |_full_data, format, event_data| {
             let pid = format.try_get_u32(pid_field, event_data).unwrap_or(0);
             let tid = format.try_get_u32(tid_field, event_data).unwrap_or(0);
@@ -257,8 +261,21 @@ impl PerfSession {
 
                 session_state.write(|state| {
                     let proc = state.new_process(pid);
+                    let mut use_procfs = false;
                     if let Some(proc_name) = comm {
-                        proc.set_name(proc_name);
+                        // Check procfs if proc_name is 15 chars (length limit of comm_event).
+                        if proc_name.len() == 15 {
+                            path_buf.push(pid.to_string());
+                            if let Some(proc_name) = procfs::get_comm(&mut path_buf) {
+                                use_procfs = true;
+                                proc.set_name(proc_name.as_str());
+                            }
+                            path_buf.pop();
+                        }
+
+                        if !use_procfs {
+                            proc.set_name(proc_name);
+                        }
                     }
                 });
             }
