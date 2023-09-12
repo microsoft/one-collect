@@ -1,7 +1,7 @@
 use std::fs;
-use std::path;
+use std::path::{self, PathBuf};
 
-pub fn get_comm(
+pub(crate) fn get_comm(
     path: &mut path::PathBuf) -> Option<String> {
     path.push("comm");
     let result = fs::read_to_string(&path);
@@ -56,3 +56,29 @@ fn parse_long_comm(
         },
     }
 }
+
+pub(crate) fn iter_processes(mut callback: impl FnMut(u32, &mut PathBuf)) {
+    let mut path_buf = PathBuf::new();
+    path_buf.push("/proc");
+
+    for entry in fs::read_dir(path_buf)
+        .expect("Unable to open procfs") {
+            let entry = entry.expect("Unable to get path");
+            let mut path = entry.path();
+
+            if path.components().count() == 3 {
+                let mut iter = path.iter();
+
+                iter.next(); // "/"
+                iter.next(); // "proc"
+
+                if let Some(pid_str) = iter.next() { // "<pid>"
+                    let s = pid_str.to_str().unwrap();
+
+                    if let Ok(pid)= s.parse::<u32>() {
+                        (callback)(pid, &mut path);
+                    }
+                }
+            }
+        }
+    }

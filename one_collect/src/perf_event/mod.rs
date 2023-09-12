@@ -432,6 +432,9 @@ impl PerfSession {
     pub fn parse_until(
         &mut self,
         should_stop: impl Fn() -> bool) -> Result<(), TryFromSliceError> {
+
+        self.env_start();
+
         loop {
             let mut i: u32 = 0;
 
@@ -666,6 +669,50 @@ impl PerfSession {
         }
 
         Ok(())
+    }
+
+    fn env_start(&mut self) {
+        let comm_event = self.comm_event();
+
+        procfs::iter_processes(|pid, path_buf| {
+            const MAX_COMM_LEN : usize = 255;
+            const EVENT_DATA_SIZE : usize =
+                        4 +  // pid: u32
+                        4 +  // tid: u32
+                        MAX_COMM_LEN;
+            let pid_offset = 0;
+            let tid_offset = pid_offset + 4;
+            let comm_offset = tid_offset + 4;
+
+            // Comm is encoded as a UTF-8 string.
+            let comm = procfs::get_comm(path_buf)
+                .unwrap_or(String::new());
+            let mut comm_len = comm.len();
+            let mut comm_bytes = comm.as_bytes();
+
+            // Truncate to MAX_COMM_LEN if necessary.
+            if comm_len > MAX_COMM_LEN {
+                comm_len = MAX_COMM_LEN;
+                comm_bytes = &comm_bytes[0..MAX_COMM_LEN];
+            }
+
+            // Allocate and fill the payload.
+            // For new processes, pid == tid.
+            let mut event_data: [u8; EVENT_DATA_SIZE] = [0; EVENT_DATA_SIZE];
+            let pid_bytes = pid.to_ne_bytes();
+            event_data[pid_offset..pid_offset+4].copy_from_slice(&pid_bytes);
+            event_data[tid_offset..tid_offset+4].copy_from_slice(&pid_bytes);
+            event_data[comm_offset..comm_offset+comm_len].copy_from_slice(comm_bytes);
+
+            let mut full_data: Vec<u8> = vec![];
+            abi::Header::write(0, 0, &event_data, &mut full_data);
+
+            // Dispatch the event
+            let offset = abi::Header::data_offset();
+            comm_event.process(
+                &full_data,
+                &full_data[offset..]);
+        });
     }
 }
 
