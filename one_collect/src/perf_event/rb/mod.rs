@@ -252,7 +252,7 @@ impl RingBufBuilder<Kernel> {
     pub fn with_mmap_records(&self) -> Self {
         let mut attributes = self.attributes;
 
-        attributes.flags |= FLAG_MMAP2;
+        attributes.flags |= FLAG_MMAP | FLAG_MMAP2;
 
         Self {
             attributes,
