@@ -28,6 +28,16 @@ impl ProcessState {
         self.name = Some(String::from(name));
     }
 
+    fn fork(&self, pid: u32) -> Self {
+        ProcessState {
+            pid,
+            name: match &self.name {
+                Some(name)=> Some(String::from(name)),
+                None => None,
+            }
+        }
+    }
+
     fn reset(&mut self) {
         self.name = None;
     }
@@ -48,6 +58,15 @@ impl SessionState {
         self.live_processes.entry(pid)
             .and_modify(|proc| { proc.reset() })
             .or_insert_with(|| ProcessState::new(pid))
+    }
+
+    pub(crate) fn fork_process(&mut self, pid: u32, ppid: u32) {
+        if let Some(proc) = self.live_processes.get(&ppid) {
+            self.live_processes.insert(pid, proc.fork(pid));
+        }
+        else {
+            self.new_process(pid);
+        }
     }
 
     pub(crate) fn drop_process(&mut self, pid: u32) {
@@ -136,6 +155,43 @@ mod tests {
         assert!(session_state.process(pid).is_none());
 
         session_state.new_process(pid);
+        let process_state = session_state.process(pid).unwrap();
+        assert_eq!(process_state.pid(), pid);
+        assert_eq!(process_state.name(), "");
+    }
+
+    #[test]
+    fn fork() {
+        let mut session_state = SessionState::new();
+
+        let pid = 1000;
+        session_state.new_process(pid);
+
+        let process_state = session_state.process_mut(pid).unwrap();
+        assert_eq!(process_state.pid(), pid);
+        assert_eq!(process_state.name(), "");
+
+        let name = "process-name";
+        process_state.set_name(name);
+        assert_eq!(process_state.name(), name);
+
+        let new_pid = 1001;
+        session_state.fork_process(new_pid, pid);
+
+        let process_state = session_state.process(new_pid).unwrap();
+        assert_eq!(process_state.pid(), new_pid);
+        assert_eq!(process_state.name(), name);
+    }
+
+    #[test]
+    fn fork_nonexistent_process() {
+        let mut session_state = SessionState::new();
+
+        let pid = 1000;
+        let ppid = 1001;
+        session_state.fork_process(pid, ppid);
+        assert!(session_state.process(ppid).is_none());
+
         let process_state = session_state.process(pid).unwrap();
         assert_eq!(process_state.pid(), pid);
         assert_eq!(process_state.name(), "");
