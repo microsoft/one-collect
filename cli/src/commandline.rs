@@ -1,5 +1,5 @@
 use clap::{Arg, command, Command, value_parser};
-use one_collect::session::{SessionBuilder, SessionEgress, FileSessionEgress};
+use one_collect::{session::{SessionBuilder, SessionEgress, FileSessionEgress}, state::ProcessTrackingOptions};
 
 pub (crate) struct CommandLineParser{
     cmd : Command,
@@ -54,8 +54,10 @@ impl CommandLineParser{
 
         if let Some(subcommand) = matches.subcommand_matches("debug") {
             let seconds = subcommand.get_one::<u64>("seconds").expect("required");
+            let options = ProcessTrackingOptions::new(true);
             let builder = SessionBuilder::new(SessionEgress::Live)
-                .with_profiling(1000);
+                .with_profiling(1000)
+                .track_process_state(options);
 
             let mut session = builder.build().unwrap_or_else( |error| {
                 println!("Error building perf_events session: {}", error);

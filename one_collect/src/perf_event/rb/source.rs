@@ -7,6 +7,7 @@ pub struct RingBufSessionBuilder {
     event_builder: Option<RingBufBuilder<Tracepoint>>,
     profiling_builder: Option<RingBufBuilder<Profiling>>,
     cswitch_builder: Option<RingBufBuilder<ContextSwitches>>,
+    process_tracking_options: ProcessTrackingOptions,
 }
 
 impl Default for RingBufSessionBuilder {
@@ -24,6 +25,7 @@ impl RingBufSessionBuilder {
             event_builder: None,
             profiling_builder: None,
             cswitch_builder: None,
+            process_tracking_options: ProcessTrackingOptions::default(),
         }
     }
 
@@ -37,6 +39,7 @@ impl RingBufSessionBuilder {
             event_builder: self.event_builder.take(),
             profiling_builder: self.profiling_builder.take(),
             cswitch_builder: self.cswitch_builder.take(),
+            process_tracking_options: self.process_tracking_options,
         }
     }
 
@@ -50,6 +53,7 @@ impl RingBufSessionBuilder {
             event_builder: self.event_builder.take(),
             profiling_builder: self.profiling_builder.take(),
             cswitch_builder: self.cswitch_builder.take(),
+            process_tracking_options: self.process_tracking_options,
         }
     }
 
@@ -63,6 +67,7 @@ impl RingBufSessionBuilder {
             event_builder: self.event_builder.take(),
             profiling_builder: self.profiling_builder.take(),
             cswitch_builder: self.cswitch_builder.take(),
+            process_tracking_options: self.process_tracking_options,
         }
     }
 
@@ -76,6 +81,7 @@ impl RingBufSessionBuilder {
             event_builder: Some(builder),
             profiling_builder: self.profiling_builder.take(),
             cswitch_builder: self.cswitch_builder.take(),
+            process_tracking_options: self.process_tracking_options,
         }
     }
 
@@ -89,6 +95,7 @@ impl RingBufSessionBuilder {
             event_builder: self.event_builder.take(),
             profiling_builder: Some(builder),
             cswitch_builder: self.cswitch_builder.take(),
+            process_tracking_options: self.process_tracking_options,
         }
     }
 
@@ -102,6 +109,21 @@ impl RingBufSessionBuilder {
             event_builder: self.event_builder.take(),
             profiling_builder: self.profiling_builder.take(),
             cswitch_builder: Some(builder),
+            process_tracking_options: self.process_tracking_options,
+        }
+    }
+
+    pub fn track_process_state(
+        &mut self,
+        options: ProcessTrackingOptions) -> Self {
+        Self {
+            pages: self.pages,
+            target_pid: self.target_pid.take(),
+            kernel_builder: self.kernel_builder.take(),
+            event_builder: self.event_builder.take(),
+            profiling_builder: self.profiling_builder.take(),
+            cswitch_builder: self.cswitch_builder.take(),
+            process_tracking_options: options,
         }
     }
 
@@ -116,7 +138,7 @@ impl RingBufSessionBuilder {
 
         source.build()?;
 
-        Ok(PerfSession::new(Box::new(source)))
+        Ok(PerfSession::new(Box::new(source), self.process_tracking_options))
     }
 }
 

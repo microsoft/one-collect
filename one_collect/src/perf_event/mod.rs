@@ -191,11 +191,15 @@ pub struct PerfSession {
 
     /* Ancillary data */
     ancillary: Writable<AncillaryData>,
+
+    /* State tracking */
+    process_tracking_options: ProcessTrackingOptions,
 }
 
 impl PerfSession {
     pub fn new(
-        source: Box<dyn PerfDataSource>) -> Self {
+        source: Box<dyn PerfDataSource>,
+        process_tracking_options: ProcessTrackingOptions) -> Self {
         let mut session = Self {
             source,
             events: HashMap::new(),
@@ -231,73 +235,82 @@ impl PerfSession {
 
             /* Ancillary data */
             ancillary: Writable::new(AncillaryData::default()),
+
+            /* State tracking */
+            process_tracking_options,
         };
 
-        // TODO: Make this opt-in.
-        session.enable_session_state();
+        session.track_processes(&process_tracking_options);
 
         session
     }
 
-    fn enable_session_state(&mut self) {
-        let session_state = self.state.clone();
-        let comm_event = self.comm_event();
-        let comm_event_format = comm_event.format();
-        let pid_field = comm_event_format.get_field_ref_unchecked("pid");
-        let tid_field = comm_event_format.get_field_ref_unchecked("tid");
-        let comm_field = comm_event_format.get_field_ref_unchecked("comm[]");
+    fn track_processes(
+        &mut self,
+        process_tracking_options: &ProcessTrackingOptions) {
 
-        let mut path_buf = PathBuf::new();
-        path_buf.push("/proc");
+            if !process_tracking_options.any() {
+                return;
+            }
 
-        comm_event.add_callback(move |_full_data, format, event_data| {
+            let session_state = self.state.clone();
+            let comm_event = self.comm_event();
+            let comm_event_format = comm_event.format();
+            let pid_field = comm_event_format.get_field_ref_unchecked("pid");
+            let tid_field = comm_event_format.get_field_ref_unchecked("tid");
+            let comm_field = comm_event_format.get_field_ref_unchecked("comm[]");
+
+            let mut path_buf = PathBuf::new();
+            path_buf.push("/proc");
+
+            comm_event.add_callback(move |_full_data, format, event_data| {
+                let pid = format.try_get_u32(pid_field, event_data).unwrap_or(0);
+                let tid = format.try_get_u32(tid_field, event_data).unwrap_or(0);
+
+                // When pid == tid, the process is new.  Otherwise, it is a new thread.
+                // Ignore swapper (pid 0).
+                if (pid == tid) && (pid != 0) {
+                    let comm = format.try_get_str(comm_field, event_data);
+
+                    session_state.write(|state| {
+                        let proc = state.new_process(pid);
+                        let mut use_procfs = false;
+                        if let Some(proc_name) = comm {
+                            // Check procfs if proc_name is 15 chars (length limit of comm_event).
+                            if proc_name.len() == 15 {
+                                path_buf.push(pid.to_string());
+                                if let Some(proc_name) = procfs::get_comm(&mut path_buf) {
+                                    use_procfs = true;
+                                    proc.set_name(proc_name.as_str());
+                                }
+                                path_buf.pop();
+                            }
+
+                            if !use_procfs {
+                                proc.set_name(proc_name);
+                            }
+                        }
+                    });
+                }
+            });
+
+            let session_state = self.state.clone();
+            let exit_event = self.exit_event();
+            let exit_event_format = exit_event.format();
+            let pid_field = exit_event_format.get_field_ref_unchecked("pid");
+            let tid_field = exit_event_format.get_field_ref_unchecked("tid");
+
+            self.exit_event().add_callback(move |_full_data, format, event_data| {
             let pid = format.try_get_u32(pid_field, event_data).unwrap_or(0);
             let tid = format.try_get_u32(tid_field, event_data).unwrap_or(0);
 
-            // When pid == tid, the process is new.  Otherwise, it is a new thread.
+            // When pid == tid, the process has died.  Otherwise it is a thread death.
             // Ignore swapper (pid 0).
             if (pid == tid) && (pid != 0) {
-                let comm = format.try_get_str(comm_field, event_data);
-
                 session_state.write(|state| {
-                    let proc = state.new_process(pid);
-                    let mut use_procfs = false;
-                    if let Some(proc_name) = comm {
-                        // Check procfs if proc_name is 15 chars (length limit of comm_event).
-                        if proc_name.len() == 15 {
-                            path_buf.push(pid.to_string());
-                            if let Some(proc_name) = procfs::get_comm(&mut path_buf) {
-                                use_procfs = true;
-                                proc.set_name(proc_name.as_str());
-                            }
-                            path_buf.pop();
-                        }
-
-                        if !use_procfs {
-                            proc.set_name(proc_name);
-                        }
-                    }
+                    state.drop_process(pid);
                 });
             }
-        });
-
-        let session_state = self.state.clone();
-        let exit_event = self.exit_event();
-        let exit_event_format = exit_event.format();
-        let pid_field = exit_event_format.get_field_ref_unchecked("pid");
-        let tid_field = exit_event_format.get_field_ref_unchecked("tid");
-
-        self.exit_event().add_callback(move |_full_data, format, event_data| {
-           let pid = format.try_get_u32(pid_field, event_data).unwrap_or(0);
-           let tid = format.try_get_u32(tid_field, event_data).unwrap_or(0);
-
-           // When pid == tid, the process has died.  Otherwise it is a thread death.
-           // Ignore swapper (pid 0).
-           if (pid == tid) && (pid != 0) {
-               session_state.write(|state| {
-                   state.drop_process(pid);
-               });
-           }
         });
     }
 
@@ -433,7 +446,7 @@ impl PerfSession {
         &mut self,
         should_stop: impl Fn() -> bool) -> Result<(), TryFromSliceError> {
 
-        self.env_start();
+        self.capture_environment();
 
         loop {
             let mut i: u32 = 0;
@@ -671,7 +684,12 @@ impl PerfSession {
         Ok(())
     }
 
-    fn env_start(&mut self) {
+    fn capture_environment(&mut self) {
+
+        if !self.process_tracking_options.process_names() {
+            return;
+        }
+
         let comm_event = self.comm_event();
 
         procfs::iter_processes(|pid, path_buf| {
@@ -821,7 +839,7 @@ mod tests {
                 "3".into(), "unsigned char".into(),
                 LocationType::Static, 2, 1));
 
-        let mut session = PerfSession::new(Box::new(mock));
+        let mut session = PerfSession::new(Box::new(mock), ProcessTrackingOptions::default());
 
         let count = Arc::new(AtomicUsize::new(0));
 
@@ -914,7 +932,7 @@ mod tests {
         perf_data.clear();
 
         /* Create session with our mock data */
-        let mut session = PerfSession::new(Box::new(mock));
+        let mut session = PerfSession::new(Box::new(mock), ProcessTrackingOptions::default());
 
         /* Create a Mock event that describes our mock data */
         let mut e = Event::new(id as usize, "test".into());

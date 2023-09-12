@@ -1,5 +1,38 @@
 use std::collections::HashMap;
 
+#[derive(Copy,Default,Debug)]
+pub struct ProcessTrackingOptions {
+    process_names: bool,
+}
+
+impl ProcessTrackingOptions {
+    pub fn new(process_names: bool) -> Self {
+        ProcessTrackingOptions {
+             process_names,
+        }
+    }
+
+    pub fn process_names(&self) -> bool {
+        self.process_names
+    }
+
+    pub fn any(&self) -> bool {
+        self.process_names()
+    }
+}
+
+impl Clone for ProcessTrackingOptions {
+    fn clone(&self) -> Self {
+        ProcessTrackingOptions {
+            process_names: self.process_names,
+        }
+    }
+
+    fn clone_from(&mut self, source: &Self) {
+        self.process_names = source.process_names;
+    }
+}
+
 pub struct ProcessState {
     pid: u32,
     name: Option<String>,
