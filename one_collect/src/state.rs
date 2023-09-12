@@ -64,6 +64,9 @@ impl SessionState {
         if let Some(proc) = self.live_processes.get(&ppid) {
             self.live_processes.insert(pid, proc.fork(pid));
         }
+        else {
+            self.new_process(pid);
+        }
     }
 
     pub(crate) fn drop_process(&mut self, pid: u32) {
@@ -178,5 +181,19 @@ mod tests {
         let process_state = session_state.process(new_pid).unwrap();
         assert_eq!(process_state.pid(), new_pid);
         assert_eq!(process_state.name(), name);
+    }
+
+    #[test]
+    fn fork_nonexistent_process() {
+        let mut session_state = SessionState::new();
+
+        let pid = 1000;
+        let ppid = 1001;
+        session_state.fork_process(pid, ppid);
+        assert!(session_state.process(ppid).is_none());
+
+        let process_state = session_state.process(pid).unwrap();
+        assert_eq!(process_state.pid(), pid);
+        assert_eq!(process_state.name(), "");
     }
 }
