@@ -764,7 +764,7 @@ impl PerfSession {
 
         let ancillary = self.ancillary.clone();
         let comm_event = self.comm_event();
-        let attributes = RingBufOptions::common_attributes();
+        let attributes = RingBufBuilder::common_attributes();
 
         procfs::iter_processes(|pid, path_buf| {
             const MAX_COMM_LEN : usize = 255;

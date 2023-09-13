@@ -145,18 +145,15 @@ impl<'a> Session<'a> {
             .with_comm_records();
         ring_buf_builder = ring_buf_builder.with_kernel_events(kernel_builder);
 
-        // Enable call stacks if requested.
-        let mut options = RingBufOptions::new();
-
-        if builder.with_call_stacks {
-            options = options.with_callchain_data();
-        }
-
         // Enable profiling if requested.
         if builder.with_profiling {
-            let profiling_builder = RingBufBuilder::for_profiling(
-                &options,
+            let mut profiling_builder = RingBufBuilder::for_profiling(
                 builder.profiling_frequency);
+
+            // Enable call stacks if requested.
+            if builder.with_call_stacks {
+                profiling_builder = profiling_builder.with_callchain_data();
+            }
 
             ring_buf_builder = ring_buf_builder.with_profiling_events(profiling_builder);
         }

@@ -2,7 +2,6 @@ use one_collect::perf_event::{
     self,
     PerfSession,
     RingBufBuilder,
-    RingBufOptions,
     RingBufSessionBuilder
 };
 
@@ -125,12 +124,9 @@ fn main() {
     let one_sec = std::time::Duration::from_secs(1);
     let need_permission = "Need permission (run via sudo?)";
 
-    /* Default options */
-    let options = RingBufOptions::default();
-
     /* Sample 100 times a sec (10 ms interrupts) */
     let freq = 100;
-    let cpu = RingBufBuilder::for_profiling(&options, freq);
+    let cpu = RingBufBuilder::for_profiling(freq);
 
     /* Build up cpu session */
     let mut session = RingBufSessionBuilder::new()

@@ -29,99 +29,63 @@ unsafe fn mb() {
     asm!("dsb sy");
 }
 
-pub struct RingBufOptions {
-    attributes: perf_event_attr,
-}
+pub trait RingBufOptions {
+    fn attributes_mut(&mut self) -> &mut perf_event_attr;
 
-impl Default for RingBufOptions {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl RingBufOptions {
-    pub(crate) fn common_attributes() -> perf_event_attr {
-        perf_event_attr {
-            size: PERF_ATTR_SIZE_VER4,
-            flags: FLAG_USE_CLOCKID |
-                FLAG_SAMPLE_ID_ALL |
-                FLAG_DISABLED |
-                FLAG_EXCLUDE_HV |
-                FLAG_EXCLUDE_IDLE,
-            clockid: CLOCK_MONOTONIC_RAW,
-            read_format: abi::PERF_FORMAT_ID,
-            sample_type: abi::PERF_SAMPLE_IDENTIFIER |
-                abi::PERF_SAMPLE_TIME |
-                abi::PERF_SAMPLE_TID,
-            /* Leave rest default */
-            .. Default::default()
-        }
-    }
-
-    fn attributes(&self) -> perf_event_attr {
-        self.attributes
-    }
-
-    pub fn new() -> Self {
-        Self {
-            attributes: Self::common_attributes(),
-        }
-    }
-
-    pub fn with_callchain_data(&self) -> Self {
-        let mut attributes = self.attributes;
+    fn with_callchain_data(&self) -> Self
+        where Self: Clone {
+        let mut clone = self.clone();
+        let attributes = clone.attributes_mut();
 
         attributes.sample_type |= abi::PERF_SAMPLE_CALLCHAIN;
 
-        Self {
-            attributes,
-        }
+        clone
     }
 
-    pub fn without_user_callchain_data(&self) -> Self {
-        let mut attributes = self.attributes;
+    fn without_user_callchain_data(&mut self) -> Self
+        where Self: Clone {
+        let mut clone = self.clone();
+        let attributes = clone.attributes_mut();
 
         attributes.flags |= FLAG_EXCLUDE_CALLCHAIN_USER;
 
-        Self {
-            attributes,
-        }
+        clone
     }
 
-    pub fn without_kernel_callchain_data(&self) -> Self {
-        let mut attributes = self.attributes;
+    fn without_kernel_callchain_data(&mut self) -> Self
+        where Self: Clone {
+        let mut clone = self.clone();
+        let attributes = clone.attributes_mut();
 
         attributes.flags |= FLAG_EXCLUDE_CALLCHAIN_KERNEL;
 
-        Self {
-            attributes,
-        }
+        clone
     }
 
-    pub fn with_user_regs_data(
-        &self,
-        regs: u64) -> Self {
-        let mut attributes = self.attributes;
+    fn with_user_regs_data(
+        &mut self,
+        regs: u64) -> Self
+        where Self: Clone {
+        let mut clone = self.clone();
+        let attributes = clone.attributes_mut();
 
         attributes.sample_type |= abi::PERF_SAMPLE_REGS_USER;
         attributes.sample_regs_user = regs;
 
-        Self {
-            attributes,
-        }
+        clone
     }
 
-    pub fn with_user_stack_data(
-        &self,
-        stack_bytes: u32) -> Self {
-        let mut attributes = self.attributes;
+    fn with_user_stack_data(
+        &mut self,
+        stack_bytes: u32) -> Self
+        where Self: Clone {
+        let mut clone = self.clone();
+        let attributes = clone.attributes_mut();
 
         attributes.sample_type |= abi::PERF_SAMPLE_STACK_USER;
         attributes.sample_stack_user = stack_bytes;
 
-        Self {
-            attributes,
-        }
+        clone
     }
 }
 
@@ -163,21 +127,48 @@ pub struct RingBufBuilder<T = Profiling> {
     _type: PhantomData<T>,
 }
 
-impl RingBufBuilder {
-    pub fn for_kernel() -> RingBufBuilder<Kernel> {
-        let mut options = RingBufOptions::new();
+impl Clone for RingBufBuilder {
+    fn clone(&self) -> Self {
+        Self {
+            attributes: self.attributes,
+            _type: self._type,
+        }
+    }
+}
 
-        options.attributes.event_type = PERF_TYPE_SOFTWARE;
-        options.attributes.config = PERF_COUNT_SW_DUMMY;
+impl RingBufBuilder {
+    pub(crate) fn common_attributes() -> perf_event_attr {
+        perf_event_attr {
+            size: PERF_ATTR_SIZE_VER4,
+            flags: FLAG_USE_CLOCKID |
+                FLAG_SAMPLE_ID_ALL |
+                FLAG_DISABLED |
+                FLAG_EXCLUDE_HV |
+                FLAG_EXCLUDE_IDLE,
+            clockid: CLOCK_MONOTONIC_RAW,
+            read_format: abi::PERF_FORMAT_ID,
+            sample_type: abi::PERF_SAMPLE_IDENTIFIER |
+                abi::PERF_SAMPLE_TIME |
+                abi::PERF_SAMPLE_TID,
+            /* Leave rest default */
+            .. Default::default()
+        }
+    }
+
+    pub fn for_kernel() -> RingBufBuilder<Kernel> {
+        let mut attributes = Self::common_attributes();
+
+        attributes.event_type = PERF_TYPE_SOFTWARE;
+        attributes.config = PERF_COUNT_SW_DUMMY;
 
         RingBufBuilder::<Kernel> {
-            attributes: options.attributes,
+            attributes,
             _type: PhantomData::<Kernel>,
         }
     }
 
-    pub fn for_cswitches(options: &RingBufOptions) -> RingBufBuilder<ContextSwitches> {
-        let mut attributes = options.attributes();
+    pub fn for_cswitches() -> RingBufBuilder<ContextSwitches> {
+        let mut attributes = Self::common_attributes();
 
         attributes.event_type = PERF_TYPE_SOFTWARE;
         attributes.config = PERF_COUNT_SW_CONTEXT_SWITCHES;
@@ -190,9 +181,8 @@ impl RingBufBuilder {
     }
 
     pub fn for_profiling(
-        options: &RingBufOptions,
         sampling_frequency: u64) -> RingBufBuilder<Profiling> {
-        let mut attributes = options.attributes();
+        let mut attributes = Self::common_attributes();
 
         attributes.event_type = PERF_TYPE_SOFTWARE;
         attributes.config = PERF_COUNT_SW_CPU_CLOCK;
@@ -205,8 +195,8 @@ impl RingBufBuilder {
         }
     }
 
-    pub fn for_tracepoint(options: &RingBufOptions) -> RingBufBuilder<Tracepoint> {
-        let mut attributes = options.attributes();
+    pub fn for_tracepoint() -> RingBufBuilder<Tracepoint> {
+        let mut attributes = Self::common_attributes();
 
         attributes.event_type = PERF_TYPE_TRACEPOINT;
         attributes.sample_period_freq = 1;
@@ -220,15 +210,33 @@ impl RingBufBuilder {
     }
 }
 
+impl RingBufOptions for RingBufBuilder<Profiling> {
+    fn attributes_mut(&mut self) -> &mut perf_event_attr {
+        &mut self.attributes
+    }
+}
+
 impl RingBufBuilder<Profiling> {
     pub(crate) fn build(&self) -> CommonRingBuf {
         CommonRingBuf::new(self.attributes)
     }
 }
 
+impl RingBufOptions for RingBufBuilder<ContextSwitches> {
+    fn attributes_mut(&mut self) -> &mut perf_event_attr {
+        &mut self.attributes
+    }
+}
+
 impl RingBufBuilder<ContextSwitches> {
     pub(crate) fn build(&self) -> CommonRingBuf {
         CommonRingBuf::new(self.attributes)
+    }
+}
+
+impl RingBufOptions for RingBufBuilder<Tracepoint> {
+    fn attributes_mut(&mut self) -> &mut perf_event_attr {
+        &mut self.attributes
     }
 }
 

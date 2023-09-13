@@ -244,14 +244,11 @@ mod tests {
     fn it_works() {
         let helper = CallstackHelper::new();
 
-        let options = RingBufOptions::new()
-            .with_callchain_data();
-
         let freq = 1000;
 
         let profiling = RingBufBuilder::for_profiling(
-            &options,
-            freq);
+            freq)
+            .with_callchain_data();
 
         let mut builder = RingBufSessionBuilder::new()
             .with_profiling_events(profiling)
