@@ -57,6 +57,10 @@ pub const PERF_SAMPLE_PHYS_ADDR: u64 = 1 << 19;
 pub const PERF_SAMPLE_AUX: u64 = 1 << 20;
 pub const PERF_SAMPLE_CGROUP: u64 = 1 << 21;
 
+pub const PERF_SAMPLE_REGS_ABI_NONE: u64 = 0;
+pub const PERF_SAMPLE_REGS_ABI_32: u64 = 1;
+pub const PERF_SAMPLE_REGS_ABI_64: u64 = 2;
+
 // Supported record types (header.entry_type)
 pub const PERF_RECORD_LOST: u32 = 2;
 pub const PERF_RECORD_COMM: u32 = 3;

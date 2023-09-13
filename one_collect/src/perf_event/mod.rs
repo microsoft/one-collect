@@ -85,6 +85,10 @@ impl<'a> PerfData<'a> {
         self.ancillary.attributes.has_read_format(format)
     }
 
+    fn regs_user_count(&self) -> usize {
+        self.ancillary.attributes.sample_regs_user.count_ones() as usize
+    }
+
     fn read_format_size(&self) -> usize {
         let mut size: usize = 0;
 
@@ -174,6 +178,9 @@ pub struct PerfSession {
     read_field: DataFieldRef,
     callchain_field: DataFieldRef,
     raw_field: DataFieldRef,
+    branch_stack_field: DataFieldRef,
+    regs_user_field: DataFieldRef,
+    stack_user_field: DataFieldRef,
 
     /* Options */
     read_timeout: Duration,
@@ -218,6 +225,9 @@ impl PerfSession {
             read_field: DataFieldRef::new(),
             callchain_field: DataFieldRef::new(),
             raw_field: DataFieldRef::new(),
+            branch_stack_field: DataFieldRef::new(),
+            regs_user_field: DataFieldRef::new(),
+            stack_user_field: DataFieldRef::new(),
 
             /* Options */
             read_timeout: Duration::from_millis(15),
@@ -574,6 +584,51 @@ impl PerfSession {
                             offset += self.raw_field.update(offset, size);
                         } else {
                             self.raw_field.reset();
+                        }
+
+                        /* PERF_SAMPLE_BRANCH_STACK */
+                        if perf_data.has_format(abi::PERF_SAMPLE_BRANCH_STACK) {
+                            let count = perf_data.read_u64(offset)? as usize;
+                            offset += 8;
+                            let size = count * 24;
+                            offset += self.branch_stack_field.update(offset, size);
+                        } else {
+                            self.branch_stack_field.reset();
+                        }
+
+                        /* PERF_SAMPLE_REGS_USER */
+                        if perf_data.has_format(abi::PERF_SAMPLE_REGS_USER) {
+                            let abi = perf_data.read_u64(offset)?;
+                            offset += 8;
+                            let count = perf_data.regs_user_count();
+                            /*
+                             * ABI is 0 for none, 1 for 32-bit, 2 for 64-bit:
+                             * Therefore, abi * 4 gives us the bytes per-reg.
+                             */
+                            let size = count * (abi * 4) as usize;
+                            offset += self.regs_user_field.update(offset, size);
+                        } else {
+                            self.regs_user_field.reset();
+                        }
+
+                        /* PERF_SAMPLE_STACK_USER */
+                        if perf_data.has_format(abi::PERF_SAMPLE_STACK_USER) {
+                            let size = perf_data.read_u64(offset)? as usize;
+                            offset += 8;
+
+                            if size > 0 {
+                                let stack_start = offset;
+                                offset += size;
+                                /* Actual size of read stack data */
+                                let dyn_size = perf_data.read_u64(offset)? as usize;
+                                offset += 8;
+                                /* Caller is only given read stack data */
+                                self.stack_user_field.update(stack_start, dyn_size);
+                            } else {
+                                self.stack_user_field.reset();
+                            }
+                        } else {
+                            self.stack_user_field.reset();
                         }
 
                         /* TODO: Remaining abi format types */
