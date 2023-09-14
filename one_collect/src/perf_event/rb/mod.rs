@@ -40,7 +40,7 @@ impl Default for RingBufOptions {
 }
 
 impl RingBufOptions {
-    fn common_attributes() -> perf_event_attr {
+    pub(crate) fn common_attributes() -> perf_event_attr {
         perf_event_attr {
             size: PERF_ATTR_SIZE_VER4,
             flags: FLAG_USE_CLOCKID |

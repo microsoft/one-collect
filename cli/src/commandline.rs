@@ -1,5 +1,5 @@
 use clap::{Arg, command, Command, value_parser};
-use one_collect::session::{SessionBuilder, SessionEgress, FileSessionEgress};
+use one_collect::{session::{SessionBuilder, SessionEgress, FileSessionEgress}, state::ProcessTrackingOptions};
 
 pub (crate) struct CommandLineParser{
     cmd : Command,
@@ -54,8 +54,12 @@ impl CommandLineParser{
 
         if let Some(subcommand) = matches.subcommand_matches("debug") {
             let seconds = subcommand.get_one::<u64>("seconds").expect("required");
+            let options = ProcessTrackingOptions::new()
+                .with_process_names();
+
             let builder = SessionBuilder::new(SessionEgress::Live)
-                .with_profiling(1000);
+                .with_profiling(1000)
+                .track_process_state(options);
 
             let mut session = builder.build().unwrap_or_else( |error| {
                 println!("Error building perf_events session: {}", error);
@@ -160,14 +164,14 @@ impl CommandLineParser{
                     });
                 });
 
-                perf_session.enable().unwrap_or_else( |error| {
+                session.enable().unwrap_or_else( |error| {
                     println!("Error enabling perf_events session: {}", error);
                     std::process::exit(1);
                 });
 
-                perf_session.parse_for_duration(
+                session.parse_for_duration(
                     std::time::Duration::from_secs(*seconds)).unwrap();
-                perf_session.disable().unwrap();
+                session.disable().unwrap();
             }
             else {
                 unreachable!("perf_session == None");
