@@ -703,7 +703,9 @@ impl PerfSession {
             return;
         }
 
+        let ancillary = self.ancillary.clone();
         let comm_event = self.comm_event();
+        let attributes = RingBufOptions::common_attributes();
 
         procfs::iter_processes(|pid, path_buf| {
             const MAX_COMM_LEN : usize = 255;
@@ -737,6 +739,13 @@ impl PerfSession {
 
             let mut full_data: Vec<u8> = vec![];
             abi::Header::write(0, 0, &event_data, &mut full_data);
+
+            // Populate ancillary data.
+            ancillary.write(|value| {
+                value.cpu = 0;
+                value.attributes = Rc::new(attributes);
+            });
+
 
             // Dispatch the event
             let offset = abi::Header::data_offset();
