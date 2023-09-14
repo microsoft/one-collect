@@ -130,6 +130,22 @@ pub const PERF_COUNT_SW_DUMMY: u64 = 9;
 
 pub const PERF_ATTR_SIZE_VER4: u32 = 104;
 
+/* X86_64 Common Registers */
+#[cfg(target_arch = "x86_64")]
+pub const PERF_REG_BP: u64 = 1 << 6u64;
+#[cfg(target_arch = "x86_64")]
+pub const PERF_REG_SP: u64 = 1 << 7u64;
+#[cfg(target_arch = "x86_64")]
+pub const PERF_REG_IP: u64 = 1 << 8u64;
+
+/* ARM64 Common Registers */
+#[cfg(target_arch = "aarch64")]
+pub const PERF_REG_BP: u64 = 1 << 30u64;
+#[cfg(target_arch = "aarch64")]
+pub const PERF_REG_SP: u64 = 1 << 31u64;
+#[cfg(target_arch = "aarch64")]
+pub const PERF_REG_IP: u64 = 1 << 32u64;
+
 #[repr(C)]
 #[derive(Copy)]
 #[derive(Clone)]
