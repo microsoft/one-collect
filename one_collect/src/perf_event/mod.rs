@@ -461,8 +461,6 @@ impl PerfSession {
         &mut self,
         should_stop: impl Fn() -> bool) -> Result<(), TryFromSliceError> {
 
-        self.capture_environment();
-
         loop {
             let mut i: u32 = 0;
 
@@ -699,7 +697,7 @@ impl PerfSession {
         Ok(())
     }
 
-    fn capture_environment(&mut self) {
+    pub fn capture_environment(&mut self) {
 
         if !self.process_tracking_options.process_names() {
             return;

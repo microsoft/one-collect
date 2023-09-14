@@ -1,4 +1,6 @@
+use std::array::TryFromSliceError;
 use std::io;
+use std::time::Duration;
 
 use super::*;
 use crate::perf_event::PerfSession;
@@ -75,6 +77,7 @@ impl<'a> SessionBuilder<'a> {
 pub struct Session<'a> {
     egress: SessionEgress<'a>,
     perf_session: Option<PerfSession>,
+    process_tracking_options: ProcessTrackingOptions,
 }
 
 impl<'a> Session<'a> {
@@ -92,7 +95,8 @@ impl<'a> Session<'a> {
 
         Ok(Self {
             egress: builder.egress,
-            perf_session
+            perf_session,
+            process_tracking_options: builder.process_tracking_options,
         })
     }
 
@@ -102,6 +106,36 @@ impl<'a> Session<'a> {
 
     pub fn perf_session_mut(&mut self) -> &mut Option<PerfSession> {
         &mut self.perf_session
+    }
+
+    pub fn enable(&mut self) -> IOResult<()> {
+        self.perf_session.as_mut().unwrap().enable()
+    }
+
+    pub fn disable(&mut self) -> IOResult<()> {
+        self.perf_session.as_mut().unwrap().disable()
+    }
+
+    pub fn parse_for_duration(
+        &mut self,
+        duration: Duration) -> Result<(), TryFromSliceError> {
+            self.capture_environment();
+            self.perf_session.as_mut().unwrap().parse_for_duration(duration)
+    }
+
+    pub fn parse_until(
+        &mut self,
+        should_stop: impl Fn() -> bool) -> Result<(), TryFromSliceError> {
+            self.capture_environment();
+            self.perf_session.as_mut().unwrap().parse_until(should_stop)
+    }
+
+    fn capture_environment(&mut self) {
+        let session = self.perf_session.as_mut().unwrap();
+
+        if self.process_tracking_options.process_names() {
+            session.capture_environment();
+        }
     }
 
     fn build_perf_session(builder: &SessionBuilder<'a>) -> IOResult<PerfSession> {

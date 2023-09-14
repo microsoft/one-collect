@@ -162,14 +162,14 @@ impl CommandLineParser{
                     });
                 });
 
-                perf_session.enable().unwrap_or_else( |error| {
+                session.enable().unwrap_or_else( |error| {
                     println!("Error enabling perf_events session: {}", error);
                     std::process::exit(1);
                 });
 
-                perf_session.parse_for_duration(
+                session.parse_for_duration(
                     std::time::Duration::from_secs(*seconds)).unwrap();
-                perf_session.disable().unwrap();
+                session.disable().unwrap();
             }
             else {
                 unreachable!("perf_session == None");
