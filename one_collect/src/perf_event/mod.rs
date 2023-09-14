@@ -329,6 +329,10 @@ impl PerfSession {
         });
     }
 
+    pub fn process_tracking_options(&self) -> &ProcessTrackingOptions {
+        &self.process_tracking_options
+    }
+
     pub fn ancillary_data(&self) -> ReadOnly<AncillaryData> {
         self.ancillary.read_only()
     }

@@ -77,7 +77,6 @@ impl<'a> SessionBuilder<'a> {
 pub struct Session<'a> {
     egress: SessionEgress<'a>,
     perf_session: Option<PerfSession>,
-    process_tracking_options: ProcessTrackingOptions,
 }
 
 impl<'a> Session<'a> {
@@ -96,7 +95,6 @@ impl<'a> Session<'a> {
         Ok(Self {
             egress: builder.egress,
             perf_session,
-            process_tracking_options: builder.process_tracking_options,
         })
     }
 
@@ -133,7 +131,7 @@ impl<'a> Session<'a> {
     fn capture_environment(&mut self) {
         let session = self.perf_session.as_mut().unwrap();
 
-        if self.process_tracking_options.process_names() {
+        if session.process_tracking_options().process_names() {
             session.capture_environment();
         }
     }
