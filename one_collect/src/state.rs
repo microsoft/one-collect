@@ -6,17 +6,23 @@ pub struct ProcessTrackingOptions {
 }
 
 impl ProcessTrackingOptions {
-    pub fn new(process_names: bool) -> Self {
+    pub fn new() -> Self {
         ProcessTrackingOptions {
-             process_names,
+             process_names: false,
         }
     }
 
-    pub fn process_names(&self) -> bool {
+    pub fn with_process_names(&mut self) -> Self {
+        Self {
+            process_names: true,
+        }
+    }
+
+    pub(crate) fn process_names(&self) -> bool {
         self.process_names
     }
 
-    pub fn any(&self) -> bool {
+    pub(crate) fn any(&self) -> bool {
         self.process_names()
     }
 }

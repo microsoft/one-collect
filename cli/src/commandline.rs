@@ -54,7 +54,9 @@ impl CommandLineParser{
 
         if let Some(subcommand) = matches.subcommand_matches("debug") {
             let seconds = subcommand.get_one::<u64>("seconds").expect("required");
-            let options = ProcessTrackingOptions::new(true);
+            let options = ProcessTrackingOptions::new()
+                .with_process_names();
+
             let builder = SessionBuilder::new(SessionEgress::Live)
                 .with_profiling(1000)
                 .track_process_state(options);
