@@ -97,6 +97,34 @@ pub fn cpu_count() -> u32 {
     }
 }
 
+#[repr(C)]
+struct timespec {
+    tv_sec: isize,
+    tv_nsec: isize,
+}
+
+pub fn perf_timestamp(
+    attr: &perf_event_attr) -> u64 {
+    unsafe {
+        let mut tp = timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+
+        match syscalls::syscall2(
+            syscalls::Sysno::clock_gettime,
+            attr.clockid as usize,
+            &mut tp as *mut timespec as usize) {
+            Ok(_) => {
+                ((tp.tv_sec * 1000000000) + tp.tv_nsec) as u64
+            }
+            Err(_) => {
+                0
+            }
+        }
+    }
+}
+
 fn perf_event_open(
     attr: &perf_event_attr,
     pid: i32,
