@@ -47,6 +47,10 @@ impl AncillaryData {
     pub fn read_format(&self) -> u64 {
         self.attributes.read_format
     }
+
+    pub fn non_sampled_id_offsets(&self) -> Option<SampleIdOffsets> {
+        self.attributes.non_sampled_id_offsets()
+    }
 }
 
 impl Clone for AncillaryData {
@@ -87,6 +91,10 @@ impl<'a> PerfData<'a> {
 
     fn regs_user_count(&self) -> usize {
         self.ancillary.attributes.sample_regs_user.count_ones() as usize
+    }
+
+    fn non_sampled_id_offsets(&self) -> Option<SampleIdOffsets> {
+        self.ancillary.non_sampled_id_offsets()
     }
 
     fn read_format_size(&self) -> usize {
@@ -488,6 +496,66 @@ impl PerfSession {
                     *value = perf_data.ancillary.clone();
                 });
 
+                /* Always populate available fields for non-samples */
+                if header.entry_type != abi::PERF_RECORD_SAMPLE {
+                    match perf_data.non_sampled_id_offsets() {
+                        Some(offsets) => {
+                            let mut offset = header.size as usize - offsets.size;
+
+                            if offsets.pid.is_some() {
+                                offset += self.pid_field.update(offset, 4);
+                            } else {
+                                self.pid_field.reset();
+                            }
+
+                            if offsets.tid.is_some() {
+                                offset += self.tid_field.update(offset, 4);
+                            } else {
+                                self.tid_field.reset();
+                            }
+
+                            if offsets.time.is_some() {
+                                offset += self.time_field.update(offset, 8);
+                            } else {
+                                self.time_field.reset();
+                            }
+
+                            if offsets.id.is_some() {
+                                offset += self.id_field.update(offset, 8);
+                            } else {
+                                self.id_field.reset();
+                            }
+
+                            if offsets.stream_id.is_some() {
+                                offset += self.stream_id_field.update(offset, 8);
+                            } else {
+                                self.stream_id_field.reset();
+                            }
+
+                            if offsets.cpu.is_some() {
+                                offset += self.cpu_field.update(offset, 8);
+                            } else {
+                                self.cpu_field.reset();
+                            }
+
+                            if offsets.identifier.is_some() {
+                                self.id_field.update(offset, 8);
+                            }
+                        },
+
+                        /* These fields are not-present outside of event */
+                        None => {
+                            self.pid_field.reset();
+                            self.tid_field.reset();
+                            self.time_field.reset();
+                            self.id_field.reset();
+                            self.stream_id_field.reset();
+                            self.cpu_field.reset();
+                        }
+                    }
+                }
+
+                /* Process record payloads */
                 match header.entry_type {
                     abi::PERF_RECORD_SAMPLE => {
                         let mut offset: usize = abi::Header::data_offset();
