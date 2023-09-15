@@ -640,14 +640,11 @@ mod tests {
             .with_task_records()
             .with_cswitch_records();
 
-        let options = RingBufOptions::new()
-            .with_callchain_data();
-
         let freq = 1000;
 
         let profiling = RingBufBuilder::for_profiling(
-            &options,
-            freq);
+            freq)
+            .with_callchain_data();
 
         let _builder = RingBufSessionBuilder::new()
             .with_page_count(1)
@@ -658,14 +655,11 @@ mod tests {
     #[test]
     #[ignore]
     fn profile() {
-        let options = RingBufOptions::new()
-            .with_callchain_data();
-
         let freq = 1000;
 
         let profiling = RingBufBuilder::for_profiling(
-            &options,
-            freq);
+            freq)
+            .with_callchain_data();
 
         let mut session = RingBufSessionBuilder::new()
             .with_page_count(8)
