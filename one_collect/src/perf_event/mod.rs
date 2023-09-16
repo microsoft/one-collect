@@ -435,6 +435,18 @@ impl PerfSession {
         self.raw_field.clone()
     }
 
+    pub fn branch_stack_data_ref(&self) -> DataFieldRef {
+        self.branch_stack_field.clone()
+    }
+
+    pub fn regs_user_data_ref(&self) -> DataFieldRef {
+        self.regs_user_field.clone()
+    }
+
+    pub fn stack_user_data_ref(&self) -> DataFieldRef {
+        self.stack_user_field.clone()
+    }
+
     pub fn set_read_timeout(
         &mut self,
         timeout: Duration) {
