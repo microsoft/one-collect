@@ -169,7 +169,24 @@ pub struct perf_event_attr {
    pub sample_regs_intr: u64,
 }
 
+#[derive(Default)]
+pub struct SampleIdOffsets {
+    pub pid: Option<usize>,
+    pub tid: Option<usize>,
+    pub time: Option<usize>,
+    pub id: Option<usize>,
+    pub stream_id: Option<usize>,
+    pub cpu: Option<usize>,
+    pub identifier: Option<usize>,
+    pub size: usize,
+}
+
 impl perf_event_attr {
+    pub fn has_flag(
+        &self,
+        flag: u64) -> bool {
+        (self.flags & flag) == flag
+    }
     pub fn has_format(
         &self,
         format: u64) -> bool {
@@ -180,6 +197,51 @@ impl perf_event_attr {
         &self,
         format: u64) -> bool {
         (self.read_format & format) == format
+    }
+
+    pub fn non_sampled_id_offsets(&self) -> Option<SampleIdOffsets> {
+        /* Cannot fetch these from non-sampled records */
+        if !self.has_flag(FLAG_SAMPLE_ID_ALL) {
+            return None;
+        }
+
+        /* Determine which parts are where, if at all */
+        let mut offset = SampleIdOffsets::default();
+
+        if self.has_format(PERF_SAMPLE_TID) {
+            offset.pid = Some(offset.size);
+            offset.size += 4;
+
+            offset.tid = Some(offset.size);
+            offset.size += 4;
+        }
+
+        if self.has_format(PERF_SAMPLE_TIME) {
+            offset.time = Some(offset.size);
+            offset.size += 8;
+        }
+
+        if self.has_format(PERF_SAMPLE_ID) {
+            offset.id = Some(offset.size);
+            offset.size += 8;
+        }
+
+        if self.has_format(PERF_SAMPLE_STREAM_ID) {
+            offset.stream_id = Some(offset.size);
+            offset.size += 8;
+        }
+
+        if self.has_format(PERF_SAMPLE_CPU) {
+            offset.cpu = Some(offset.size);
+            offset.size += 8;
+        }
+
+        if self.has_format(PERF_SAMPLE_IDENTIFIER) {
+            offset.identifier = Some(offset.size);
+            offset.size += 8;
+        }
+
+        Some(offset)
     }
 }
 

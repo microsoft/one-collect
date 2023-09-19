@@ -47,6 +47,10 @@ impl AncillaryData {
     pub fn read_format(&self) -> u64 {
         self.attributes.read_format
     }
+
+    pub fn non_sampled_id_offsets(&self) -> Option<SampleIdOffsets> {
+        self.attributes.non_sampled_id_offsets()
+    }
 }
 
 impl Clone for AncillaryData {
@@ -87,6 +91,10 @@ impl<'a> PerfData<'a> {
 
     fn regs_user_count(&self) -> usize {
         self.ancillary.attributes.sample_regs_user.count_ones() as usize
+    }
+
+    fn non_sampled_id_offsets(&self) -> Option<SampleIdOffsets> {
+        self.ancillary.non_sampled_id_offsets()
     }
 
     fn read_format_size(&self) -> usize {
@@ -162,6 +170,7 @@ pub trait PerfDataSource {
 
 pub struct PerfSession {
     source: Box<dyn PerfDataSource>,
+    source_enabled: bool,
     events: HashMap<usize, Event>,
     state: Writable<SessionState>,
 
@@ -209,6 +218,7 @@ impl PerfSession {
         process_tracking_options: ProcessTrackingOptions) -> Self {
         let mut session = Self {
             source,
+            source_enabled: false,
             events: HashMap::new(),
             state: Writable::new(SessionState::new()),
 
@@ -259,73 +269,73 @@ impl PerfSession {
         &mut self,
         process_tracking_options: &ProcessTrackingOptions) {
 
-            if !process_tracking_options.any() {
-                return;
-            }
+        if !process_tracking_options.any() {
+            return;
+        }
 
-            let session_state = self.state.clone();
-            let comm_event = self.comm_event();
-            let comm_event_format = comm_event.format();
-            let pid_field = comm_event_format.get_field_ref_unchecked("pid");
-            let tid_field = comm_event_format.get_field_ref_unchecked("tid");
-            let comm_field = comm_event_format.get_field_ref_unchecked("comm[]");
+        let session_state = self.state.clone();
+        let comm_event = self.comm_event();
+        let comm_event_format = comm_event.format();
+        let pid_field = comm_event_format.get_field_ref_unchecked("pid");
+        let tid_field = comm_event_format.get_field_ref_unchecked("tid");
+        let comm_field = comm_event_format.get_field_ref_unchecked("comm[]");
 
-            let mut path_buf = PathBuf::new();
-            path_buf.push("/proc");
+        let mut path_buf = PathBuf::new();
+        path_buf.push("/proc");
 
-            comm_event.add_callback(move |_full_data, format, event_data| {
-                let pid = format.try_get_u32(pid_field, event_data).unwrap_or(0);
-                let tid = format.try_get_u32(tid_field, event_data).unwrap_or(0);
+        comm_event.add_callback(move |_full_data, format, event_data| {
+            let pid = format.try_get_u32(pid_field, event_data).unwrap_or(0);
+            let tid = format.try_get_u32(tid_field, event_data).unwrap_or(0);
 
-                // When pid == tid, the process is new.  Otherwise, it is a new thread.
-                // Ignore swapper (pid 0).
-                if (pid == tid) && (pid != 0) {
-                    let comm = format.try_get_str(comm_field, event_data);
-
-                    session_state.write(|state| {
-                        let proc = state.new_process(pid);
-                        let mut use_procfs = false;
-                        if let Some(proc_name) = comm {
-                            // Check procfs if proc_name is 15 chars (length limit of comm_event).
-                            if proc_name.len() == 15 {
-                                path_buf.push(pid.to_string());
-                                if let Some(proc_name) = procfs::get_comm(&mut path_buf) {
-                                    use_procfs = true;
-                                    proc.set_name(proc_name.as_str());
-                                }
-                                path_buf.pop();
-                            }
-
-                            if !use_procfs {
-                                proc.set_name(proc_name);
-                            }
-                        }
-                    });
-                }
-            });
-
-            let session_state = self.state.clone();
-            let fork_event = self.fork_event();
-            let fork_event_format = fork_event.format();
-            let pid_field: EventFieldRef = fork_event_format.get_field_ref_unchecked("pid");
-            let ppid_field = fork_event_format.get_field_ref_unchecked("ppid");
-
-            fork_event.add_callback(move |_full_data, format, event_data| {
-                let pid = format.try_get_u32(pid_field, event_data).unwrap_or(0);
-                let ppid = format.try_get_u32(ppid_field, event_data).unwrap_or(0);
+            // When pid == tid, the process is new.  Otherwise, it is a new thread.
+            // Ignore swapper (pid 0).
+            if (pid == tid) && (pid != 0) {
+                let comm = format.try_get_str(comm_field, event_data);
 
                 session_state.write(|state| {
-                    state.fork_process(pid, ppid);
-                })
-            });
+                    let proc = state.new_process(pid);
+                    let mut use_procfs = false;
+                    if let Some(proc_name) = comm {
+                        // Check procfs if proc_name is 15 chars (length limit of comm_event).
+                        if proc_name.len() == 15 {
+                            path_buf.push(pid.to_string());
+                            if let Some(proc_name) = procfs::get_comm(&mut path_buf) {
+                                use_procfs = true;
+                                proc.set_name(proc_name.as_str());
+                            }
+                            path_buf.pop();
+                        }
 
-            let session_state = self.state.clone();
-            let exit_event = self.exit_event();
-            let exit_event_format = exit_event.format();
-            let pid_field = exit_event_format.get_field_ref_unchecked("pid");
-            let tid_field = exit_event_format.get_field_ref_unchecked("tid");
+                        if !use_procfs {
+                            proc.set_name(proc_name);
+                        }
+                    }
+                });
+            }
+        });
 
-            self.exit_event().add_callback(move |_full_data, format, event_data| {
+        let session_state = self.state.clone();
+        let fork_event = self.fork_event();
+        let fork_event_format = fork_event.format();
+        let pid_field: EventFieldRef = fork_event_format.get_field_ref_unchecked("pid");
+        let ppid_field = fork_event_format.get_field_ref_unchecked("ppid");
+
+        fork_event.add_callback(move |_full_data, format, event_data| {
+            let pid = format.try_get_u32(pid_field, event_data).unwrap_or(0);
+            let ppid = format.try_get_u32(ppid_field, event_data).unwrap_or(0);
+
+            session_state.write(|state| {
+                state.fork_process(pid, ppid);
+            })
+        });
+
+        let session_state = self.state.clone();
+        let exit_event = self.exit_event();
+        let exit_event_format = exit_event.format();
+        let pid_field = exit_event_format.get_field_ref_unchecked("pid");
+        let tid_field = exit_event_format.get_field_ref_unchecked("tid");
+
+        exit_event.add_callback(move |_full_data, format, event_data| {
             let pid = format.try_get_u32(pid_field, event_data).unwrap_or(0);
             let tid = format.try_get_u32(tid_field, event_data).unwrap_or(0);
 
@@ -452,10 +462,12 @@ impl PerfSession {
     }
 
     pub fn enable(&mut self) -> IOResult<()> {
+        self.source_enabled = true;
         self.source.enable()
     }
 
     pub fn disable(&mut self) -> IOResult<()> {
+        self.source_enabled = false;
         self.source.disable()
     }
 
@@ -471,6 +483,350 @@ impl PerfSession {
         self.parse_until(|| { now.elapsed() >= duration })
     }
 
+    fn parse_perf_data(
+        &mut self,
+        perf_data: Option<PerfData>) -> Result<bool, TryFromSliceError> {
+        let perf_data = perf_data.or_else(|| {
+            self.source.read(self.read_timeout)
+        });
+
+        if perf_data.is_none() {
+            return Ok(false);
+        }
+
+        let perf_data = perf_data.unwrap();
+        let header = abi::Header::from_slice(perf_data.raw_data)?;
+
+        self.ancillary.write(|value| {
+            *value = perf_data.ancillary.clone();
+        });
+
+        /* Always populate available fields for non-samples */
+        if header.entry_type != abi::PERF_RECORD_SAMPLE {
+            match perf_data.non_sampled_id_offsets() {
+                Some(offsets) => {
+                    let mut offset = header.size as usize - offsets.size;
+
+                    if offsets.pid.is_some() {
+                        offset += self.pid_field.update(offset, 4);
+                    } else {
+                        self.pid_field.reset();
+                    }
+
+                    if offsets.tid.is_some() {
+                        offset += self.tid_field.update(offset, 4);
+                    } else {
+                        self.tid_field.reset();
+                    }
+
+                    if offsets.time.is_some() {
+                        offset += self.time_field.update(offset, 8);
+                    } else {
+                        self.time_field.reset();
+                    }
+
+                    if offsets.id.is_some() {
+                        offset += self.id_field.update(offset, 8);
+                    } else {
+                        self.id_field.reset();
+                    }
+
+                    if offsets.stream_id.is_some() {
+                        offset += self.stream_id_field.update(offset, 8);
+                    } else {
+                        self.stream_id_field.reset();
+                    }
+
+                    if offsets.cpu.is_some() {
+                        offset += self.cpu_field.update(offset, 8);
+                    } else {
+                        self.cpu_field.reset();
+                    }
+
+                    if offsets.identifier.is_some() {
+                        self.id_field.update(offset, 8);
+                    }
+                },
+
+                /* These fields are not-present outside of event */
+                None => {
+                    self.pid_field.reset();
+                    self.tid_field.reset();
+                    self.time_field.reset();
+                    self.id_field.reset();
+                    self.stream_id_field.reset();
+                    self.cpu_field.reset();
+                }
+            }
+        }
+
+        /* Process record payloads */
+        match header.entry_type {
+            abi::PERF_RECORD_SAMPLE => {
+                let mut offset: usize = abi::Header::data_offset();
+                let mut id: Option<usize> = None;
+
+                /* PERF_SAMPLE_IDENTIFER */
+                if perf_data.has_format(abi::PERF_SAMPLE_IDENTIFIER) {
+                    offset += self.id_field.update(offset, 8);
+                } else {
+                    self.id_field.reset();
+                }
+
+                /* PERF_SAMPLE_IP */
+                if perf_data.has_format(abi::PERF_SAMPLE_IP) {
+                    offset += self.ip_field.update(offset, 8);
+                } else {
+                    self.ip_field.reset();
+                }
+
+                /* PERF_SAMPLE_TID */
+                if perf_data.has_format(abi::PERF_SAMPLE_TID) {
+                    offset += self.pid_field.update(offset, 4);
+                    offset += self.tid_field.update(offset, 4);
+                } else {
+                    self.pid_field.reset();
+                    self.tid_field.reset();
+                }
+
+                /* PERF_SAMPLE_TIME */
+                if perf_data.has_format(abi::PERF_SAMPLE_TIME) {
+                    offset += self.time_field.update(offset, 8);
+                } else {
+                    self.time_field.reset();
+                }
+
+                /* PERF_SAMPLE_ADDR */
+                if perf_data.has_format(abi::PERF_SAMPLE_ADDR) {
+                    offset += self.address_field.update(offset, 8);
+                } else {
+                    self.address_field.reset();
+                }
+
+                /* PERF_SAMPLE_ID */
+                if perf_data.has_format(abi::PERF_SAMPLE_ID) {
+                    offset += self.id_field.update(offset, 8);
+                } else {
+                    self.id_field.reset();
+                }
+
+                /* PERF_SAMPLE_STREAM_ID */
+                if perf_data.has_format(abi::PERF_SAMPLE_STREAM_ID) {
+                    offset += self.stream_id_field.update(offset, 8);
+                } else {
+                    self.stream_id_field.reset();
+                }
+
+                /* PERF_SAMPLE_CPU */
+                if perf_data.has_format(abi::PERF_SAMPLE_CPU) {
+                    offset += self.cpu_field.update(offset, 8);
+                } else {
+                    self.cpu_field.reset();
+                }
+
+                /* PERF_SAMPLE_PERIOD */
+                if perf_data.has_format(abi::PERF_SAMPLE_PERIOD) {
+                    offset += self.period_field.update(offset, 8);
+                } else {
+                    self.period_field.reset();
+                }
+
+                /* PERF_SAMPLE_READ */
+                if perf_data.has_format(abi::PERF_SAMPLE_READ) {
+                    let read_size = perf_data.read_format_size();
+                    offset += self.read_field.update(offset, read_size);
+                } else {
+                    self.read_field.reset();
+                }
+
+                /* PERF_SAMPLE_CALLCHAIN */
+                if perf_data.has_format(abi::PERF_SAMPLE_CALLCHAIN) {
+                    let count = perf_data.read_u64(offset)?;
+                    let size = (count * 8) as usize;
+                    offset += 8;
+                    offset += self.callchain_field.update(offset, size);
+                } else {
+                    self.callchain_field.reset();
+                }
+
+                /* PERF_SAMPLE_RAW */
+                if perf_data.has_format(abi::PERF_SAMPLE_RAW) {
+                    let size = perf_data.read_u32(offset)? as usize;
+                    offset += 4;
+                    id = Some(perf_data.read_u16(offset)? as usize);
+                    offset += self.raw_field.update(offset, size);
+                } else {
+                    self.raw_field.reset();
+                }
+
+                /* PERF_SAMPLE_BRANCH_STACK */
+                if perf_data.has_format(abi::PERF_SAMPLE_BRANCH_STACK) {
+                    let count = perf_data.read_u64(offset)? as usize;
+                    offset += 8;
+                    let size = count * 24;
+                    offset += self.branch_stack_field.update(offset, size);
+                } else {
+                    self.branch_stack_field.reset();
+                }
+
+                /* PERF_SAMPLE_REGS_USER */
+                if perf_data.has_format(abi::PERF_SAMPLE_REGS_USER) {
+                    let abi = perf_data.read_u64(offset)?;
+                    offset += 8;
+                    let count = perf_data.regs_user_count();
+                    /*
+                     * ABI is 0 for none, 1 for 32-bit, 2 for 64-bit:
+                     * Therefore, abi * 4 gives us the bytes per-reg.
+                     */
+                    let size = count * (abi * 4) as usize;
+                    offset += self.regs_user_field.update(offset, size);
+                } else {
+                    self.regs_user_field.reset();
+                }
+
+                /* PERF_SAMPLE_STACK_USER */
+                if perf_data.has_format(abi::PERF_SAMPLE_STACK_USER) {
+                    let size = perf_data.read_u64(offset)? as usize;
+                    offset += 8;
+
+                    if size > 0 {
+                        let stack_start = offset;
+                        offset += size;
+                        /* Actual size of read stack data */
+                        let dyn_size = perf_data.read_u64(offset)? as usize;
+                        offset += 8;
+                        /* Caller is only given read stack data */
+                        self.stack_user_field.update(stack_start, dyn_size);
+                    } else {
+                        self.stack_user_field.reset();
+                    }
+                } else {
+                    self.stack_user_field.reset();
+                }
+
+                /* TODO: Remaining abi format types */
+
+                /* For now print warning if we see this */
+                if offset > perf_data.raw_data.len() {
+                    println!("WARN: Truncated sample");
+                }
+
+                /* Process if we have an ID to use */
+                if let Some(id) = &id {
+                    if let Some(event) = self.events.get_mut(id) {
+                        let full_data = perf_data.raw_data;
+                        let event_data = self.raw_field.get_data(full_data);
+
+                        event.process(full_data, event_data);
+                    }
+                } else {
+                    /* Non-event profile sample */
+                    match perf_data.ancillary.event_type() {
+                        /* Software */
+                        PERF_TYPE_SOFTWARE => {
+                            match perf_data.ancillary.config() {
+                                /* CPU */
+                                PERF_COUNT_SW_CPU_CLOCK => {
+                                    self.cpu_profile_event.process(
+                                        perf_data.raw_data,
+                                        perf_data.raw_data);
+                                },
+
+                                /* CSWITCH */
+                                PERF_COUNT_SW_CONTEXT_SWITCHES => {
+                                    self.cswitch_profile_event.process(
+                                        perf_data.raw_data,
+                                        perf_data.raw_data);
+                                },
+
+                                /* Unsupported */
+                                _ => { },
+                            }
+                        },
+
+                        /* Unsupported */
+                        _ => { },
+                    }
+                }
+            },
+
+            abi::PERF_RECORD_LOST => {
+                let offset = abi::Header::data_offset();
+
+                self.lost_event.process(
+                    perf_data.raw_data,
+                    &perf_data.raw_data[offset..]);
+            },
+
+            abi::PERF_RECORD_COMM => {
+                let offset = abi::Header::data_offset();
+
+                self.comm_event.process(
+                    perf_data.raw_data,
+                    &perf_data.raw_data[offset..]);
+            },
+
+            abi::PERF_RECORD_EXIT => {
+                let offset = abi::Header::data_offset();
+
+                self.exit_event.process(
+                    perf_data.raw_data,
+                    &perf_data.raw_data[offset..]);
+            },
+
+            abi::PERF_RECORD_FORK => {
+                let offset = abi::Header::data_offset();
+
+                self.fork_event.process(
+                    perf_data.raw_data,
+                    &perf_data.raw_data[offset..]);
+            },
+
+            abi::PERF_RECORD_MMAP2 => {
+                let offset = abi::Header::data_offset();
+
+                self.mmap_event.process(
+                    perf_data.raw_data,
+                    &perf_data.raw_data[offset..]);
+            },
+
+            abi::PERF_RECORD_LOST_SAMPLES => {
+                let offset = abi::Header::data_offset();
+
+                self.lost_samples_event.process(
+                    perf_data.raw_data,
+                    &perf_data.raw_data[offset..]);
+            },
+
+            abi::PERF_RECORD_SWITCH_CPU_WIDE => {
+                let offset = abi::Header::data_offset();
+
+                self.cswitch_event.process(
+                    perf_data.raw_data,
+                    &perf_data.raw_data[offset..]);
+            },
+
+            _ => {
+                /* TODO: Remaining abi record types */
+            },
+        }
+
+        Ok(true)
+    }
+
+    fn parse_drain(
+        &mut self) -> Result<(), TryFromSliceError> {
+        self.source.begin_reading();
+
+        while self.parse_perf_data(None)? {
+            /* Nothing */
+        }
+
+        self.source.end_reading();
+
+        Ok(())
+    }
+
     pub fn parse_until(
         &mut self,
         should_stop: impl Fn() -> bool) -> Result<(), TryFromSliceError> {
@@ -480,264 +836,7 @@ impl PerfSession {
 
             self.source.begin_reading();
 
-            while let Some(perf_data) = self.source.read(
-                self.read_timeout) {
-                let header = abi::Header::from_slice(perf_data.raw_data)?;
-
-                self.ancillary.write(|value| {
-                    *value = perf_data.ancillary.clone();
-                });
-
-                match header.entry_type {
-                    abi::PERF_RECORD_SAMPLE => {
-                        let mut offset: usize = abi::Header::data_offset();
-                        let mut id: Option<usize> = None;
-
-                        /* PERF_SAMPLE_IDENTIFER */
-                        if perf_data.has_format(abi::PERF_SAMPLE_IDENTIFIER) {
-                            offset += self.id_field.update(offset, 8);
-                        } else {
-                            self.id_field.reset();
-                        }
-
-                        /* PERF_SAMPLE_IP */
-                        if perf_data.has_format(abi::PERF_SAMPLE_IP) {
-                            offset += self.ip_field.update(offset, 8);
-                        } else {
-                            self.ip_field.reset();
-                        }
-
-                        /* PERF_SAMPLE_TID */
-                        if perf_data.has_format(abi::PERF_SAMPLE_TID) {
-                            offset += self.pid_field.update(offset, 4);
-                            offset += self.tid_field.update(offset, 4);
-                        } else {
-                            self.pid_field.reset();
-                            self.tid_field.reset();
-                        }
-
-                        /* PERF_SAMPLE_TIME */
-                        if perf_data.has_format(abi::PERF_SAMPLE_TIME) {
-                            offset += self.time_field.update(offset, 8);
-                        } else {
-                            self.time_field.reset();
-                        }
-
-                        /* PERF_SAMPLE_ADDR */
-                        if perf_data.has_format(abi::PERF_SAMPLE_ADDR) {
-                            offset += self.address_field.update(offset, 8);
-                        } else {
-                            self.address_field.reset();
-                        }
-
-                        /* PERF_SAMPLE_ID */
-                        if perf_data.has_format(abi::PERF_SAMPLE_ID) {
-                            offset += self.id_field.update(offset, 8);
-                        } else {
-                            self.id_field.reset();
-                        }
-
-                        /* PERF_SAMPLE_STREAM_ID */
-                        if perf_data.has_format(abi::PERF_SAMPLE_STREAM_ID) {
-                            offset += self.stream_id_field.update(offset, 8);
-                        } else {
-                            self.stream_id_field.reset();
-                        }
-
-                        /* PERF_SAMPLE_CPU */
-                        if perf_data.has_format(abi::PERF_SAMPLE_CPU) {
-                            offset += self.cpu_field.update(offset, 8);
-                        } else {
-                            self.cpu_field.reset();
-                        }
-
-                        /* PERF_SAMPLE_PERIOD */
-                        if perf_data.has_format(abi::PERF_SAMPLE_PERIOD) {
-                            offset += self.period_field.update(offset, 8);
-                        } else {
-                            self.period_field.reset();
-                        }
-
-                        /* PERF_SAMPLE_READ */
-                        if perf_data.has_format(abi::PERF_SAMPLE_READ) {
-                            let read_size = perf_data.read_format_size();
-                            offset += self.read_field.update(offset, read_size);
-                        } else {
-                            self.read_field.reset();
-                        }
-
-                        /* PERF_SAMPLE_CALLCHAIN */
-                        if perf_data.has_format(abi::PERF_SAMPLE_CALLCHAIN) {
-                            let count = perf_data.read_u64(offset)?;
-                            let size = (count * 8) as usize;
-                            offset += 8;
-                            offset += self.callchain_field.update(offset, size);
-                        } else {
-                            self.callchain_field.reset();
-                        }
-
-                        /* PERF_SAMPLE_RAW */
-                        if perf_data.has_format(abi::PERF_SAMPLE_RAW) {
-                            let size = perf_data.read_u32(offset)? as usize;
-                            offset += 4;
-                            id = Some(perf_data.read_u16(offset)? as usize);
-                            offset += self.raw_field.update(offset, size);
-                        } else {
-                            self.raw_field.reset();
-                        }
-
-                        /* PERF_SAMPLE_BRANCH_STACK */
-                        if perf_data.has_format(abi::PERF_SAMPLE_BRANCH_STACK) {
-                            let count = perf_data.read_u64(offset)? as usize;
-                            offset += 8;
-                            let size = count * 24;
-                            offset += self.branch_stack_field.update(offset, size);
-                        } else {
-                            self.branch_stack_field.reset();
-                        }
-
-                        /* PERF_SAMPLE_REGS_USER */
-                        if perf_data.has_format(abi::PERF_SAMPLE_REGS_USER) {
-                            let abi = perf_data.read_u64(offset)?;
-                            offset += 8;
-                            let count = perf_data.regs_user_count();
-                            /*
-                             * ABI is 0 for none, 1 for 32-bit, 2 for 64-bit:
-                             * Therefore, abi * 4 gives us the bytes per-reg.
-                             */
-                            let size = count * (abi * 4) as usize;
-                            offset += self.regs_user_field.update(offset, size);
-                        } else {
-                            self.regs_user_field.reset();
-                        }
-
-                        /* PERF_SAMPLE_STACK_USER */
-                        if perf_data.has_format(abi::PERF_SAMPLE_STACK_USER) {
-                            let size = perf_data.read_u64(offset)? as usize;
-                            offset += 8;
-
-                            if size > 0 {
-                                let stack_start = offset;
-                                offset += size;
-                                /* Actual size of read stack data */
-                                let dyn_size = perf_data.read_u64(offset)? as usize;
-                                offset += 8;
-                                /* Caller is only given read stack data */
-                                self.stack_user_field.update(stack_start, dyn_size);
-                            } else {
-                                self.stack_user_field.reset();
-                            }
-                        } else {
-                            self.stack_user_field.reset();
-                        }
-
-                        /* TODO: Remaining abi format types */
-
-                        /* For now print warning if we see this */
-                        if offset > perf_data.raw_data.len() {
-                            println!("WARN: Truncated sample");
-                        }
-
-                        /* Process if we have an ID to use */
-                        if let Some(id) = &id {
-                            if let Some(event) = self.events.get_mut(id) {
-                                let full_data = perf_data.raw_data;
-                                let event_data = self.raw_field.get_data(full_data);
-
-                                event.process(full_data, event_data);
-                            }
-                        } else {
-                            /* Non-event profile sample */
-                            match perf_data.ancillary.event_type() {
-                                /* Software */
-                                PERF_TYPE_SOFTWARE => {
-                                    match perf_data.ancillary.config() {
-                                        /* CPU */
-                                        PERF_COUNT_SW_CPU_CLOCK => {
-                                            self.cpu_profile_event.process(
-                                                perf_data.raw_data,
-                                                perf_data.raw_data);
-                                        },
-
-                                        /* CSWITCH */
-                                        PERF_COUNT_SW_CONTEXT_SWITCHES => {
-                                            self.cswitch_profile_event.process(
-                                                perf_data.raw_data,
-                                                perf_data.raw_data);
-                                        },
-
-                                        /* Unsupported */
-                                        _ => { },
-                                    }
-                                },
-
-                                /* Unsupported */
-                                _ => { },
-                            }
-                        }
-                    },
-
-                    abi::PERF_RECORD_LOST => {
-                        let offset = abi::Header::data_offset();
-
-                        self.lost_event.process(
-                            perf_data.raw_data,
-                            &perf_data.raw_data[offset..]);
-                    },
-
-                    abi::PERF_RECORD_COMM => {
-                        let offset = abi::Header::data_offset();
-
-                        self.comm_event.process(
-                            perf_data.raw_data,
-                            &perf_data.raw_data[offset..]);
-                    },
-
-                    abi::PERF_RECORD_EXIT => {
-                        let offset = abi::Header::data_offset();
-
-                        self.exit_event.process(
-                            perf_data.raw_data,
-                            &perf_data.raw_data[offset..]);
-                    },
-
-                    abi::PERF_RECORD_FORK => {
-                        let offset = abi::Header::data_offset();
-
-                        self.fork_event.process(
-                            perf_data.raw_data,
-                            &perf_data.raw_data[offset..]);
-                    },
-
-                    abi::PERF_RECORD_MMAP2 => {
-                        let offset = abi::Header::data_offset();
-
-                        self.mmap_event.process(
-                            perf_data.raw_data,
-                            &perf_data.raw_data[offset..]);
-                    },
-
-                    abi::PERF_RECORD_LOST_SAMPLES => {
-                        let offset = abi::Header::data_offset();
-
-                        self.lost_samples_event.process(
-                            perf_data.raw_data,
-                            &perf_data.raw_data[offset..]);
-                    },
-
-                    abi::PERF_RECORD_SWITCH_CPU_WIDE => {
-                        let offset = abi::Header::data_offset();
-
-                        self.cswitch_event.process(
-                            perf_data.raw_data,
-                            &perf_data.raw_data[offset..]);
-                    },
-
-                    _ => {
-                        /* TODO: Remaining abi record types */
-                    },
-                }
-
+            while self.parse_perf_data(None)? {
                 /* Ensure we cannot read forever without a should_stop call */
                 if i >= 100 {
                     break;
@@ -757,60 +856,62 @@ impl PerfSession {
     }
 
     pub fn capture_environment(&mut self) {
-
-        if !self.process_tracking_options.process_names() {
-            return;
-        }
-
-        let ancillary = self.ancillary.clone();
-        let comm_event = self.comm_event();
         let attributes = RingBufBuilder::common_attributes();
 
-        procfs::iter_processes(|pid, path_buf| {
-            const MAX_COMM_LEN : usize = 255;
-            const EVENT_DATA_SIZE : usize =
-                        4 +  // pid: u32
-                        4 +  // tid: u32
-                        MAX_COMM_LEN;
-            let pid_offset = 0;
-            let tid_offset = pid_offset + 4;
-            let comm_offset = tid_offset + 4;
+        // Re-use buffers for capture
+        let mut event_data: Vec<u8> = vec![];
+        let mut full_data: Vec<u8> = vec![];
+        let enabled = self.source_enabled;
+
+        let id_bytes = 0u64.to_ne_bytes();
+
+        procfs::iter_processes(move |pid, path_buf| {
+            // Clear previous data
+            event_data.clear();
+            full_data.clear();
 
             // Comm is encoded as a UTF-8 string.
             let comm = procfs::get_comm(path_buf)
                 .unwrap_or(String::new());
-            let mut comm_len = comm.len();
-            let mut comm_bytes = comm.as_bytes();
-
-            // Truncate to MAX_COMM_LEN if necessary.
-            if comm_len > MAX_COMM_LEN {
-                comm_len = MAX_COMM_LEN;
-                comm_bytes = &comm_bytes[0..MAX_COMM_LEN];
-            }
 
             // Allocate and fill the payload.
             // For new processes, pid == tid.
-            let mut event_data: [u8; EVENT_DATA_SIZE] = [0; EVENT_DATA_SIZE];
             let pid_bytes = pid.to_ne_bytes();
-            event_data[pid_offset..pid_offset+4].copy_from_slice(&pid_bytes);
-            event_data[tid_offset..tid_offset+4].copy_from_slice(&pid_bytes);
-            event_data[comm_offset..comm_offset+comm_len].copy_from_slice(comm_bytes);
+            event_data.extend_from_slice(&pid_bytes);
+            event_data.extend_from_slice(&pid_bytes);
+            event_data.extend_from_slice(comm.as_bytes());
+            event_data.push(0);
 
-            let mut full_data: Vec<u8> = vec![];
-            abi::Header::write(0, 0, &event_data, &mut full_data);
+            // Common attributes has SAMPLE_ID_ALL:
+            // Need to push TID/TIME/IDENTIFIER in that order.
+            event_data.extend_from_slice(&pid_bytes);
+            event_data.extend_from_slice(&pid_bytes);
 
-            // Populate ancillary data.
-            ancillary.write(|value| {
-                value.cpu = 0;
-                value.attributes = Rc::new(attributes);
-            });
+            // If the source is already enabled drain
+            // the events to try to get as close as
+            // possible to in-time-ordered events.
+            if enabled {
+                let _ = self.parse_drain();
+            }
 
+            let capture_time = rb::perf_timestamp(&attributes);
+            let time_bytes = capture_time.to_ne_bytes();
 
-            // Dispatch the event
-            let offset = abi::Header::data_offset();
-            comm_event.process(
-                &full_data,
-                &full_data[offset..]);
+            event_data.extend_from_slice(&time_bytes);
+            event_data.extend_from_slice(&id_bytes);
+
+            abi::Header::write(PERF_RECORD_COMM, 0, &event_data, &mut full_data);
+
+            // Create PerfData and parse as if from buffer
+            let perf_data = PerfData {
+                ancillary: AncillaryData {
+                    cpu: 0,
+                    attributes: Rc::new(attributes),
+                },
+                raw_data: &full_data,
+            };
+
+            let _ = self.parse_perf_data(Some(perf_data));
         });
     }
 }
