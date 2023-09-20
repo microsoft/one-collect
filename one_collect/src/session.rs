@@ -114,6 +114,12 @@ impl<'a> Session<'a> {
         self.perf_session.as_mut().unwrap().disable()
     }
 
+    pub fn parse_all(
+        &mut self) -> Result<(), TryFromSliceError> {
+            self.capture_environment();
+            self.perf_session.as_mut().unwrap().parse_all()
+    }
+
     pub fn parse_for_duration(
         &mut self,
         duration: Duration) -> Result<(), TryFromSliceError> {
