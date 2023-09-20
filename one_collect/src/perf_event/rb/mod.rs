@@ -30,11 +30,12 @@ unsafe fn mb() {
 }
 
 pub trait RingBufOptions {
+    fn clone_options(&self) -> Self;
+
     fn attributes_mut(&mut self) -> &mut perf_event_attr;
 
-    fn with_callchain_data(&self) -> Self
-        where Self: Clone {
-        let mut clone = self.clone();
+    fn with_callchain_data(&self) -> Self where Self: Sized {
+        let mut clone = self.clone_options();
         let attributes = clone.attributes_mut();
 
         attributes.sample_type |= abi::PERF_SAMPLE_CALLCHAIN;
@@ -42,9 +43,8 @@ pub trait RingBufOptions {
         clone
     }
 
-    fn without_user_callchain_data(&mut self) -> Self
-        where Self: Clone {
-        let mut clone = self.clone();
+    fn without_user_callchain_data(&self) -> Self where Self: Sized {
+        let mut clone = self.clone_options();
         let attributes = clone.attributes_mut();
 
         attributes.flags |= FLAG_EXCLUDE_CALLCHAIN_USER;
@@ -52,9 +52,8 @@ pub trait RingBufOptions {
         clone
     }
 
-    fn without_kernel_callchain_data(&mut self) -> Self
-        where Self: Clone {
-        let mut clone = self.clone();
+    fn without_kernel_callchain_data(&self) -> Self where Self: Sized {
+        let mut clone = self.clone_options();
         let attributes = clone.attributes_mut();
 
         attributes.flags |= FLAG_EXCLUDE_CALLCHAIN_KERNEL;
@@ -62,11 +61,20 @@ pub trait RingBufOptions {
         clone
     }
 
+    fn with_ip(&self) -> Self where Self: Sized {
+        let mut clone = self.clone_options();
+        let attributes = clone.attributes_mut();
+
+        attributes.sample_type |= abi::PERF_SAMPLE_IP;
+        attributes.flags |= FLAG_PRECISE_IP;
+
+        clone
+    }
+
     fn with_user_regs_data(
-        &mut self,
-        regs: u64) -> Self
-        where Self: Clone {
-        let mut clone = self.clone();
+        &self,
+        regs: u64) -> Self where Self: Sized {
+        let mut clone = self.clone_options();
         let attributes = clone.attributes_mut();
 
         attributes.sample_type |= abi::PERF_SAMPLE_REGS_USER;
@@ -76,10 +84,9 @@ pub trait RingBufOptions {
     }
 
     fn with_user_stack_data(
-        &mut self,
-        stack_bytes: u32) -> Self
-        where Self: Clone {
-        let mut clone = self.clone();
+        &self,
+        stack_bytes: u32) -> Self where Self: Sized {
+        let mut clone = self.clone_options();
         let attributes = clone.attributes_mut();
 
         attributes.sample_type |= abi::PERF_SAMPLE_STACK_USER;
@@ -153,15 +160,6 @@ pub struct Kernel;
 pub struct RingBufBuilder<T = Profiling> {
     attributes: perf_event_attr,
     _type: PhantomData<T>,
-}
-
-impl Clone for RingBufBuilder {
-    fn clone(&self) -> Self {
-        Self {
-            attributes: self.attributes,
-            _type: self._type,
-        }
-    }
 }
 
 impl RingBufBuilder {
@@ -239,6 +237,13 @@ impl RingBufBuilder {
 }
 
 impl RingBufOptions for RingBufBuilder<Profiling> {
+    fn clone_options(&self) -> Self {
+        Self {
+            attributes: self.attributes,
+            _type: self._type,
+        }
+    }
+
     fn attributes_mut(&mut self) -> &mut perf_event_attr {
         &mut self.attributes
     }
@@ -251,6 +256,13 @@ impl RingBufBuilder<Profiling> {
 }
 
 impl RingBufOptions for RingBufBuilder<ContextSwitches> {
+    fn clone_options(&self) -> Self {
+        Self {
+            attributes: self.attributes,
+            _type: self._type,
+        }
+    }
+
     fn attributes_mut(&mut self) -> &mut perf_event_attr {
         &mut self.attributes
     }
@@ -263,6 +275,13 @@ impl RingBufBuilder<ContextSwitches> {
 }
 
 impl RingBufOptions for RingBufBuilder<Tracepoint> {
+    fn clone_options(&self) -> Self {
+        Self {
+            attributes: self.attributes,
+            _type: self._type,
+        }
+    }
+
     fn attributes_mut(&mut self) -> &mut perf_event_attr {
         &mut self.attributes
     }

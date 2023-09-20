@@ -146,6 +146,14 @@ pub const PERF_REG_SP: u64 = 1 << 31u64;
 #[cfg(target_arch = "aarch64")]
 pub const PERF_REG_IP: u64 = 1 << 32u64;
 
+pub const PERF_CONTEXT_HV: u64 = 0xFFFFFFFFFFFFFFE0;
+pub const PERF_CONTEXT_KERNEL: u64 = 0xFFFFFFFFFFFFFF80;
+pub const PERF_CONTEXT_USER: u64 = 0xFFFFFFFFFFFFFE00;
+pub const PERF_CONTEXT_GUEST: u64 = 0xFFFFFFFFFFFFF800;
+pub const PERF_CONTEXT_GUEST_KERNEL: u64 = 0xFFFFFFFFFFFFF780;
+pub const PERF_CONTEXT_GUEST_USER: u64 = 0xFFFFFFFFFFFFF600;
+pub const PERF_CONTEXT_MAX: u64 = 0xFFFFFFFFFFFFF001;
+
 #[repr(C)]
 #[derive(Copy)]
 #[derive(Clone)]
