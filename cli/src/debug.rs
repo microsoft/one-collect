@@ -28,6 +28,8 @@ impl<'a> DebugConsoleSession<'a> {
         console_session.hook_comm_event();
         console_session.hook_exit_event();
         console_session.hook_cpu_profile_event();
+        console_session.hook_lost_event();
+        console_session.hook_lost_samples_event();
 
         console_session
     }
@@ -151,6 +153,64 @@ impl<'a> DebugConsoleSession<'a> {
                     println!("timestamp: {time}, event: cpu_profile, cpu: {cpu}, pid: {pid}, tid: {tid}");
                 }
             });
+        });
+    }
+
+    fn hook_lost_event(&mut self) {
+        let perf_session = self.perf_session_mut();
+
+        let time_data = perf_session.time_data_ref();
+        let ancillary = perf_session.ancillary_data();
+        let lost_event = perf_session.lost_event();
+        let lost_event_format = lost_event.format();
+        let id_field = lost_event_format.get_field_ref_unchecked("id");
+        let lost_field = lost_event_format.get_field_ref_unchecked("lost");
+
+        lost_event.add_callback(move |full_data,format,event_data| {
+
+            // timestamp
+            let time = time_data.try_get_u64(full_data).unwrap_or(0) as usize;
+
+            // cpu
+            let mut cpu = 0;
+            ancillary.read( |values| {
+                cpu = values.cpu();
+            });
+
+            // id
+            let id = format.try_get_u64(id_field, event_data).unwrap();
+
+            // lost
+            let lost = format.try_get_u64(lost_field, event_data).unwrap();
+
+            println!("timestamp: {time}, event: lost, cpu: {cpu}, id: {id}, lost: {lost}");
+        });
+    }
+
+    fn hook_lost_samples_event(&mut self) {
+        let perf_session = self.perf_session_mut();
+
+        let time_data = perf_session.time_data_ref();
+        let ancillary = perf_session.ancillary_data();
+        let lost_samples_event = perf_session.lost_samples_event();
+        let lost_samples_event_format = lost_samples_event.format();
+        let lost_field = lost_samples_event_format.get_field_ref_unchecked("lost");
+
+        lost_samples_event.add_callback(move |full_data,format,event_data| {
+
+            // timestamp
+            let time = time_data.try_get_u64(full_data).unwrap_or(0) as usize;
+
+            // cpu
+            let mut cpu = 0;
+            ancillary.read( |values| {
+                cpu = values.cpu();
+            });
+
+            // lost
+            let lost = format.try_get_u64(lost_field, event_data).unwrap();
+
+            println!("timestamp: {time}, event: lost, cpu: {cpu}, lost: {lost}");
         });
     }
 
