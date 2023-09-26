@@ -867,24 +867,24 @@ impl PerfSession {
         Ok(())
     }
 
-    pub fn capture_environment(&mut self) {
+    pub fn capture_environment_comms(&mut self) {
         let attributes = RingBufBuilder::common_attributes();
+        let enabled = self.source_enabled;
 
         // Re-use buffers for capture
-        let mut event_data: Vec<u8> = vec![];
-        let mut full_data: Vec<u8> = vec![];
-        let enabled = self.source_enabled;
+        let mut event_data: Vec<u8> = Vec::new();
+        let mut full_data: Vec<u8> = Vec::new();
 
         let id_bytes = 0u64.to_ne_bytes();
 
         procfs::iter_processes(move |pid, path_buf| {
-            // Clear previous data
-            event_data.clear();
-            full_data.clear();
-
             // Comm is encoded as a UTF-8 string.
             let comm = procfs::get_comm(path_buf)
                 .unwrap_or(String::new());
+
+            // Clear previous data
+            event_data.clear();
+            full_data.clear();
 
             // Allocate and fill the payload.
             // For new processes, pid == tid.
@@ -925,6 +925,83 @@ impl PerfSession {
 
             let _ = self.parse_perf_data(Some(perf_data));
         });
+    }
+
+    pub fn capture_environment_modules(&mut self) {
+        let attributes = RingBufBuilder::common_attributes();
+        let enabled = self.source_enabled;
+        let mut event_data: Vec<u8> = Vec::new();
+        let mut full_data: Vec<u8> = Vec::new();
+
+        let gen_bytes = 0u64.to_ne_bytes();
+        /* PROT_EXEC */
+        let prot_bytes = 4u32.to_ne_bytes();
+        let flag_bytes = 0u32.to_ne_bytes();
+        let id_bytes = 0u64.to_ne_bytes();
+
+        procfs::iter_modules(move |pid, module| {
+            if module.path.is_none() {
+                return;
+            }
+
+            let path = module.path.unwrap();
+
+            event_data.clear();
+            full_data.clear();
+
+            let pid_bytes = pid.to_ne_bytes();
+            let addr_bytes = module.start_addr.to_ne_bytes();
+            let len_bytes = module.len().to_ne_bytes();
+            let offset_bytes = module.offset.to_ne_bytes();
+            let maj_bytes = module.dev_maj.to_ne_bytes();
+            let min_bytes = module.dev_min.to_ne_bytes();
+            let ino_bytes = module.ino.to_ne_bytes();
+
+            event_data.extend_from_slice(&pid_bytes);
+            event_data.extend_from_slice(&pid_bytes);
+            event_data.extend_from_slice(&addr_bytes);
+            event_data.extend_from_slice(&len_bytes);
+            event_data.extend_from_slice(&offset_bytes);
+            event_data.extend_from_slice(&maj_bytes);
+            event_data.extend_from_slice(&min_bytes);
+            event_data.extend_from_slice(&ino_bytes);
+            event_data.extend_from_slice(&gen_bytes);
+            event_data.extend_from_slice(&prot_bytes);
+            event_data.extend_from_slice(&flag_bytes);
+            event_data.extend_from_slice(path.as_bytes());
+            event_data.push(0);
+
+            // If the source is already enabled drain
+            // the events to try to get as close as
+            // possible to in-time-ordered events.
+            if enabled {
+                let _ = self.parse_drain();
+            }
+
+            let capture_time = rb::perf_timestamp(&attributes);
+            let time_bytes = capture_time.to_ne_bytes();
+
+            event_data.extend_from_slice(&time_bytes);
+            event_data.extend_from_slice(&id_bytes);
+
+            abi::Header::write(PERF_RECORD_MMAP2, 0, &event_data, &mut full_data);
+
+            // Create PerfData and parse as if from buffer
+            let perf_data = PerfData {
+                ancillary: AncillaryData {
+                    cpu: 0,
+                    attributes: Rc::new(attributes),
+                },
+                raw_data: &full_data,
+            };
+
+            let _ = self.parse_perf_data(Some(perf_data));
+        });
+    }
+
+    pub fn capture_environment(&mut self) {
+        self.capture_environment_comms();
+        self.capture_environment_modules();
     }
 }
 

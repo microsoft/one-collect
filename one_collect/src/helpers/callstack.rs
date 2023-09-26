@@ -526,6 +526,7 @@ mod tests {
             println!("WARN: Lost samples data");
         });
 
+        session.capture_environment();
         session.enable().unwrap();
         session.parse_for_duration(duration).unwrap();
         session.disable().unwrap();
