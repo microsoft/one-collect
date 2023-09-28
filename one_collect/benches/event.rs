@@ -29,6 +29,8 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         assert!(a[0] == 1u8);
         assert!(b[0] == 2u8);
         assert!(c[0] == 3u8);
+
+        Ok(())
     });
 
     let mut data: Vec<u8> = Vec::new();
@@ -37,8 +39,12 @@ pub fn criterion_benchmark(c: &mut Criterion) {
     data.push(3u8);
 
     let slice = data.as_slice();
+    let mut errors = Vec::new();
 
-    c.bench_function("min_parse", |b| b.iter(|| e.process(slice, slice)));
+    c.bench_function("min_parse", |b| b.iter(|| {
+        e.process(slice, slice, &mut errors);
+        errors.clear();
+    }));
 }
 
 criterion_group!(benches, criterion_benchmark);

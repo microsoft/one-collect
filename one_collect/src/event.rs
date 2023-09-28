@@ -3,7 +3,7 @@ use std::rc::Rc;
 
 static EMPTY: &[u8] = &[];
 
-type BoxedCallback = Box<dyn FnMut(&[u8], &EventFormat, &[u8])>;
+type BoxedCallback = Box<dyn FnMut(&[u8], &EventFormat, &[u8]) -> anyhow::Result<()>>;
 
 #[derive(Clone)]
 pub struct DataFieldRef(Rc<Cell<DataField>>);
@@ -27,6 +27,14 @@ impl DataFieldRef {
         &data[field.start() .. field.end()]
     }
 
+    pub fn get_u64(
+        &self,
+        data: &[u8]) -> Result<u64, anyhow::Error> {
+        let slice = self.get_data(data);
+
+        Ok(u64::from_ne_bytes(slice[0..8].try_into()?))
+    }
+
     pub fn try_get_u64(
         &self,
         data: &[u8]) -> Option<u64> {
@@ -40,6 +48,14 @@ impl DataFieldRef {
         }
     }
 
+    pub fn get_u32(
+        &self,
+        data: &[u8]) -> Result<u32, anyhow::Error> {
+        let slice = self.get_data(data);
+
+        Ok(u32::from_ne_bytes(slice[0..4].try_into()?))
+    }
+
     pub fn try_get_u32(
         &self,
         data: &[u8]) -> Option<u32> {
@@ -51,6 +67,14 @@ impl DataFieldRef {
             Ok(slice) => Some(u32::from_ne_bytes(slice)),
             Err(_) => None,
         }
+    }
+
+    pub fn get_u16(
+        &self,
+        data: &[u8]) -> Result<u16, anyhow::Error> {
+        let slice = self.get_data(data);
+
+        Ok(u16::from_ne_bytes(slice[0..2].try_into()?))
     }
 
     pub fn try_get_u16(
@@ -245,6 +269,15 @@ impl EventFormat {
         }
     }
 
+    pub fn get_u64(
+        &self,
+        field_ref: EventFieldRef,
+        data: &[u8]) -> Result<u64, anyhow::Error> {
+        let slice = self.get_data(field_ref, data);
+
+        Ok(u64::from_ne_bytes(slice[0..8].try_into()?))
+    }
+
     pub fn try_get_u64(
         &self,
         field_ref: EventFieldRef,
@@ -257,6 +290,15 @@ impl EventFormat {
             Ok(slice) => Some(u64::from_ne_bytes(slice)),
             Err(_) => None,
         }
+    }
+
+    pub fn get_u32(
+        &self,
+        field_ref: EventFieldRef,
+        data: &[u8]) -> Result<u32, anyhow::Error> {
+        let slice = self.get_data(field_ref, data);
+
+        Ok(u32::from_ne_bytes(slice[0..4].try_into()?))
     }
 
     pub fn try_get_u32(
@@ -273,6 +315,15 @@ impl EventFormat {
         }
     }
 
+    pub fn get_u16(
+        &self,
+        field_ref: EventFieldRef,
+        data: &[u8]) -> Result<u16, anyhow::Error> {
+        let slice = self.get_data(field_ref, data);
+
+        Ok(u16::from_ne_bytes(slice[0..2].try_into()?))
+    }
+
     pub fn try_get_u16(
         &self,
         field_ref: EventFieldRef,
@@ -285,6 +336,16 @@ impl EventFormat {
             Ok(slice) => Some(u16::from_ne_bytes(slice)),
             Err(_) => None,
         }
+    }
+
+    pub fn get_str<'a>(
+        &self,
+        field_ref: EventFieldRef,
+        data: &'a [u8]) -> Result<&'a str, anyhow::Error> {
+        let slice = self.get_data(field_ref, data);
+        if slice.is_empty() { return Ok(""); }
+
+        Ok(std::str::from_utf8(slice)?)
     }
 
     pub fn try_get_str<'a>(
@@ -339,16 +400,19 @@ impl Event {
 
     pub fn add_callback(
         &mut self,
-        callback: impl FnMut(&[u8], &EventFormat, &[u8]) + 'static) {
+        callback: impl FnMut(&[u8], &EventFormat, &[u8]) -> anyhow::Result<()> + 'static) {
         self.callbacks.push(Box::new(callback));
     }
 
     pub fn process(
         &mut self,
         full_data: &[u8],
-        event_data: &[u8]) {
+        event_data: &[u8],
+        errors: &mut Vec<anyhow::Error>) {
         for callback in &mut self.callbacks {
-            (callback)(full_data, &self.format, event_data);
+            if let Err(e) = (callback)(full_data, &self.format, event_data) {
+                errors.push(e);
+            }
         }
     }
 }
@@ -397,6 +461,8 @@ mod tests {
             assert!(c[0] == 3u8);
 
             count.fetch_add(1, Ordering::Relaxed);
+
+            Ok(())
         });
     }
 
@@ -411,13 +477,42 @@ mod tests {
         data.push(2u8);
         data.push(3u8);
 
+        let mut errors: Vec<anyhow::Error> = Vec::new();
+
         let slice = data.as_slice();
 
         assert_eq!(count.load(Ordering::Relaxed), 0);
-        e.process(slice, slice);
+        e.process(slice, slice, &mut errors);
         assert_eq!(count.load(Ordering::Relaxed), 1);
-        e.process(slice, slice);
+        assert!(errors.is_empty());
+        e.process(slice, slice, &mut errors);
         assert_eq!(count.load(Ordering::Relaxed), 2);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn error_reporting() {
+        let mut e = create_abc();
+        e.add_callback(|_full_data, _format, _event_data| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Oops").into())
+        });
+
+        let mut data: Vec<u8> = Vec::new();
+        data.push(1u8);
+        data.push(2u8);
+        data.push(3u8);
+
+        let mut errors: Vec<anyhow::Error> = Vec::new();
+
+        let slice = data.as_slice();
+        e.process(slice, slice, &mut errors);
+        assert_eq!(1, errors.len());
+        e.process(slice, slice, &mut errors);
+        assert_eq!(2, errors.len());
+        e.process(slice, slice, &mut errors);
+        assert_eq!(3, errors.len());
     }
 
     #[test]

@@ -35,6 +35,14 @@ impl<T> SharedData<T, DataOwner> {
         f(&mut self.inner.borrow_mut());
     }
 
+    pub fn borrow_mut(&self) -> std::cell::RefMut<'_, T> {
+        self.inner.borrow_mut()
+    }
+
+    pub fn borrow(&self) -> std::cell::Ref<'_, T> {
+        self.inner.borrow()
+    }
+
     pub fn read_only(&self) -> SharedData<T, DataReader> {
         SharedData::<T, DataReader> {
             inner: self.inner.clone(),
@@ -65,6 +73,10 @@ impl<T: Copy> SharedData<T, DataOwner> {
 }
 
 impl<T> SharedData<T, DataReader> {
+    pub fn borrow(&self) -> std::cell::Ref<'_, T> {
+        self.inner.borrow()
+    }
+
     pub fn read(
         &self,
         f: impl FnOnce(&T)) {

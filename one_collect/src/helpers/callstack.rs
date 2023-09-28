@@ -391,24 +391,26 @@ impl CallstackHelp for RingBufSessionBuilder {
                 let state = session_state.clone();
 
                 event.add_callback(move |_full_data,fmt,data| {
-                    let prot = fmt.try_get_u32(prot, data).unwrap();
+                    let prot = fmt.get_u32(prot, data)?;
 
                     /* Skip non-executable mmaps */
                     if prot & PROT_EXEC != PROT_EXEC {
-                        return;
+                        return Ok(());
                     }
 
-                    state.write(|state| {
-                        state.add_mmap_exec(
-                            fmt.try_get_u32(pid, data).unwrap(),
-                            fmt.try_get_u64(addr, data).unwrap(),
-                            fmt.try_get_u64(len, data).unwrap(),
-                            fmt.try_get_u64(pgoffset, data).unwrap(),
-                            fmt.try_get_u32(maj, data).unwrap(),
-                            fmt.try_get_u32(min, data).unwrap(),
-                            fmt.try_get_u64(ino, data).unwrap(),
-                            fmt.try_get_str(filename, data).unwrap());
-                    });
+                    let mut state = state.borrow_mut();
+
+                    state.add_mmap_exec(
+                        fmt.get_u32(pid, data)?,
+                        fmt.get_u64(addr, data)?,
+                        fmt.get_u64(len, data)?,
+                        fmt.get_u64(pgoffset, data)?,
+                        fmt.get_u32(maj, data)?,
+                        fmt.get_u32(min, data)?,
+                        fmt.get_u64(ino, data)?,
+                        fmt.get_str(filename, data)?);
+
+                    Ok(())
                 });
 
                 /* Hook comm records */
@@ -419,16 +421,18 @@ impl CallstackHelp for RingBufSessionBuilder {
                 let state = session_state.clone();
 
                 event.add_callback(move |_full_data,fmt,data| {
-                    let pid = fmt.try_get_u32(pid, data).unwrap();
-                    let tid = fmt.try_get_u32(tid, data).unwrap();
+                    let pid = fmt.get_u32(pid, data)?;
+                    let tid = fmt.get_u32(tid, data)?;
 
                     if pid != tid {
-                        return;
+                        return Ok(())
                     }
 
                     state.write(|state| {
                         state.add_comm_exec(pid);
                     });
+
+                    Ok(())
                 });
 
                 /* Hook fork records */
@@ -440,18 +444,20 @@ impl CallstackHelp for RingBufSessionBuilder {
                 let state = session_state.clone();
 
                 event.add_callback(move |_full_data,fmt,data| {
-                    let pid = fmt.try_get_u32(pid, data).unwrap();
-                    let tid = fmt.try_get_u32(tid, data).unwrap();
+                    let pid = fmt.get_u32(pid, data)?;
+                    let tid = fmt.get_u32(tid, data)?;
 
                     if pid != tid {
-                        return;
+                        return Ok(());
                     }
 
-                    let ppid = fmt.try_get_u32(ppid, data).unwrap();
+                    let ppid = fmt.get_u32(ppid, data)?;
 
                     state.write(|state| {
                         state.fork(pid, ppid);
                     });
+
+                    Ok(())
                 });
 
                 /* Hook exit records */
@@ -461,11 +467,13 @@ impl CallstackHelp for RingBufSessionBuilder {
                 let state = session_state.clone();
 
                 event.add_callback(move |_full_data,fmt,data| {
-                    let pid = fmt.try_get_u32(pid, data).unwrap();
+                    let pid = fmt.get_u32(pid, data)?;
 
                     state.write(|state| {
                         state.exit(pid);
                     });
+
+                    Ok(())
                 });
         })
     }
@@ -516,14 +524,20 @@ mod tests {
             }
 
             println!("");
+
+            Ok(())
         });
 
         session.lost_event().add_callback(|_,_,_| {
             println!("WARN: Lost event data");
+
+            Ok(())
         });
 
         session.lost_samples_event().add_callback(|_,_,_| {
             println!("WARN: Lost samples data");
+
+            Ok(())
         });
 
         session.capture_environment();

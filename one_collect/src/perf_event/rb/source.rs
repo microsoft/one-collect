@@ -696,6 +696,8 @@ mod tests {
 
             callback_samples.fetch_add(1, Ordering::Relaxed);
             atomic_time.store(time, Ordering::Relaxed);
+
+            Ok(())
         });
 
         session.enable().unwrap();
