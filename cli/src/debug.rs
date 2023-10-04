@@ -61,7 +61,7 @@ impl<'a> DebugConsoleSession<'a> {
         comm_event.add_callback( move |full_data,format,event_data| {
 
             // timestamp
-            let time = time_data.try_get_u64(full_data).unwrap_or(0) as usize;
+            let time = time_data.get_u64(full_data)? as usize;
 
             // cpu
             let mut cpu = 0;
@@ -70,15 +70,17 @@ impl<'a> DebugConsoleSession<'a> {
             });
 
             // pid
-            let pid = format.try_get_u32(comm_pid_ref, event_data).unwrap_or(0);
+            let pid = format.get_u32(comm_pid_ref, event_data)?;
 
             // tid
-            let tid = format.try_get_u32(comm_tid_ref, event_data).unwrap_or(0);
+            let tid = format.get_u32(comm_tid_ref, event_data)?;
 
             // comm
-            let comm_value = format.try_get_str(comm_comm_ref, event_data).unwrap_or("");
+            let comm_value = format.get_str(comm_comm_ref, event_data)?;
 
             println!("timestamp: {time}, event: comm, cpu: {cpu}, pid: {pid}, tid: {tid}, comm: {comm_value}");
+
+            Ok(())
         });
     }
 
@@ -96,7 +98,7 @@ impl<'a> DebugConsoleSession<'a> {
         exit_event.add_callback( move |full_data,format,event_data| {
 
             // timestamp
-            let time = time_data.try_get_u64(full_data).unwrap_or(0) as usize;
+            let time = time_data.get_u64(full_data)? as usize;
 
             // cpu
             let mut cpu = 0;
@@ -105,12 +107,14 @@ impl<'a> DebugConsoleSession<'a> {
             });
 
             // pid
-            let pid = format.try_get_u32(exit_pid_ref, event_data).unwrap_or(0);
+            let pid = format.get_u32(exit_pid_ref, event_data)?;
 
             // tid
-            let tid = format.try_get_u32(exit_tid_ref, event_data).unwrap_or(0);
+            let tid = format.get_u32(exit_tid_ref, event_data)?;
 
             println!("timestamp: {time}, event: exit, cpu: {cpu}, pid: {pid}, tid: {tid}");
+
+            Ok(())
         });
     }
 
@@ -126,7 +130,7 @@ impl<'a> DebugConsoleSession<'a> {
         perf_session.cpu_profile_event().add_callback( move |full_data,_format,_event_data| {
 
             // timestamp
-            let time = time_data.try_get_u64(full_data).unwrap_or(0) as usize;
+            let time = time_data.get_u64(full_data)? as usize;
 
             // cpu
             let mut cpu = 0;
@@ -135,10 +139,10 @@ impl<'a> DebugConsoleSession<'a> {
             });
 
             // pid
-            let pid = pid_field.try_get_u32(full_data).unwrap_or(0);
+            let pid = pid_field.get_u32(full_data)?;
 
             // tid
-            let tid = tid_field.try_get_u32(full_data).unwrap_or(0);
+            let tid = tid_field.get_u32(full_data)?;
 
             // session state
             // NOTE: This is what will be required in order to consume tracked state.
@@ -153,6 +157,8 @@ impl<'a> DebugConsoleSession<'a> {
                     println!("timestamp: {time}, event: cpu_profile, cpu: {cpu}, pid: {pid}, tid: {tid}");
                 }
             });
+
+            Ok(())
         });
     }
 
@@ -169,7 +175,7 @@ impl<'a> DebugConsoleSession<'a> {
         lost_event.add_callback(move |full_data,format,event_data| {
 
             // timestamp
-            let time = time_data.try_get_u64(full_data).unwrap_or(0) as usize;
+            let time = time_data.get_u64(full_data)? as usize;
 
             // cpu
             let mut cpu = 0;
@@ -178,12 +184,14 @@ impl<'a> DebugConsoleSession<'a> {
             });
 
             // id
-            let id = format.try_get_u64(id_field, event_data).unwrap();
+            let id = format.get_u64(id_field, event_data)?;
 
             // lost
-            let lost = format.try_get_u64(lost_field, event_data).unwrap();
+            let lost = format.get_u64(lost_field, event_data)?;
 
             println!("timestamp: {time}, event: lost, cpu: {cpu}, id: {id}, lost: {lost}");
+
+            Ok(())
         });
     }
 
@@ -199,7 +207,7 @@ impl<'a> DebugConsoleSession<'a> {
         lost_samples_event.add_callback(move |full_data,format,event_data| {
 
             // timestamp
-            let time = time_data.try_get_u64(full_data).unwrap_or(0) as usize;
+            let time = time_data.get_u64(full_data)? as usize;
 
             // cpu
             let mut cpu = 0;
@@ -208,9 +216,11 @@ impl<'a> DebugConsoleSession<'a> {
             });
 
             // lost
-            let lost = format.try_get_u64(lost_field, event_data).unwrap();
+            let lost = format.get_u64(lost_field, event_data)?;
 
             println!("timestamp: {time}, event: lost, cpu: {cpu}, lost: {lost}");
+
+            Ok(())
         });
     }
 

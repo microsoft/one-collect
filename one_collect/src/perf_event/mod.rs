@@ -173,6 +173,8 @@ pub struct PerfSession {
     source_enabled: bool,
     events: HashMap<usize, Event>,
     state: Writable<SessionState>,
+    errors: Vec<anyhow::Error>,
+    event_error_callback: Option<Box<dyn Fn(&Event, &anyhow::Error)>>,
 
     /* Raw data fields */
     ip_field: DataFieldRef,
@@ -221,6 +223,8 @@ impl PerfSession {
             source_enabled: false,
             events: HashMap::new(),
             state: Writable::new(SessionState::new()),
+            errors: Vec::new(),
+            event_error_callback: None,
 
             /* Events */
             ip_field: DataFieldRef::new(),
@@ -284,34 +288,35 @@ impl PerfSession {
         path_buf.push("/proc");
 
         comm_event.add_callback(move |_full_data, format, event_data| {
-            let pid = format.try_get_u32(pid_field, event_data).unwrap_or(0);
-            let tid = format.try_get_u32(tid_field, event_data).unwrap_or(0);
+            let pid = format.get_u32(pid_field, event_data)?;
+            let tid = format.get_u32(tid_field, event_data)?;
 
             // When pid == tid, the process is new.  Otherwise, it is a new thread.
             // Ignore swapper (pid 0).
             if (pid == tid) && (pid != 0) {
-                let comm = format.try_get_str(comm_field, event_data);
+                let proc_name = format.get_str(comm_field, event_data)?;
 
                 session_state.write(|state| {
                     let proc = state.new_process(pid);
                     let mut use_procfs = false;
-                    if let Some(proc_name) = comm {
-                        // Check procfs if proc_name is 15 chars (length limit of comm_event).
-                        if proc_name.len() == 15 {
-                            path_buf.push(pid.to_string());
-                            if let Some(proc_name) = procfs::get_comm(&mut path_buf) {
-                                use_procfs = true;
-                                proc.set_name(proc_name.as_str());
-                            }
-                            path_buf.pop();
-                        }
 
-                        if !use_procfs {
-                            proc.set_name(proc_name);
+                    // Check procfs if proc_name is 15 chars (length limit of comm_event).
+                    if proc_name.len() == 15 {
+                        path_buf.push(pid.to_string());
+                        if let Some(proc_name) = procfs::get_comm(&mut path_buf) {
+                            use_procfs = true;
+                            proc.set_name(proc_name.as_str());
                         }
+                        path_buf.pop();
+                    }
+
+                    if !use_procfs {
+                        proc.set_name(proc_name);
                     }
                 });
             }
+
+            Ok(())
         });
 
         let session_state = self.state.clone();
@@ -321,12 +326,14 @@ impl PerfSession {
         let ppid_field = fork_event_format.get_field_ref_unchecked("ppid");
 
         fork_event.add_callback(move |_full_data, format, event_data| {
-            let pid = format.try_get_u32(pid_field, event_data).unwrap_or(0);
-            let ppid = format.try_get_u32(ppid_field, event_data).unwrap_or(0);
+            let pid = format.get_u32(pid_field, event_data)?;
+            let ppid = format.get_u32(ppid_field, event_data)?;
 
             session_state.write(|state| {
                 state.fork_process(pid, ppid);
-            })
+            });
+
+            Ok(())
         });
 
         let session_state = self.state.clone();
@@ -336,8 +343,8 @@ impl PerfSession {
         let tid_field = exit_event_format.get_field_ref_unchecked("tid");
 
         exit_event.add_callback(move |_full_data, format, event_data| {
-            let pid = format.try_get_u32(pid_field, event_data).unwrap_or(0);
-            let tid = format.try_get_u32(tid_field, event_data).unwrap_or(0);
+            let pid = format.get_u32(pid_field, event_data)?;
+            let tid = format.get_u32(tid_field, event_data)?;
 
             // When pid == tid, the process has died.  Otherwise it is a thread death.
             // Ignore swapper (pid 0).
@@ -346,7 +353,15 @@ impl PerfSession {
                     state.drop_process(pid);
                 });
             }
+
+            Ok(())
         });
+    }
+
+    pub fn set_event_error_callback(
+        &mut self,
+        callback: impl Fn(&Event, &anyhow::Error) + 'static) {
+        self.event_error_callback = Some(Box::new(callback));
     }
 
     pub fn process_tracking_options(&self) -> &ProcessTrackingOptions {
@@ -493,6 +508,18 @@ impl PerfSession {
         let now = std::time::Instant::now();
 
         self.parse_until(|| { now.elapsed() >= duration })
+    }
+
+    fn log_errors(
+        &self,
+        event: &Event) {
+        for error in &self.errors {
+            if let Some(callback) = &self.event_error_callback {
+                callback(event, error);
+            } else {
+                eprintln!("Error: Event '{}': {}", event.name(), error);
+            }
+        }
     }
 
     fn parse_perf_data(
@@ -720,7 +747,7 @@ impl PerfSession {
 
                 /* For now print warning if we see this */
                 if offset > perf_data.raw_data.len() {
-                    println!("WARN: Truncated sample");
+                    eprintln!("WARN: Truncated sample");
                 }
 
                 /* Process if we have an ID to use */
@@ -729,7 +756,16 @@ impl PerfSession {
                         let full_data = perf_data.raw_data;
                         let event_data = self.raw_field.get_data(full_data);
 
-                        event.process(full_data, event_data);
+                        event.process(
+                            full_data,
+                            event_data,
+                            &mut self.errors);
+                    }
+
+                    if !self.errors.is_empty() {
+                        if let Some(event) = self.events.get(id) {
+                            self.log_errors(&event);
+                        }
                     }
                 } else {
                     /* Non-event profile sample */
@@ -741,14 +777,20 @@ impl PerfSession {
                                 PERF_COUNT_SW_CPU_CLOCK => {
                                     self.cpu_profile_event.process(
                                         perf_data.raw_data,
-                                        perf_data.raw_data);
+                                        perf_data.raw_data,
+                                        &mut self.errors);
+
+                                    self.log_errors(&self.cpu_profile_event);
                                 },
 
                                 /* CSWITCH */
                                 PERF_COUNT_SW_CONTEXT_SWITCHES => {
                                     self.cswitch_profile_event.process(
                                         perf_data.raw_data,
-                                        perf_data.raw_data);
+                                        perf_data.raw_data,
+                                        &mut self.errors);
+
+                                    self.log_errors(&self.cswitch_profile_event);
                                 },
 
                                 /* Unsupported */
@@ -767,7 +809,10 @@ impl PerfSession {
 
                 self.lost_event.process(
                     perf_data.raw_data,
-                    &perf_data.raw_data[offset..]);
+                    &perf_data.raw_data[offset..],
+                    &mut self.errors);
+
+                self.log_errors(&self.lost_event);
             },
 
             abi::PERF_RECORD_COMM => {
@@ -775,7 +820,10 @@ impl PerfSession {
 
                 self.comm_event.process(
                     perf_data.raw_data,
-                    &perf_data.raw_data[offset..]);
+                    &perf_data.raw_data[offset..],
+                    &mut self.errors);
+
+                self.log_errors(&self.comm_event);
             },
 
             abi::PERF_RECORD_EXIT => {
@@ -783,7 +831,10 @@ impl PerfSession {
 
                 self.exit_event.process(
                     perf_data.raw_data,
-                    &perf_data.raw_data[offset..]);
+                    &perf_data.raw_data[offset..],
+                    &mut self.errors);
+
+                self.log_errors(&self.exit_event);
             },
 
             abi::PERF_RECORD_FORK => {
@@ -791,7 +842,10 @@ impl PerfSession {
 
                 self.fork_event.process(
                     perf_data.raw_data,
-                    &perf_data.raw_data[offset..]);
+                    &perf_data.raw_data[offset..],
+                    &mut self.errors);
+
+                self.log_errors(&self.fork_event);
             },
 
             abi::PERF_RECORD_MMAP2 => {
@@ -799,7 +853,10 @@ impl PerfSession {
 
                 self.mmap_event.process(
                     perf_data.raw_data,
-                    &perf_data.raw_data[offset..]);
+                    &perf_data.raw_data[offset..],
+                    &mut self.errors);
+
+                self.log_errors(&self.mmap_event);
             },
 
             abi::PERF_RECORD_LOST_SAMPLES => {
@@ -807,7 +864,10 @@ impl PerfSession {
 
                 self.lost_samples_event.process(
                     perf_data.raw_data,
-                    &perf_data.raw_data[offset..]);
+                    &perf_data.raw_data[offset..],
+                    &mut self.errors);
+
+                self.log_errors(&self.lost_samples_event);
             },
 
             abi::PERF_RECORD_SWITCH_CPU_WIDE => {
@@ -815,13 +875,19 @@ impl PerfSession {
 
                 self.cswitch_event.process(
                     perf_data.raw_data,
-                    &perf_data.raw_data[offset..]);
+                    &perf_data.raw_data[offset..],
+                    &mut self.errors);
+
+                self.log_errors(&self.cswitch_event);
             },
 
             _ => {
                 /* TODO: Remaining abi record types */
             },
         }
+
+        /* Always clear errors */
+        self.errors.clear();
 
         Ok(true)
     }
@@ -1128,6 +1194,8 @@ mod tests {
             assert!(c[0] == 3u8);
 
             count.fetch_add(1, Ordering::Relaxed);
+
+            Ok(())
         });
 
         session.add_event(e).unwrap();
@@ -1233,6 +1301,8 @@ mod tests {
             assert_eq!(1234, read_magic);
 
             callback_count.fetch_add(1, Ordering::Relaxed);
+
+            Ok(())
         });
 
         /* Add the event to the session now that we setup the rules */

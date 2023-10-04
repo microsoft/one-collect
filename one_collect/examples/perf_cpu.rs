@@ -47,6 +47,8 @@ impl Utilization {
                 session_util.write(|usage| {
                     usage.per_cpu[cpu as usize] += 1;
                 });
+
+                Ok(())
             });
 
         /* Give back the shared writable */
