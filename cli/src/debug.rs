@@ -1,3 +1,4 @@
+use core::time::Duration;
 use one_collect::{session::{SessionBuilder, Session, SessionEgress}, state::ProcessTrackingOptions, perf_event::PerfSession};
 
 pub(crate) struct DebugConsoleSession<'a> {
@@ -32,6 +33,20 @@ impl<'a> DebugConsoleSession<'a> {
         console_session.hook_lost_samples_event();
 
         console_session
+    }
+
+    pub(crate) fn run_for_duration(
+        &mut self,
+        duration: Duration) {
+        self.session.enable().unwrap_or_else( |error| {
+            println!("Error enabling perf_events session: {}", error);
+            std::process::exit(1);
+        });
+
+        self.session.parse_for_duration(duration).unwrap_or_else(|error| {
+            println!("Error processing perf_events: {}", error);
+            std::process::exit(1);
+        });
     }
 
     pub(crate) fn run(&mut self) {
