@@ -1,4 +1,4 @@
-use clap::{Arg, command, Command};
+use clap::{Arg, command, Command, value_parser};
 use one_collect::session::{SessionBuilder, SessionEgress, FileSessionEgress};
 
 use crate::debug::DebugConsoleSession;
@@ -21,7 +21,13 @@ impl CommandLineParser{
                             .help("Path to store the collected trace")))
             .subcommand(
                 Command::new("debug")
-                    .about("Prints raw trace data to the console"));
+                    .about("Prints raw trace data to the console")
+                    .arg(Arg::new("seconds")
+                        .short('s')
+                        .long("seconds")
+                        .help("Specify the duration of the session in seconds")
+                        .value_parser(value_parser!(u64))
+                        .default_value("0")));
         
         CommandLineParser {
             cmd,
@@ -48,9 +54,16 @@ impl CommandLineParser{
             }
         }
 
-        if let Some(_subcommand) = matches.subcommand_matches("debug") {
+        if let Some(subcommand) = matches.subcommand_matches("debug") {
+            let seconds = subcommand.get_one::<u64>("seconds").expect("required");
             let mut session = DebugConsoleSession::new();
-            session.run();
+
+            if *seconds > 0 {
+                session.run_for_duration(std::time::Duration::from_secs(*seconds));
+            }
+            else {
+                session.run();
+            }
         }
     }
 }

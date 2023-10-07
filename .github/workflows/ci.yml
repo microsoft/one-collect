@@ -69,3 +69,13 @@ jobs:
     - name: Run benchmarks
       working-directory: one_collect
       run: cargo bench --verbose
+
+  docker_console:
+    name: Run Docker Tests
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+    - name: Run Docker tests
+      working-directory: test/docker/console-logger
+      run: ./run.sh
