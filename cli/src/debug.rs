@@ -1,20 +1,42 @@
 use core::time::Duration;
 use one_collect::{session::{SessionBuilder, Session, SessionEgress}, state::ProcessTrackingOptions, perf_event::PerfSession};
 
+pub(crate) struct DebugConsoleOptions {
+    with_call_stacks: bool,
+}
+
+impl DebugConsoleOptions {
+    pub(crate) fn new() -> Self {
+        Self {
+            with_call_stacks: false,
+        }
+    }
+
+    pub(crate) fn with_call_stacks(&self) -> Self {
+        Self {
+            with_call_stacks: true,
+        }
+    }
+}
+
 pub(crate) struct DebugConsoleSession<'a> {
     session: Session<'a>,
 }
 
 impl<'a> DebugConsoleSession<'a> {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(options: DebugConsoleOptions) -> Self {
         
         // Setup the PerfSession.
-        let options = ProcessTrackingOptions::new()
+        let process_tracking_options = ProcessTrackingOptions::new()
                 .with_process_names();
 
-        let builder = SessionBuilder::new(SessionEgress::Live)
+        let mut builder = SessionBuilder::new(SessionEgress::Live)
             .with_profiling(1000)
-            .track_process_state(options);
+            .track_process_state(process_tracking_options);
+
+        if options.with_call_stacks {
+            builder = builder.with_call_stacks();
+        }
 
         let session = builder.build().unwrap_or_else( |error| {
             println!("Error building perf_events session: {}", error);
@@ -134,6 +156,8 @@ impl<'a> DebugConsoleSession<'a> {
     }
 
     fn hook_cpu_profile_event(&mut self) {
+        let mut frames = Vec::new();
+        let stack_reader = self.session.stack_reader();
         let perf_session = self.perf_session_mut();
 
         let session_state = perf_session.session_state();
@@ -172,6 +196,19 @@ impl<'a> DebugConsoleSession<'a> {
                     println!("timestamp: {time}, event: cpu_profile, cpu: {cpu}, pid: {pid}, tid: {tid}");
                 }
             });
+
+
+            if let Some(stack_reader) = &stack_reader {
+                frames.clear();
+
+                stack_reader.read_frames(
+                    full_data,
+                    &mut frames);
+
+                for frame in &frames {
+                    println!("0x{:X}", frame);
+                }
+            }
 
             Ok(())
         });

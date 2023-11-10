@@ -1,7 +1,7 @@
 use clap::{Arg, command, Command, value_parser};
 use one_collect::session::{SessionBuilder, SessionEgress, FileSessionEgress};
 
-use crate::debug::DebugConsoleSession;
+use crate::debug::{DebugConsoleSession, DebugConsoleOptions};
 
 pub (crate) struct CommandLineParser{
     cmd : Command,
@@ -27,7 +27,14 @@ impl CommandLineParser{
                         .long("seconds")
                         .help("Specify the duration of the session in seconds")
                         .value_parser(value_parser!(u64))
-                        .default_value("0")));
+                        .default_value("0"))
+                    .arg(Arg::new("stacks")
+                        .short('c')
+                        .required(false)
+                        .long("callstacks")
+                        .help("Enables call stack capture")
+                        .action(clap::ArgAction::SetTrue)
+            ));
         
         CommandLineParser {
             cmd,
@@ -56,7 +63,14 @@ impl CommandLineParser{
 
         if let Some(subcommand) = matches.subcommand_matches("debug") {
             let seconds = subcommand.get_one::<u64>("seconds").expect("required");
-            let mut session = DebugConsoleSession::new();
+            let mut options = DebugConsoleOptions::new();
+
+            let with_call_stacks = *subcommand.get_one::<bool>("stacks").unwrap_or(&false);
+            if with_call_stacks {
+                options = options.with_call_stacks();
+            }
+
+            let mut session = DebugConsoleSession::new(options);
 
             if *seconds > 0 {
                 session.run_for_duration(std::time::Duration::from_secs(*seconds));
