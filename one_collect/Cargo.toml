@@ -18,3 +18,7 @@ criterion = "0.3"
 [[bench]]
 name = "event"
 harness = false
+
+[[bench]]
+name = "intern"
+harness = false
