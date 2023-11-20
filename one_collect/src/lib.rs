@@ -6,6 +6,7 @@ pub mod perf_event;
 pub mod session;
 pub mod state;
 pub mod helpers;
+pub mod intern;
 
 pub use sharing::{Writable, ReadOnly};
 
