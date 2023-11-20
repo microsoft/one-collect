@@ -210,6 +210,10 @@ pub struct PerfSession {
     /* Ancillary data */
     ancillary: Writable<AncillaryData>,
 
+    /* Header data (static) */
+    misc_field: DataFieldRef,
+    data_type_field: DataFieldRef,
+
     /* State tracking */
     process_tracking_options: ProcessTrackingOptions,
 }
@@ -260,11 +264,19 @@ impl PerfSession {
             /* Ancillary data */
             ancillary: Writable::new(AncillaryData::default()),
 
+            /* Header data */
+            misc_field: DataFieldRef::new(),
+            data_type_field: DataFieldRef::new(),
+
             /* State tracking */
             process_tracking_options,
         };
 
         session.track_processes(&process_tracking_options);
+
+        /* Header static offsets */
+        session.data_type_field.update(0, 4);
+        session.misc_field.update(4, 2);
 
         session
     }
@@ -410,6 +422,14 @@ impl PerfSession {
 
     pub fn cswitch_event(&mut self) -> &mut Event {
         &mut self.cswitch_event
+    }
+
+    pub fn misc_data_ref(&self) -> DataFieldRef {
+        self.misc_field.clone()
+    }
+
+    pub fn data_type_ref(&self) -> DataFieldRef {
+        self.data_type_field.clone()
     }
 
     pub fn ip_data_ref(&self) -> DataFieldRef {
