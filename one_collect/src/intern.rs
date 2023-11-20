@@ -114,50 +114,30 @@ impl<T: Copy + std::cmp::Eq + std::hash::Hash> InternedSlices<T> {
     }
 }
 
-#[derive(Default, Clone, Copy, PartialEq)]
-pub struct CallstackId {
-    ip: u64,
-    id: usize,
-}
-
-impl CallstackId {
-    pub fn ip(&self) -> u64 {
-        self.ip
-    }
-
-    pub fn id(&self) -> usize {
-        self.id
-    }
-}
-
 pub struct InternedCallstacks {
-    interned_frames: InternedSlices<u64>,
+    frames: InternedSlices<u64>,
 }
 
 impl InternedCallstacks {
     pub fn new(bucket_count: usize) -> Self {
         Self {
-            interned_frames: InternedSlices::new(bucket_count),
+            frames: InternedSlices::new(bucket_count),
         }
     }
 
     pub fn to_id(
         &mut self,
-        frames: &[u64]) -> CallstackId {
-        CallstackId {
-            ip: frames[0],
-            id: self.interned_frames.to_id(&frames[1..]),
-        }
+        frames: &[u64]) -> usize {
+        self.frames.to_id(frames)
     }
 
     pub fn from_id(
         &self,
-        id: CallstackId,
+        id: usize,
         frames: &mut Vec<u64>) -> anyhow::Result<()> {
         frames.clear();
-        frames.push(id.ip());
 
-        if let Some(found) = self.interned_frames.from_id(id.id()) {
+        if let Some(found) = self.frames.from_id(id) {
             for frame in found {
                 frames.push(*frame);
             }
@@ -166,6 +146,12 @@ impl InternedCallstacks {
         }
 
         Ok(())
+    }
+
+    pub fn for_each(
+        &self,
+        f: impl FnMut(usize, &[u64])) {
+        self.frames.for_each(f);
     }
 }
 
@@ -190,10 +176,24 @@ impl InternedStrings {
         &self,
         id: usize) -> anyhow::Result<&str> {
         if let Some(bytes) = self.strings.from_id(id) {
-            Ok(std::str::from_utf8(bytes)?)
+            /* Safety: Bytes are pre-checked during adds */
+            unsafe {
+                Ok(std::str::from_utf8_unchecked(bytes))
+            }
         } else {
             Err(anyhow::Error::msg("ID not found."))
         }
+    }
+
+    pub fn for_each(
+        &self,
+        mut f: impl FnMut(usize, &str)) {
+        self.strings.for_each(|id,bytes| {
+            /* Safety: Bytes are pre-checked during adds */
+            unsafe {
+                f(id, std::str::from_utf8_unchecked(bytes));
+            }
+        });
     }
 }
 
@@ -255,6 +255,14 @@ mod tests {
         assert!(strings.from_id(id2).unwrap() == "3 2 1");
         assert!(strings.from_id(id3).unwrap() == "1 2 3");
         assert!(strings.from_id(id4).unwrap() == "3 2 1");
+
+        let mut count = 0;
+
+        strings.for_each(|_i, _string| {
+            count += 1;
+        });
+
+        assert_eq!(2, count);
     }
 
     #[test]
@@ -279,5 +287,13 @@ mod tests {
         assert!(frames == &[1, 2, 3]);
         callstacks.from_id(id4, &mut frames).unwrap();
         assert!(frames == &[3, 2, 1]);
+
+        let mut count = 0;
+
+        callstacks.for_each(|_i, _calstack| {
+            count += 1;
+        });
+
+        assert_eq!(2, count);
     }
 }
