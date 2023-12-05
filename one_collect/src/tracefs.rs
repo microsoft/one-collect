@@ -1,4 +1,4 @@
-use std::io::{Result, Error, BufRead, BufReader, ErrorKind};
+use std::io::{Result, Error, BufRead, BufReader, ErrorKind, Write};
 use std::path::PathBuf;
 use std::fs::File;
 
@@ -216,6 +216,92 @@ impl TraceFS {
             name,
             &mut reader)
     }
+
+    fn register_uprobe_full(
+        &self,
+        probe_type: &str,
+        system: &str,
+        name: &str,
+        file_path: &str,
+        address: usize,
+        fetch_args: &str) -> Result<Event> {
+        let mut path_buf = PathBuf::new();
+
+        path_buf.push(&self.root);
+        path_buf.push("uprobe_events");
+
+        let mut file = File::options()
+            .append(true)
+            .open(path_buf)?;
+
+        let command = format!(
+            "{}:{}/{} {}:0x{:x} {}",
+            probe_type,
+            system,
+            name,
+            file_path,
+            address,
+            fetch_args);
+
+        file.write_all(command.as_bytes())?;
+
+        self.find_event(system, name)
+    }
+
+    pub fn unregister_uprobe(
+        &self,
+        system: &str,
+        name: &str) -> Result<()> {
+        let mut path_buf = PathBuf::new();
+
+        path_buf.push(&self.root);
+        path_buf.push("uprobe_events");
+
+        let mut file = File::options()
+            .append(true)
+            .open(path_buf)?;
+
+        let command = format!(
+            "-:{}/{}",
+            system,
+            name);
+
+        file.write_all(command.as_bytes())?;
+
+        Ok(())
+    }
+
+    pub fn register_uprobe(
+        &self,
+        system: &str,
+        name: &str,
+        file: &str,
+        address: usize,
+        fetch_args: &str) -> Result<Event> {
+        self.register_uprobe_full(
+            "p",
+            system,
+            name,
+            file,
+            address,
+            fetch_args)
+    }
+
+    pub fn register_uretprobe(
+        &self,
+        system: &str,
+        name: &str,
+        file: &str,
+        address: usize,
+        fetch_args: &str) -> Result<Event> {
+        self.register_uprobe_full(
+            "r",
+            system,
+            name,
+            file,
+            address,
+            fetch_args)
+    }
 }
 
 #[cfg(test)]
@@ -303,5 +389,38 @@ mod tests {
         assert_eq!("comm", comm.name);
         assert_eq!("char", comm.type_name);
         assert_eq!(16, comm.size);
+    }
+
+    #[test]
+    #[ignore]
+    fn tracefs_uprobe() {
+        println!("NOTE: Requires sudo/SYS_CAP_ADMIN/tracefs access.");
+        let tracefs = TraceFS::open().unwrap();
+
+        let _ = tracefs.unregister_uprobe(
+            "unit_test",
+            "malloc");
+
+        #[cfg(all(target_arch = "x86_64"))]
+        let event = tracefs.register_uprobe(
+            "unit_test",
+            "malloc",
+            "/usr/lib/x86_64-linux-gnu/libc.so.6",
+            0x0,
+            "size=%di:u64").unwrap();
+
+        #[cfg(all(target_arch = "aarch64"))]
+        let event = tracefs.register_uprobe(
+            "unit_test",
+            "malloc",
+            "/usr/lib/aarch64-linux-gnu/libc.so.6",
+            0x0,
+            "size=%x0:u64").unwrap();
+
+        assert!(event.format().get_field_ref("size").is_some());
+
+        tracefs.unregister_uprobe(
+            "unit_test",
+            "malloc").unwrap();
     }
 }

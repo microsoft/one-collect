@@ -124,6 +124,27 @@ impl<'a> ModuleInfo<'a> {
     }
 }
 
+pub(crate) fn iter_proc_modules(
+    pid: u32,
+    mut callback: impl FnMut(&ModuleInfo)) {
+    let mut path_buf = PathBuf::new();
+    path_buf.push("/proc");
+    if pid != 0 {
+        path_buf.push(pid.to_string());
+    } else {
+        path_buf.push("self");
+    }
+    path_buf.push("maps");
+
+    if let Ok(file) = File::open(&path_buf) {
+        for line in BufReader::new(file).lines().flatten() {
+            if let Some(module) = ModuleInfo::from_line(&line) {
+                (callback)(&module);
+            }
+        }
+    }
+}
+
 pub(crate) fn iter_modules(
     mut callback: impl FnMut(u32, &ModuleInfo)) {
     iter_processes(|pid,path| {
