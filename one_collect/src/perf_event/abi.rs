@@ -113,9 +113,6 @@ pub const FLAG_AUX_OUTPUT: u64 = 1 << 31;
 pub const FLAG_CGROUP: u64 = 1 << 32;
 pub const FLAG_TEXT_POKE: u64 = 1 << 33;
 
-pub const CLOCK_REALTIME: i32 = 0;
-pub const CLOCK_MONOTONIC_RAW: i32 = 4;
-
 pub const PERF_TYPE_HARDWARE: u32 = 0;
 pub const PERF_TYPE_SOFTWARE: u32 = 1;
 pub const PERF_TYPE_TRACEPOINT: u32 = 2;
