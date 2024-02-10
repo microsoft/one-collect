@@ -693,7 +693,7 @@ impl CpuRingBuf {
         unsafe {
             let result = ioctl(
                 self.fd.unwrap(),
-                PERF_EVENT_IOC_ENABLE as c_ulong);
+                PERF_EVENT_IOC_ENABLE as _);
 
             if result != 0 {
                 return Err(IOError::last_os_error());
@@ -713,7 +713,7 @@ impl CpuRingBuf {
         unsafe {
             let result = ioctl(
                 self.fd.unwrap(),
-                PERF_EVENT_IOC_DISABLE as c_ulong);
+                PERF_EVENT_IOC_DISABLE as _);
 
             if result != 0 {
                 return Err(IOError::last_os_error());
@@ -734,7 +734,7 @@ impl CpuRingBuf {
         unsafe {
             let result = ioctl(
                 self.fd.unwrap(),
-                PERF_EVENT_IOC_SET_OUTPUT as c_ulong,
+                PERF_EVENT_IOC_SET_OUTPUT as _,
                 target.fd.unwrap());
 
             if result == -1 {
