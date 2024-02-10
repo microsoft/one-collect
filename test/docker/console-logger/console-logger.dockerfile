@@ -1,5 +1,5 @@
 # Create a build container.
-FROM rust:1.73-buster as build
+FROM rust:1.74-buster as build
 
 # Copy the repo into the container.
 ADD . /one-collect
