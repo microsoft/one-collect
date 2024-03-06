@@ -1,0 +1,111 @@
+use super::*;
+
+#[derive(Clone)]
+pub struct ExportMapping {
+    filename_id: usize,
+    start: u64,
+    end: u64,
+    file_offset: u64,
+    anon: bool,
+    id: usize,
+    node: Option<ExportDevNode>,
+    symbols: Vec<ExportSymbol>,
+}
+
+impl ExportMapping {
+    pub fn new(
+        filename_id: usize,
+        start: u64,
+        end: u64,
+        file_offset: u64,
+        anon: bool,
+        id: usize) -> Self {
+        Self {
+            filename_id,
+            start,
+            end,
+            file_offset,
+            anon,
+            id,
+            node: None,
+            symbols: Vec::new(),
+        }
+    }
+
+    pub fn set_node(
+        &mut self,
+        node: ExportDevNode) {
+        self.node = Some(node);
+    }
+
+    pub fn filename_id(&self) -> usize { self.filename_id }
+
+    pub fn start(&self) -> u64 { self.start }
+
+    pub fn end(&self) -> u64 { self.end }
+
+    pub fn file_offset(&self) -> u64 { self.file_offset }
+
+    pub fn anon(&self) -> bool { self.anon }
+
+    pub fn id(&self) -> usize { self.id }
+
+    pub fn symbols(&self) -> &Vec<ExportSymbol> { &self.symbols }
+
+    pub fn symbols_mut(&mut self) -> &mut Vec<ExportSymbol> { &mut self.symbols }
+
+    pub fn add_symbol(
+        &mut self,
+        symbol: ExportSymbol) {
+        self.symbols.push(symbol);
+    }
+
+    pub fn contains_ip(
+        &self,
+        ip: u64) -> bool {
+        ip >= self.start && ip <= self.end
+    }
+
+    pub fn add_matching_symbols(
+        &mut self,
+        unique_ips: &mut Vec<u64>,
+        sym_reader: &mut impl ExportSymbolReader,
+        strings: &mut InternedStrings) {
+        unique_ips.sort();
+        sym_reader.reset();
+
+        let mut next_ip = 0;
+
+        for ip in unique_ips {
+            let ip = *ip;
+
+            if ip <= next_ip {
+                /* Already added this method, skip */
+                continue;
+            }
+
+            loop {
+                if sym_reader.start() <= ip &&
+                    sym_reader.end() >= ip {
+
+                    let name = sym_reader.name();
+
+                    let symbol = ExportSymbol::new(
+                        strings.to_id(name),
+                        sym_reader.start(),
+                        sym_reader.end());
+
+                    self.add_symbol(symbol);
+
+                    next_ip = sym_reader.end();
+
+                    break;
+                }
+
+                if !sym_reader.next() {
+                    break;
+                }
+            }
+        }
+    }
+}
