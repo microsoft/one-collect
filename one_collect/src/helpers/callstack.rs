@@ -7,14 +7,8 @@ use crate::perf_event::*;
 use crate::event::DataFieldRef;
 use crate::Writable;
 
+use libc::*;
 use ruwind::*;
-
-/* Libc calls */
-const PROT_EXEC: u32 = 4;
-
-extern "C" {
-    fn dup(fd: RawFd) -> RawFd;
-}
 
 struct ModuleLookup {
     fds: HashMap<ModuleKey, RawFd>,
@@ -391,7 +385,7 @@ impl CallstackHelp for RingBufSessionBuilder {
                 let state = session_state.clone();
 
                 event.add_callback(move |_full_data,fmt,data| {
-                    let prot = fmt.get_u32(prot, data)?;
+                    let prot = fmt.get_u32(prot, data)? as i32;
 
                     /* Skip non-executable mmaps */
                     if prot & PROT_EXEC != PROT_EXEC {

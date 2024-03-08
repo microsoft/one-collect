@@ -7,10 +7,10 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-syscalls = { version = "0.6.13", features = ["x86_64", "arm"] }
 anyhow = "1.0.75"
 ruwind = { path = "../ruwind" }
 twox-hash = "1.6.3"
+libc = "0.2.153"
 
 [dev-dependencies]
 criterion = "0.3"

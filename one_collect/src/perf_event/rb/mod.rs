@@ -2,6 +2,8 @@ use std::marker::PhantomData;
 use std::arch::asm;
 use std::rc::Rc;
 
+use libc::*;
+
 use super::abi;
 use super::*;
 
@@ -104,12 +106,6 @@ pub fn cpu_count() -> u32 {
     }
 }
 
-#[repr(C)]
-struct timespec {
-    tv_sec: isize,
-    tv_nsec: isize,
-}
-
 pub fn perf_timestamp(
     attr: &perf_event_attr) -> u64 {
     unsafe {
@@ -118,14 +114,13 @@ pub fn perf_timestamp(
             tv_nsec: 0,
         };
 
-        match syscalls::syscall2(
-            syscalls::Sysno::clock_gettime,
-            attr.clockid as usize,
-            &mut tp as *mut timespec as usize) {
-            Ok(_) => {
+        match clock_gettime(
+            attr.clockid,
+            &mut tp) {
+            0 => {
                 ((tp.tv_sec * 1000000000) + tp.tv_nsec) as u64
             }
-            Err(_) => {
+            _ => {
                 0
             }
         }
@@ -139,15 +134,15 @@ fn perf_event_open(
     group_fd: i32,
     flags: usize) -> IOResult<usize> {
     unsafe {
-        match syscalls::syscall5(
-            syscalls::Sysno::perf_event_open,
+        match syscall(
+            SYS_perf_event_open,
             attr as *const perf_event_attr as usize,
             pid as usize,
             cpu as usize,
             group_fd as usize,
             flags) {
-            Ok(result) => Ok(result),
-            Err(error) => Err(error.into())
+            -1 => Err(std::io::Error::last_os_error()),
+            result => Ok(result as usize),
         }
     }
 }
@@ -360,35 +355,6 @@ struct read_format {
     id: u64,
 }
 
-/* Libc calls */
-extern "C" {
-    fn sysconf(name: i32) -> isize;
-
-    fn mmap64(
-        addr: *mut u8,
-        len: isize,
-        prot: i32,
-        flags: i32,
-        fd: i32,
-        offset: u64) -> *mut u8;
-
-    fn read(
-        fd: i32,
-        buf: *mut u8,
-        count: usize) -> isize;
-
-    fn ioctl(
-        fd: i32,
-        req: i32,
-        ...) -> i32;
-
-    fn munmap(
-        pages: *mut u8,
-        len: isize) -> i32;
-
-    fn close(fd: i32) -> i32;
-}
-
 pub(crate) struct CommonRingBuf {
     attributes: Rc<perf_event_attr>,
 }
@@ -442,7 +408,7 @@ impl CpuRingCursor {
 
 pub(crate) struct CpuRingReader {
     pages: *mut u8,
-    pages_len: isize,
+    pages_len: usize,
     data_offset: u64,
     data_size: u64,
     data_mask: u64,
@@ -451,11 +417,11 @@ pub(crate) struct CpuRingReader {
 impl<'a> CpuRingReader {
     pub fn new(
         pages: *mut u8,
-        pages_len: isize) -> Self {
+        pages_len: usize) -> Self {
         let slice = unsafe {
             std::slice::from_raw_parts(
                 pages,
-                pages_len as usize)
+                pages_len)
         };
 
         let data_offset = u64::from_ne_bytes(
@@ -477,7 +443,7 @@ impl<'a> CpuRingReader {
         unsafe {
             std::slice::from_raw_parts(
                 self.pages,
-                self.pages_len as usize)
+                self.pages_len)
         }
     }
 
@@ -588,7 +554,7 @@ impl<'a> CpuRingReader {
 impl Drop for CpuRingReader {
     fn drop(&mut self) {
         unsafe {
-            munmap(self.pages, self.pages_len);
+            munmap(self.pages as *mut c_void, self.pages_len);
         }
     }
 }
@@ -643,7 +609,7 @@ impl CpuRingBuf {
                 unsafe {
                     let result = read(
                         *fd,
-                        &mut id as *mut read_format as *mut u8,
+                        &mut id as *mut read_format as *mut c_void,
                         16);
 
                     if result == -1 {
@@ -696,17 +662,11 @@ impl CpuRingBuf {
         let page_count = page_count.next_power_of_two() + 1;
 
         unsafe {
-            const SC_PAGE_SIZE: i32 = 30;
-            const PROT_READ: i32 = 1;
-            const PROT_WRITE: i32 = 2;
-            const MAP_SHARED: i32 = 1;
-            const MAP_FAILED: *mut u8 = !0 as *mut u8;
+            let page_size = sysconf(_SC_PAGE_SIZE) as usize;
+            let pages_len = page_count * page_size;
 
-            let page_size = sysconf(SC_PAGE_SIZE);
-            let pages_len = page_count as isize * page_size;
-
-            let pages = mmap64(
-                std::ptr::null_mut::<u8>(),
+            let pages = mmap(
+                std::ptr::null_mut::<u8>() as *mut c_void,
                 pages_len,
                 PROT_READ | PROT_WRITE,
                 MAP_SHARED,
@@ -718,7 +678,7 @@ impl CpuRingBuf {
             }
 
             Ok(CpuRingReader::new(
-                pages,
+                pages as *mut u8,
                 pages_len))
         }
     }
@@ -733,7 +693,7 @@ impl CpuRingBuf {
         unsafe {
             let result = ioctl(
                 self.fd.unwrap(),
-                PERF_EVENT_IOC_ENABLE);
+                PERF_EVENT_IOC_ENABLE as _);
 
             if result != 0 {
                 return Err(IOError::last_os_error());
@@ -753,7 +713,7 @@ impl CpuRingBuf {
         unsafe {
             let result = ioctl(
                 self.fd.unwrap(),
-                PERF_EVENT_IOC_DISABLE);
+                PERF_EVENT_IOC_DISABLE as _);
 
             if result != 0 {
                 return Err(IOError::last_os_error());
@@ -774,7 +734,7 @@ impl CpuRingBuf {
         unsafe {
             let result = ioctl(
                 self.fd.unwrap(),
-                PERF_EVENT_IOC_SET_OUTPUT,
+                PERF_EVENT_IOC_SET_OUTPUT as _,
                 target.fd.unwrap());
 
             if result == -1 {
@@ -859,7 +819,7 @@ mod tests {
 
         let mut reader = CpuRingReader::new(
             data.as_mut_ptr(),
-            data.len() as isize);
+            data.len());
 
         let mut cursor = CpuRingCursor::default();
         reader.begin_reading(&mut cursor);
@@ -927,7 +887,7 @@ mod tests {
 
         let mut reader = CpuRingReader::new(
             data.as_mut_ptr(),
-            data.len() as isize);
+            data.len());
 
         reader.begin_reading(&mut cursor);
 
