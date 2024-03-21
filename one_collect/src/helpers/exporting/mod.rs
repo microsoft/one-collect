@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::collections::hash_map::{Values, ValuesMut};
+use std::path::PathBuf;
 
 use crate::Writable;
 use crate::perf_event::PerfSession;
@@ -65,6 +66,7 @@ pub struct ExportSettings {
     string_buckets: usize,
     callstack_buckets: usize,
     cpu_profiling: bool,
+    process_fs: bool,
 }
 
 impl ExportSettings {
@@ -73,6 +75,7 @@ impl ExportSettings {
             string_buckets: 64,
             callstack_buckets: 512,
             cpu_profiling: true,
+            process_fs: true,
         }
     }
 
@@ -97,6 +100,12 @@ impl ExportSettings {
         clone.cpu_profiling = false;
         clone
     }
+
+    pub fn without_process_fs(self) -> Self {
+        let mut clone = self.clone();
+        clone.process_fs = false;
+        clone
+    }
 }
 
 pub struct ExportMachine {
@@ -104,6 +113,7 @@ pub struct ExportMachine {
     strings: InternedStrings,
     callstacks: InternedCallstacks,
     procs: HashMap<u32, ExportProcess>,
+    path_buf: Writable<PathBuf>,
     kinds: Vec<String>,
     map_index: usize,
 }
@@ -118,6 +128,7 @@ impl ExportMachine {
             strings,
             callstacks,
             procs: HashMap::new(),
+            path_buf: Writable::new(PathBuf::new()),
             kinds: Vec::new(),
             map_index: 0,
         }
@@ -243,7 +254,19 @@ impl ExportMachine {
         pid: u32,
         comm: &str) -> anyhow::Result<()> {
         let comm_id = self.intern(comm);
-        self.process_mut(pid).set_comm_id(comm_id);
+        let mut path_buf: Option<Writable<PathBuf>> = None;
+
+        if self.settings.process_fs {
+            path_buf = Some(self.path_buf.clone());
+        }
+
+        let proc = self.process_mut(pid);
+
+        proc.set_comm_id(comm_id);
+
+        if let Some(path_buf) = path_buf {
+            proc.add_root_fs(&mut path_buf.borrow_mut())?;
+        }
 
         Ok(())
     }
@@ -414,6 +437,9 @@ impl ExportMachine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+    use std::os::linux::fs::MetadataExt;
+
     use crate::perf_event::*;
     use crate::helpers::callstack::{CallstackHelper, CallstackHelp};
 
@@ -468,6 +494,35 @@ mod tests {
 
         /* Dump state */
         let strings = exporter.strings();
+
+        println!("File roots:");
+        for process in exporter.processes() {
+            let mut comm = "Unknown";
+
+            if let Some(comm_id) = process.comm_id() {
+                if let Ok(value) = strings.from_id(comm_id) {
+                    comm = value;
+                }
+            }
+
+            let file = process.open_file(Path::new("."));
+
+            match file {
+                Ok(file) => {
+                    match file.metadata() {
+                        Ok(meta) => {
+                            println!("{}: ino: {}, dev: {}", comm, meta.st_ino(), meta.st_dev());
+                        },
+                        Err(error) => {
+                            println!("Error({}): {:?}", comm, error);
+                        }
+                    }
+                },
+                Err(error) => {
+                    println!("Error({}): {:?}", comm, error);
+                }
+            }
+        }
 
         for process in exporter.processes() {
             let mut comm = "Unknown";

@@ -1,3 +1,8 @@
+use std::fs::File;
+use std::ffi::CString;
+use std::path::{Path, PathBuf};
+use std::os::unix::ffi::OsStrExt;
+use std::os::fd::{RawFd, FromRawFd, IntoRawFd};
 use crate::intern::InternedCallstacks;
 use super::*;
 
@@ -49,6 +54,7 @@ impl ExportProcessSample {
 pub struct ExportProcess {
     pid: u32,
     comm_id: Option<usize>,
+    root_fs: Option<RawFd>,
     samples: Vec<ExportProcessSample>,
     mappings: Vec<ExportMapping>,
     anon_maps: bool,
@@ -59,9 +65,57 @@ impl ExportProcess {
         Self {
             pid,
             comm_id: None,
+            root_fs: None,
             samples: Vec::new(),
             mappings: Vec::new(),
             anon_maps: false,
+        }
+    }
+
+    pub fn add_root_fs(
+        &mut self,
+        path_buf: &mut PathBuf) -> anyhow::Result<()> {
+        path_buf.clear();
+        path_buf.push("/proc");
+        path_buf.push(self.pid.to_string());
+        path_buf.push("root");
+        path_buf.push(".");
+
+        let root = File::open(path_buf)?;
+
+        self.root_fs = Some(root.into_raw_fd());
+
+        Ok(())
+    }
+
+    pub fn open_file(
+        &self,
+        path: &Path) -> anyhow::Result<File> {
+        match self.root_fs {
+            None => {
+                anyhow::bail!("Root fs is not set or had an error.");
+            },
+            Some(root_fd) => {
+                let path = CString::new(path.as_os_str().as_bytes())?;
+                let mut path = path.as_bytes_with_nul();
+
+                if path[0] == b'/' {
+                    path = &path[1..]
+                }
+
+                unsafe {
+                    let fd = libc::openat(
+                        root_fd,
+                        path.as_ptr() as *const libc::c_char,
+                        libc::O_RDONLY | libc::O_CLOEXEC);
+
+                    if fd == -1 {
+                        return Err(std::io::Error::last_os_error().into());
+                    }
+
+                    Ok(File::from_raw_fd(fd))
+                }
+            }
         }
     }
 
@@ -179,6 +233,7 @@ impl ExportProcess {
 
         fork.comm_id = self.comm_id;
         fork.mappings = self.mappings.clone();
+        fork.root_fs = self.root_fs.clone();
 
         fork
     }
