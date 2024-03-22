@@ -1,11 +1,13 @@
 use std::collections::{HashMap, HashSet};
 use std::collections::hash_map::{Values, ValuesMut};
+use std::collections::hash_map::Entry::Occupied;
 use std::path::PathBuf;
 
 use crate::Writable;
 use crate::perf_event::PerfSession;
 use crate::intern::{InternedStrings, InternedCallstacks};
 use crate::helpers::callstack::CallstackReader;
+use crate::perf_event::abi::PERF_RECORD_MISC_SWITCH_OUT;
 
 const KERNEL_START:u64 = 0x800000000000;
 const KERNEL_END:u64 = 0xFFFFFFFFFFFF;
@@ -27,6 +29,12 @@ pub mod mappings;
 pub use mappings::{
     ExportMapping,
 };
+
+#[derive(Default)]
+struct ExportCSwitch {
+    start_time: u64,
+    sample: Option<ExportProcessSample>,
+}
 
 #[derive(Clone, PartialEq)]
 pub struct ExportDevNode {
@@ -67,6 +75,7 @@ pub struct ExportSettings {
     callstack_buckets: usize,
     cpu_profiling: bool,
     process_fs: bool,
+    cswitches: bool,
 }
 
 impl ExportSettings {
@@ -76,6 +85,7 @@ impl ExportSettings {
             callstack_buckets: 512,
             cpu_profiling: true,
             process_fs: true,
+            cswitches: true,
         }
     }
 
@@ -92,6 +102,12 @@ impl ExportSettings {
         buckets: usize) -> Self {
         let mut clone = self.clone();
         clone.callstack_buckets = buckets;
+        clone
+    }
+
+    pub fn without_cswitches(self) -> Self {
+        let mut clone = self.clone();
+        clone.cswitches = false;
         clone
     }
 
@@ -113,6 +129,7 @@ pub struct ExportMachine {
     strings: InternedStrings,
     callstacks: InternedCallstacks,
     procs: HashMap<u32, ExportProcess>,
+    cswitches: HashMap<u32, ExportCSwitch>,
     path_buf: Writable<PathBuf>,
     kinds: Vec<String>,
     map_index: usize,
@@ -128,6 +145,7 @@ impl ExportMachine {
             strings,
             callstacks,
             procs: HashMap::new(),
+            cswitches: HashMap::new(),
             path_buf: Writable::new(PathBuf::new()),
             kinds: Vec::new(),
             map_index: 0,
@@ -281,6 +299,27 @@ impl ExportMachine {
         Ok(())
     }
 
+    pub fn make_sample(
+        &mut self,
+        time: u64,
+        value: u64,
+        tid: u32,
+        cpu: u16,
+        kind: u16,
+        frames: &Vec<u64>) -> ExportProcessSample {
+        let ip = frames[0];
+        let callstack_id = self.callstacks.to_id(&frames[1..]);
+
+        ExportProcessSample::new(
+            time,
+            value,
+            cpu,
+            kind,
+            tid,
+            ip,
+            callstack_id)
+    }
+
     pub fn add_sample(
         &mut self,
         time: u64,
@@ -290,16 +329,13 @@ impl ExportMachine {
         cpu: u16,
         kind: u16,
         frames: &Vec<u64>) -> anyhow::Result<()> {
-        let ip = frames[0];
-        let callstack_id = self.callstacks.to_id(&frames[1..]);
-        let sample = ExportProcessSample::new(
+        let sample = self.make_sample(
             time,
             value,
+            tid,
             cpu,
             kind,
-            tid,
-            ip,
-            callstack_id);
+            frames);
 
         self.process_mut(pid).add_sample(sample);
 
@@ -311,15 +347,17 @@ impl ExportMachine {
         session: &mut PerfSession,
         callstack_reader: CallstackReader) -> Writable<ExportMachine> {
         let cpu_profiling = self.settings.cpu_profiling;
+        let cswitches = self.settings.cswitches;
 
         let machine = Writable::new(self);
 
-        let ancillary = session.ancillary_data();
-        let time_field = session.time_data_ref();
-        let pid_field = session.pid_field_ref();
-        let tid_field = session.tid_data_ref();
-
         if cpu_profiling {
+            let ancillary = session.ancillary_data();
+            let time_field = session.time_data_ref();
+            let pid_field = session.pid_field_ref();
+            let tid_field = session.tid_data_ref();
+            let reader = callstack_reader.clone();
+
             /* Get sample kind for CPU */
             let kind = machine.borrow_mut().sample_kind("cpu");
 
@@ -339,7 +377,7 @@ impl ExportMachine {
 
                 frames.clear();
 
-                callstack_reader.read_frames(
+                reader.read_frames(
                     full_data,
                     &mut frames);
 
@@ -351,6 +389,125 @@ impl ExportMachine {
                     cpu,
                     kind,
                     &frames)
+            });
+        }
+
+        if cswitches {
+            let ancillary = session.ancillary_data();
+            let time_field = session.time_data_ref();
+            let pid_field = session.pid_field_ref();
+            let tid_field = session.tid_data_ref();
+            let reader = callstack_reader.clone();
+
+            /* Get sample kind for cswitch */
+            let kind = machine.borrow_mut().sample_kind("cswitch");
+
+            /* Hook cswitch profile event */
+            let event = session.cswitch_profile_event();
+            let event_machine = machine.clone();
+            let mut frames: Vec<u64> = Vec::new();
+
+            event.add_callback(move |full_data,_fmt,_data| {
+                let mut machine = event_machine.borrow_mut();
+                let ancillary = ancillary.borrow();
+
+                let cpu = ancillary.cpu() as u16;
+                let time = time_field.get_u64(full_data)?;
+                let pid = pid_field.get_u32(full_data)?;
+                let tid = tid_field.get_u32(full_data)?;
+
+                /* Ignore scheduler switches */
+                if pid == 0 || tid == 0 {
+                    return Ok(());
+                }
+
+                frames.clear();
+
+                reader.read_frames(
+                    full_data,
+                    &mut frames);
+
+                let sample = machine.make_sample(
+                    time,
+                    0,
+                    tid,
+                    cpu,
+                    kind,
+                    &frames);
+
+                /* Stash away the sample until switch-in */
+                machine.cswitches.entry(tid).or_default().sample = Some(sample);
+
+                return Ok(());
+            });
+
+            let misc_field = session.misc_data_ref();
+            let time_field = session.time_data_ref();
+            let pid_field = session.pid_field_ref();
+            let tid_field = session.tid_data_ref();
+
+            /* Hook cswitch swap event */
+            let event = session.cswitch_event();
+            let event_machine = machine.clone();
+
+            event.add_callback(move |full_data,_fmt,_data| {
+                let mut machine = event_machine.borrow_mut();
+
+                let misc = misc_field.get_u16(full_data)?;
+                let time = time_field.get_u64(full_data)?;
+                let pid = pid_field.get_u32(full_data)?;
+                let tid = tid_field.get_u32(full_data)?;
+
+                /* Ignore scheduler switches */
+                if pid == 0 || tid == 0 {
+                    return Ok(());
+                }
+
+                match machine.cswitches.entry(tid) {
+                    Occupied(mut entry) => {
+                        let entry = entry.get_mut();
+
+                        if misc & PERF_RECORD_MISC_SWITCH_OUT == 0 {
+                            /* Switch in */
+
+                            /* Sanity check time duration */
+                            if entry.start_time == 0 {
+                                /* Unexpected, clear and don't record. */
+                                let _ = entry.sample.take();
+                                return Ok(());
+                            }
+
+                            let start_time = entry.start_time;
+                            let duration = time - start_time;
+
+                            /* Reset time as a precaution */
+                            entry.start_time = 0;
+
+                            /* Record sample if we got callchain data */
+                            if let Some(mut sample) = entry.sample.take() {
+                                /*
+                                 * Record cswitch sample for duration of wait
+                                 * We have to modify these values since the
+                                 * callchain can be delayed from the actual
+                                 * cswitch time, and we don't know the full
+                                 * delay period (value) until now.
+                                 */
+                                *sample.time_mut() = start_time;
+                                *sample.value_mut() = duration;
+
+                                machine.process_mut(pid).add_sample(sample);
+                            }
+                        } else {
+                            /* Switch out */
+
+                            /* Keep track of switch out time */
+                            entry.start_time = time;
+                        }
+                    },
+                    _ => { }
+                }
+
+                return Ok(());
             });
         }
 
@@ -454,9 +611,20 @@ mod tests {
         let profiling = RingBufBuilder::for_profiling(freq)
             .with_callchain_data();
 
+        let cswitches = RingBufBuilder::for_cswitches()
+            .with_callchain_data();
+
+        let kernel = RingBufBuilder::for_kernel()
+            .with_mmap_records()
+            .with_comm_records()
+            .with_task_records()
+            .with_cswitch_records();
+
         let mut builder = RingBufSessionBuilder::new()
             .with_page_count(256)
+            .with_kernel_events(kernel)
             .with_profiling_events(profiling)
+            .with_cswitch_events(cswitches)
             .with_callstack_help(&helper);
 
         let settings = ExportSettings::new();
@@ -524,6 +692,8 @@ mod tests {
             }
         }
 
+        let kinds = exporter.sample_kinds();
+
         for process in exporter.processes() {
             let mut comm = "Unknown";
 
@@ -541,11 +711,13 @@ mod tests {
 
             for sample in process.samples() {
                 println!(
-                    "{}: {:x} ({}) TID={}",
+                    "{}: {:x} ({}) TID={},Kind={},Value={}",
                     sample.time(),
                     sample.ip(),
                     sample.callstack_id(),
-                    sample.tid());
+                    sample.tid(),
+                    kinds[sample.kind() as usize],
+                    sample.value());
             }
 
             if process.samples().len() > 0 {

@@ -36,6 +36,10 @@ impl ExportProcessSample {
         }
     }
 
+    pub fn time_mut(&mut self) -> &mut u64 { &mut self.time }
+
+    pub fn value_mut(&mut self) -> &mut u64 { &mut self.value }
+
     pub fn time(&self) -> u64 { self.time }
 
     pub fn value(&self) -> u64 { self.value }
