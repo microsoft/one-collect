@@ -238,3 +238,14 @@ impl ExportProcess {
         fork
     }
 }
+
+impl Drop for ExportProcess {
+    fn drop(&mut self) {
+        /* Close root_fs, if any */
+        if let Some(fd) = self.root_fs.take() {
+            unsafe {
+                libc::close(fd);
+            }
+        }
+    }
+}
