@@ -7,6 +7,7 @@ use crate::Writable;
 use crate::perf_event::PerfSession;
 use crate::intern::{InternedStrings, InternedCallstacks};
 use crate::helpers::callstack::CallstackReader;
+use crate::perf_event::{RingBufSessionBuilder, RingBufBuilder};
 use crate::perf_event::abi::PERF_RECORD_MISC_SWITCH_OUT;
 
 const KERNEL_START:u64 = 0x800000000000;
@@ -74,6 +75,7 @@ pub struct ExportSettings {
     string_buckets: usize,
     callstack_buckets: usize,
     cpu_profiling: bool,
+    cpu_freq: u64,
     process_fs: bool,
     cswitches: bool,
 }
@@ -84,6 +86,7 @@ impl ExportSettings {
             string_buckets: 64,
             callstack_buckets: 512,
             cpu_profiling: true,
+            cpu_freq: 1000,
             process_fs: true,
             cswitches: true,
         }
@@ -94,6 +97,14 @@ impl ExportSettings {
         buckets: usize) -> Self {
         let mut clone = self.clone();
         clone.string_buckets = buckets;
+        clone
+    }
+
+    pub fn with_cpu_profile_freq(
+        self,
+        freq: u64) -> Self {
+        let mut clone = self.clone();
+        clone.cpu_freq = freq;
         clone
     }
 
@@ -591,13 +602,66 @@ impl ExportMachine {
     }
 }
 
+pub trait ExportBuilderHelp {
+    fn with_exporter_events(
+        self,
+        settings: &ExportSettings) -> Self;
+}
+
+impl ExportBuilderHelp for RingBufSessionBuilder {
+    fn with_exporter_events(
+        self,
+        settings: &ExportSettings) -> Self {
+        let mut builder = self;
+
+        let mut kernel = RingBufBuilder::for_kernel()
+            .with_mmap_records()
+            .with_comm_records()
+            .with_task_records();
+
+        if settings.cpu_profiling {
+            let profiling = RingBufBuilder::for_profiling(settings.cpu_freq);
+
+            builder = builder.with_profiling_events(profiling);
+        }
+
+        if settings.cswitches {
+            let cswitches = RingBufBuilder::for_cswitches();
+
+            builder = builder.with_cswitch_events(cswitches);
+            kernel = kernel.with_cswitch_records();
+        }
+
+        builder.with_kernel_events(kernel)
+    }
+}
+
+pub trait ExportSessionHelp {
+    fn build_exporter(
+        &mut self,
+        settings: ExportSettings,
+        reader: CallstackReader) -> Writable<ExportMachine>;
+}
+
+impl ExportSessionHelp for PerfSession {
+    fn build_exporter(
+        &mut self,
+        settings: ExportSettings,
+        reader: CallstackReader) -> Writable<ExportMachine> {
+        let exporter = ExportMachine::new(settings);
+
+        exporter.hook_to_session(
+            self,
+            reader)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::Path;
     use std::os::linux::fs::MetadataExt;
 
-    use crate::perf_event::*;
     use crate::helpers::callstack::{CallstackHelper, CallstackHelp};
 
     #[test]
@@ -606,34 +670,17 @@ mod tests {
         let helper = CallstackHelper::new()
             .with_dwarf_unwinding();
 
-        let freq = 1000;
-
-        let profiling = RingBufBuilder::for_profiling(freq)
-            .with_callchain_data();
-
-        let cswitches = RingBufBuilder::for_cswitches()
-            .with_callchain_data();
-
-        let kernel = RingBufBuilder::for_kernel()
-            .with_mmap_records()
-            .with_comm_records()
-            .with_task_records()
-            .with_cswitch_records();
+        let settings = ExportSettings::new();
 
         let mut builder = RingBufSessionBuilder::new()
             .with_page_count(256)
-            .with_kernel_events(kernel)
-            .with_profiling_events(profiling)
-            .with_cswitch_events(cswitches)
+            .with_exporter_events(&settings)
             .with_callstack_help(&helper);
-
-        let settings = ExportSettings::new();
-        let exporter = ExportMachine::new(settings);
 
         let mut session = builder.build().unwrap();
 
-        let exporter = exporter.hook_to_session(
-            &mut session,
+        let exporter = session.build_exporter(
+            settings,
             helper.to_reader());
 
         let duration = std::time::Duration::from_secs(1);
