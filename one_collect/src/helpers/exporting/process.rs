@@ -36,6 +36,10 @@ impl ExportProcessSample {
         }
     }
 
+    pub fn time_mut(&mut self) -> &mut u64 { &mut self.time }
+
+    pub fn value_mut(&mut self) -> &mut u64 { &mut self.value }
+
     pub fn time(&self) -> u64 { self.time }
 
     pub fn value(&self) -> u64 { self.value }
@@ -236,5 +240,16 @@ impl ExportProcess {
         fork.root_fs = self.root_fs.clone();
 
         fork
+    }
+}
+
+impl Drop for ExportProcess {
+    fn drop(&mut self) {
+        /* Close root_fs, if any */
+        if let Some(fd) = self.root_fs.take() {
+            unsafe {
+                libc::close(fd);
+            }
+        }
     }
 }
