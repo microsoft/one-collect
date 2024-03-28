@@ -3,8 +3,9 @@ use std::collections::hash_map::{Values, ValuesMut};
 use std::collections::hash_map::Entry::Occupied;
 use std::path::PathBuf;
 
-use crate::Writable;
-use crate::perf_event::PerfSession;
+use crate::{ReadOnly, Writable};
+use crate::event::{Event, EventFormat, DataFieldRef};
+use crate::perf_event::{AncillaryData, PerfSession};
 use crate::intern::{InternedStrings, InternedCallstacks};
 use crate::helpers::callstack::CallstackReader;
 use crate::perf_event::{RingBufSessionBuilder, RingBufBuilder};
@@ -70,7 +71,248 @@ impl From<&std::fs::Metadata> for ExportDevNode {
     }
 }
 
-#[derive(Clone)]
+struct ExportSampler {
+    exporter: Writable<ExportMachine>,
+    ancillary: ReadOnly<AncillaryData>,
+    reader: CallstackReader,
+    time_field: DataFieldRef,
+    pid_field: DataFieldRef,
+    tid_field: DataFieldRef,
+    frames: Vec<u64>,
+}
+
+impl ExportSampler {
+    fn new(
+        exporter: &Writable<ExportMachine>,
+        reader: &CallstackReader,
+        session: &PerfSession) -> Self {
+        Self {
+            exporter: exporter.clone(),
+            ancillary: session.ancillary_data(),
+            reader: reader.clone(),
+            time_field: session.time_data_ref(),
+            pid_field: session.pid_field_ref(),
+            tid_field: session.tid_data_ref(),
+            frames: Vec::new(),
+        }
+    }
+
+    fn time(
+        &self,
+        full_data: &[u8]) -> anyhow::Result<u64> {
+        self.time_field.get_u64(full_data)
+    }
+
+    fn pid(
+        &self,
+        full_data: &[u8]) -> anyhow::Result<u32> {
+        self.pid_field.get_u32(full_data)
+    }
+
+    fn tid(
+        &self,
+        full_data: &[u8]) -> anyhow::Result<u32> {
+        self.tid_field.get_u32(full_data)
+    }
+
+    fn cpu(&self) -> u16 {
+        self.ancillary.borrow().cpu() as u16
+    }
+
+    fn make_sample(
+        &mut self,
+        full_data: &[u8],
+        value: u64,
+        kind: u16) -> anyhow::Result<ExportProcessSample> {
+        self.frames.clear();
+
+        self.reader.read_frames(
+            full_data,
+            &mut self.frames);
+
+        Ok(self.exporter.borrow_mut().make_sample(
+            self.time(full_data)?,
+            value,
+            self.tid(full_data)?,
+            self.cpu(),
+            kind,
+            &self.frames))
+    }
+
+    fn add_custom_sample(
+        &mut self,
+        pid: u32,
+        sample: ExportProcessSample) -> anyhow::Result<()> {
+        self.exporter.borrow_mut().process_mut(pid).add_sample(sample);
+        Ok(())
+    }
+
+    fn add_sample(
+        &mut self,
+        full_data: &[u8],
+        value: u64,
+        kind: u16) -> anyhow::Result<()> {
+        self.frames.clear();
+
+        self.reader.read_frames(
+            full_data,
+            &mut self.frames);
+
+        self.exporter.borrow_mut().add_sample(
+            self.time(full_data)?,
+            value,
+            self.pid(full_data)?,
+            self.tid(full_data)?,
+            self.cpu(),
+            kind,
+            &self.frames)
+    }
+}
+
+pub struct ExportBuiltContext<'a> {
+    exporter: &'a mut ExportMachine,
+    session: &'a mut PerfSession,
+    sample_kind: Option<u16>,
+}
+
+impl<'a> ExportBuiltContext<'a> {
+    fn new(
+        exporter: &'a mut ExportMachine,
+        session: &'a mut PerfSession) -> Self {
+        Self {
+            exporter,
+            session,
+            sample_kind: None,
+        }
+    }
+
+    fn take_sample_kind(&mut self) -> Option<u16> { self.sample_kind.take() }
+
+    pub fn exporter_mut(&mut self) -> &mut ExportMachine { self.exporter }
+
+    pub fn session_mut(&mut self) -> &mut PerfSession { self.session }
+
+    pub fn set_sample_kind(
+        &mut self,
+        kind: &str) {
+        let kind = self.exporter.sample_kind(kind);
+
+        self.sample_kind = Some(kind);
+    }
+}
+
+pub struct ExportTraceContext<'a> {
+    sampler: &'a mut ExportSampler,
+    sample_kind: u16,
+    full_data: &'a [u8],
+    event_data: &'a [u8],
+    format: &'a EventFormat,
+}
+
+impl<'a> ExportTraceContext<'a> {
+    fn new(
+        sampler: &'a mut ExportSampler,
+        sample_kind: u16,
+        full_data: &'a [u8],
+        event_data: &'a [u8],
+        format: &'a EventFormat) -> Self {
+        Self {
+            sampler,
+            sample_kind,
+            full_data,
+            event_data,
+            format,
+        }
+    }
+
+    pub fn full_data(&self) -> &'a [u8] { self.full_data }
+
+    pub fn event_data(&self) -> &'a [u8] { self.event_data }
+
+    pub fn format(&self) -> &'a EventFormat { self.format }
+
+    pub fn cpu(&self) -> u16 { self.sampler.cpu() }
+
+    pub fn time(&self) -> anyhow::Result<u64> {
+        self.sampler.time(self.full_data)
+    }
+
+    pub fn pid(&self) -> anyhow::Result<u32> {
+        self.sampler.pid(self.full_data)
+    }
+
+    pub fn tid(&self) -> anyhow::Result<u32> {
+        self.sampler.tid(self.full_data)
+    }
+
+    pub fn add_sample_with_kind(
+        &mut self,
+        value: u64,
+        kind: u16) -> anyhow::Result<()> {
+        self.sampler.add_sample(
+            self.full_data,
+            value,
+            kind)
+    }
+
+    pub fn make_sample_with_kind(
+        &mut self,
+        value: u64,
+        kind: u16) -> anyhow::Result<ExportProcessSample> {
+        self.sampler.make_sample(
+            self.full_data,
+            value,
+            kind)
+    }
+
+    pub fn make_sample(
+        &mut self,
+        value: u64) -> anyhow::Result<ExportProcessSample> {
+        self.make_sample_with_kind(
+            value,
+            self.sample_kind)
+    }
+
+    pub fn add_custom_sample(
+        &mut self,
+        pid: u32,
+        sample: ExportProcessSample) -> anyhow::Result<()> {
+        self.sampler.add_custom_sample(
+            pid,
+            sample)
+    }
+
+    pub fn add_sample(
+        &mut self,
+        value: u64) -> anyhow::Result<()> {
+        self.add_sample_with_kind(
+            value,
+            self.sample_kind)
+    }
+}
+
+type BoxedBuiltCallback = Box<dyn FnMut(&mut ExportBuiltContext) -> anyhow::Result<()>>;
+type BoxedTraceCallback = Box<dyn FnMut(&mut ExportTraceContext) -> anyhow::Result<()>>;
+
+struct ExportEventCallback {
+    event: Option<Event>,
+    built: BoxedBuiltCallback,
+    trace: BoxedTraceCallback,
+}
+
+impl ExportEventCallback {
+    fn new(
+        event: Event,
+        built: impl FnMut(&mut ExportBuiltContext) -> anyhow::Result<()> + 'static,
+        trace: impl FnMut(&mut ExportTraceContext) -> anyhow::Result<()> + 'static) -> Self {
+        Self {
+            event: Some(event),
+            built: Box::new(built),
+            trace: Box::new(trace),
+        }
+    }
+}
+
 pub struct ExportSettings {
     string_buckets: usize,
     callstack_buckets: usize,
@@ -78,6 +320,7 @@ pub struct ExportSettings {
     cpu_freq: u64,
     process_fs: bool,
     cswitches: bool,
+    events: Option<Vec<ExportEventCallback>>,
 }
 
 impl ExportSettings {
@@ -89,13 +332,35 @@ impl ExportSettings {
             cpu_freq: 1000,
             process_fs: true,
             cswitches: true,
+            events: None,
         }
+    }
+
+    pub fn with_event(
+        self,
+        event: Event,
+        built: impl FnMut(&mut ExportBuiltContext) -> anyhow::Result<()> + 'static,
+        trace: impl FnMut(&mut ExportTraceContext) -> anyhow::Result<()> + 'static) -> Self {
+
+        let mut clone = self;
+
+        let callback = ExportEventCallback::new(
+            event,
+            built,
+            trace);
+
+        match clone.events.as_mut() {
+            Some(events) => { events.push(callback); },
+            None => { clone.events = Some(vec![callback]); }
+        }
+
+        clone
     }
 
     pub fn with_string_buckets(
         self,
         buckets: usize) -> Self {
-        let mut clone = self.clone();
+        let mut clone = self;
         clone.string_buckets = buckets;
         clone
     }
@@ -103,7 +368,7 @@ impl ExportSettings {
     pub fn with_cpu_profile_freq(
         self,
         freq: u64) -> Self {
-        let mut clone = self.clone();
+        let mut clone = self;
         clone.cpu_freq = freq;
         clone
     }
@@ -111,25 +376,25 @@ impl ExportSettings {
     pub fn with_callstack_buckets(
         self,
         buckets: usize) -> Self {
-        let mut clone = self.clone();
+        let mut clone = self;
         clone.callstack_buckets = buckets;
         clone
     }
 
     pub fn without_cswitches(self) -> Self {
-        let mut clone = self.clone();
+        let mut clone = self;
         clone.cswitches = false;
         clone
     }
 
     pub fn without_cpu_profiling(self) -> Self {
-        let mut clone = self.clone();
+        let mut clone = self;
         clone.cpu_profiling = false;
         clone
     }
 
     pub fn without_process_fs(self) -> Self {
-        let mut clone = self.clone();
+        let mut clone = self;
         clone.process_fs = false;
         clone
     }
@@ -317,7 +582,7 @@ impl ExportMachine {
         tid: u32,
         cpu: u16,
         kind: u16,
-        frames: &Vec<u64>) -> ExportProcessSample {
+        frames: &[u64]) -> ExportProcessSample {
         let ip = frames[0];
         let callstack_id = self.callstacks.to_id(&frames[1..]);
 
@@ -339,7 +604,7 @@ impl ExportMachine {
         tid: u32,
         cpu: u16,
         kind: u16,
-        frames: &Vec<u64>) -> anyhow::Result<()> {
+        frames: &[u64]) -> anyhow::Result<()> {
         let sample = self.make_sample(
             time,
             value,
@@ -354,13 +619,62 @@ impl ExportMachine {
     }
 
     pub fn hook_to_session(
-        self,
+        mut self,
         session: &mut PerfSession,
-        callstack_reader: CallstackReader) -> Writable<ExportMachine> {
+        callstack_reader: CallstackReader) -> anyhow::Result<Writable<ExportMachine>> {
         let cpu_profiling = self.settings.cpu_profiling;
         let cswitches = self.settings.cswitches;
+        let events = self.settings.events.take();
 
         let machine = Writable::new(self);
+
+        if let Some(events) = events {
+            let shared_sampler = Writable::new(
+                ExportSampler::new(
+                    &machine,
+                    &callstack_reader,
+                    session));
+
+            for mut callback in events {
+                if callback.event.is_none() {
+                    continue;
+                }
+
+                let mut event = callback.event.take().unwrap();
+                let mut event_machine = machine.borrow_mut();
+
+                let mut builder = ExportBuiltContext::new(
+                    &mut event_machine,
+                    session);
+
+                /* Invoke built callback for setup, etc */
+                (callback.built)(&mut builder)?;
+
+                let sample_kind = match builder.take_sample_kind() {
+                    /* If the builder has a sample kind pre-defined, use that */
+                    Some(kind) => { kind },
+                    /* Otherwise, use the event name */
+                    None => { event_machine.sample_kind(event.name()) }
+                };
+
+                /* Re-use sampler for all events */
+                let event_sampler = shared_sampler.clone();
+
+                /* Trampoline between event callback and exporter callback */
+                event.add_callback(move |full_data, format, event_data| {
+                    (callback.trace)(
+                        &mut ExportTraceContext::new(
+                            &mut event_sampler.borrow_mut(),
+                            sample_kind,
+                            full_data,
+                            event_data,
+                            format))
+                });
+
+                /* Add event to session */
+                session.add_event(event)?;
+            }
+        }
 
         if cpu_profiling {
             let ancillary = session.ancillary_data();
@@ -449,7 +763,7 @@ impl ExportMachine {
                 /* Stash away the sample until switch-in */
                 machine.cswitches.entry(tid).or_default().sample = Some(sample);
 
-                return Ok(());
+                Ok(())
             });
 
             let misc_field = session.misc_data_ref();
@@ -518,7 +832,7 @@ impl ExportMachine {
                     _ => { }
                 }
 
-                return Ok(());
+                Ok(())
             });
         }
 
@@ -598,7 +912,7 @@ impl ExportMachine {
                 fmt.get_u32(ppid, data)?)
         });
 
-        machine
+        Ok(machine)
     }
 }
 
@@ -632,6 +946,12 @@ impl ExportBuilderHelp for RingBufSessionBuilder {
             kernel = kernel.with_cswitch_records();
         }
 
+        if settings.events.is_some() {
+            let tracepoint = RingBufBuilder::for_tracepoint();
+
+            builder = builder.with_tracepoint_events(tracepoint);
+        }
+
         builder.with_kernel_events(kernel)
     }
 }
@@ -640,14 +960,14 @@ pub trait ExportSessionHelp {
     fn build_exporter(
         &mut self,
         settings: ExportSettings,
-        reader: CallstackReader) -> Writable<ExportMachine>;
+        reader: CallstackReader) -> anyhow::Result<Writable<ExportMachine>>;
 }
 
 impl ExportSessionHelp for PerfSession {
     fn build_exporter(
         &mut self,
         settings: ExportSettings,
-        reader: CallstackReader) -> Writable<ExportMachine> {
+        reader: CallstackReader) -> anyhow::Result<Writable<ExportMachine>> {
         let exporter = ExportMachine::new(settings);
 
         exporter.hook_to_session(
@@ -662,6 +982,7 @@ mod tests {
     use std::path::Path;
     use std::os::linux::fs::MetadataExt;
 
+    use crate::tracefs::TraceFS;
     use crate::helpers::callstack::{CallstackHelper, CallstackHelp};
 
     #[test]
@@ -670,7 +991,36 @@ mod tests {
         let helper = CallstackHelper::new()
             .with_dwarf_unwinding();
 
-        let settings = ExportSettings::new();
+        let mut settings = ExportSettings::new();
+
+        /* Hookup page_fault as a new event sample */
+        let tracefs = TraceFS::open().unwrap();
+        let user_fault = tracefs.find_event("exceptions", "page_fault_user").unwrap();
+        let kernel_fault = tracefs.find_event("exceptions", "page_fault_kernel").unwrap();
+
+        settings = settings.with_event(
+            user_fault,
+            move |builder| {
+                /* Set default sample kind */
+                builder.set_sample_kind("page_fault_user");
+                Ok(())
+            },
+            move |tracer| {
+                /* Create default sample */
+                tracer.add_sample(1)
+            });
+
+        settings = settings.with_event(
+            kernel_fault,
+            move |builder| {
+                /* Set default sample kind */
+                builder.set_sample_kind("page_fault_kernel");
+                Ok(())
+            },
+            move |tracer| {
+                /* Create default sample */
+                tracer.add_sample(1)
+            });
 
         let mut builder = RingBufSessionBuilder::new()
             .with_page_count(256)
@@ -681,7 +1031,7 @@ mod tests {
 
         let exporter = session.build_exporter(
             settings,
-            helper.to_reader());
+            helper.to_reader()).unwrap();
 
         let duration = std::time::Duration::from_secs(1);
 
