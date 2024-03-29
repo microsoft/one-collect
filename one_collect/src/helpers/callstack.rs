@@ -48,6 +48,7 @@ impl ModuleAccessor for ModuleLookup {
 struct MachineState {
     machine: Machine,
     modules: ModuleLookup,
+    ip_field: DataFieldRef,
     pid_field: DataFieldRef,
     callchain_field: DataFieldRef,
     regs_user_field: DataFieldRef,
@@ -63,6 +64,7 @@ impl MachineState {
         Self {
             machine: Machine::new(),
             modules: ModuleLookup::new(),
+            ip_field: empty.clone(),
             pid_field: empty.clone(),
             callchain_field: empty.clone(),
             regs_user_field: empty.clone(),
@@ -166,6 +168,13 @@ impl CallstackReader {
             let mut data = state.callchain_field.get_data(full_data);
             let mut count = data.len() / 8;
 
+            if count == 0 {
+                /* No callchain, try to get from IP */
+                if let Some(ip) = state.ip_field.try_get_u64(full_data) {
+                    frames.push(ip);
+                }
+            }
+
             while count > 0 {
                 let frame = u64::from_ne_bytes(
                     data[0..8]
@@ -185,18 +194,18 @@ impl CallstackReader {
             if let Some(unwinder) = &mut state.unwinder {
                 let pid: u32;
 
-                /* PID */
-                match state.pid_field.try_get_u32(full_data) {
-                    Some(_pid) => { pid = _pid; },
-                    None => { return; },
-                }
-
                 /* Registers */
                 let data = state.regs_user_field.get_data(full_data);
 
                 /* Expected 3 registers on x64 */
                 if data.len() != 24 {
                     return;
+                }
+
+                /* PID */
+                match state.pid_field.try_get_u32(full_data) {
+                    Some(_pid) => { pid = _pid; },
+                    None => { return; },
                 }
 
                 let rbp = u64::from_ne_bytes(data[0..8].try_into().unwrap());
@@ -231,6 +240,7 @@ impl Clone for CallstackReader {
 pub struct CallstackHelper {
     state: Writable<MachineState>,
     unwinder: Option<Box<dyn MachineUnwinder>>,
+    ip_only: bool,
     stack_size: u32,
 }
 
@@ -239,6 +249,7 @@ impl CallstackHelper {
         Self {
             state: self.state.clone(),
             unwinder: self.unwinder.take(),
+            ip_only: self.ip_only,
             stack_size: self.stack_size,
         }
     }
@@ -247,8 +258,17 @@ impl CallstackHelper {
         Self {
             state: Writable::new(MachineState::new()),
             unwinder: None,
+            ip_only: false,
             stack_size: 4096,
         }
+    }
+
+    pub fn with_ip_only(&mut self) -> Self {
+        let mut clone = self.clone_mut();
+
+        clone.ip_only = true;
+
+        clone
     }
 
     pub fn with_dwarf_unwinding(&mut self) -> Self {
@@ -291,13 +311,67 @@ impl CallstackHelp for RingBufSessionBuilder {
         &mut self,
         helper: &CallstackHelper) -> Self {
         let dwarf = helper.unwinder.is_some();
+        let ip_only = helper.ip_only;
         let stack_size = helper.stack_size;
         let session_state = helper.state.clone();
 
         self.with_hooks(
             move |builder| {
-                /* No need to change builder unless DWARF */
+                /*
+                 * In all cases, when the callstack helper is used, it's
+                 * assumed that they want callstacks. In both the DWARF
+                 * and non-DWARF cases, we should be consistent.
+                 *
+                 * On per-event basis, the callstack can be configured to
+                 * use just the IP via set_no_callstack_flag() to save
+                 * both space and cpu consumption, if required.
+                 *
+                 * If only IPs are wanted for all events, the ip_only flag
+                 * can be used to achieve this.
+                 */
+                if ip_only {
+                    /* If only IP is needed, we can do a simpler setup */
+                    if let Some(profiling) = builder.take_profiling_events() {
+                        builder.replace_profiling_events(
+                            profiling
+                            .with_ip());
+                    }
+
+                    if let Some(tp) = builder.take_tracepoint_events() {
+                        builder.replace_tracepoint_events(
+                            tp
+                            .with_ip());
+                    }
+
+                    if let Some(cswitch) = builder.take_cswitch_events() {
+                        builder.replace_cswitch_events(
+                            cswitch
+                            .with_ip());
+                    }
+
+                    return;
+                }
+
                 if !dwarf {
+                    /* Non-DWARF, turn on simple callchain data */
+                    if let Some(profiling) = builder.take_profiling_events() {
+                        builder.replace_profiling_events(
+                            profiling
+                            .with_callchain_data());
+                    }
+
+                    if let Some(tp) = builder.take_tracepoint_events() {
+                        builder.replace_tracepoint_events(
+                            tp
+                            .with_callchain_data());
+                    }
+
+                    if let Some(cswitch) = builder.take_cswitch_events() {
+                        builder.replace_cswitch_events(
+                            cswitch
+                            .with_callchain_data());
+                    }
+
                     return;
                 }
 
@@ -353,13 +427,14 @@ impl CallstackHelp for RingBufSessionBuilder {
             },
 
             move |session| {
-                /* Always grab callchain field */
+                /* Always grab callchain and IP field */
                 session_state.write(|state| {
                     state.callchain_field = session.callchain_data_ref();
+                    state.ip_field = session.ip_data_ref();
                 });
 
-                /* No need to hook unless DWARF */
-                if !dwarf {
+                /* No need to hook unless DWARF with callchains */
+                if !dwarf || ip_only{
                     return;
                 }
 
@@ -476,6 +551,60 @@ impl CallstackHelp for RingBufSessionBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tracefs::TraceFS;
+
+    #[test]
+    #[ignore]
+    fn no_callchain_flag() {
+        let helper = CallstackHelper::new()
+            .with_dwarf_unwinding();
+
+        let tracepoints = RingBufBuilder::for_tracepoint()
+            .with_callchain_data();
+
+        let mut builder = RingBufSessionBuilder::new()
+            .with_page_count(256)
+            .with_tracepoint_events(tracepoints)
+            .with_callstack_help(&helper);
+
+        let tracefs = TraceFS::open().unwrap();
+        let mut waking = tracefs.find_event("sched", "sched_waking").unwrap();
+
+        /* This removes callchain/regs and uses only IP */
+        waking.set_no_callstack_flag();
+
+        let stack_reader = helper.to_reader();
+        let mut frames = Vec::new();
+        let bad_count = Writable::new(0u64);
+        let callback_count = bad_count.clone();
+
+        waking.add_callback(move |full_data,_fmt,_data| {
+            frames.clear();
+
+            stack_reader.read_frames(
+                full_data,
+                &mut frames);
+
+            /* We expect to only get the IP when no callstack is on */
+            if frames.len() != 1 {
+                *callback_count.borrow_mut() += 1;
+                anyhow::bail!("Expected only IP, Len={}", frames.len());
+            }
+
+            Ok(())
+        });
+
+        let mut session = builder.build().unwrap();
+        let duration = std::time::Duration::from_secs(1);
+
+        session.add_event(waking).unwrap();
+
+        session.enable().unwrap();
+        session.parse_for_duration(duration).unwrap();
+        session.disable().unwrap();
+
+        assert_eq!(0, *bad_count.borrow());
+    }
 
     #[test]
     #[ignore]
