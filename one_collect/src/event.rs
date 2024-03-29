@@ -363,9 +363,12 @@ impl EventFormat {
     }
 }
 
+const EVENT_FLAG_NO_CALLSTACK:u64 = 1u64 << 0;
+
 pub struct Event {
     id: usize,
     name: String,
+    flags: u64,
     callbacks: Vec<BoxedCallback>,
     format: EventFormat,
 }
@@ -377,6 +380,7 @@ impl Event {
         Self {
             id,
             name,
+            flags: 0,
             callbacks: Vec::new(),
             format: EventFormat::new(),
         }
@@ -388,6 +392,14 @@ impl Event {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn set_no_callstack_flag(&mut self) {
+        self.flags |= EVENT_FLAG_NO_CALLSTACK;
+    }
+
+    pub fn has_no_callstack_flag(&self) -> bool {
+        self.flags & EVENT_FLAG_NO_CALLSTACK != 0
     }
 
     pub fn format_mut(&mut self) -> &mut EventFormat {
@@ -488,6 +500,16 @@ mod tests {
         e.process(slice, slice, &mut errors);
         assert_eq!(count.load(Ordering::Relaxed), 2);
         assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn flags() {
+        let mut e = Event::new(0, "Flags".to_owned());
+
+        /* No Callstacks */
+        assert!(!e.has_no_callstack_flag());
+        e.set_no_callstack_flag();
+        assert!(e.has_no_callstack_flag());
     }
 
     #[test]

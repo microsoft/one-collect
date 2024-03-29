@@ -367,6 +367,29 @@ impl CommonRingBuf {
         }
     }
 
+    pub fn without_callstack(
+        self) -> Self {
+        /* If no callchain/stack, then don't do anything */
+        if !self.attributes.has_format(PERF_SAMPLE_CALLCHAIN) &&
+           !self.attributes.has_format(PERF_SAMPLE_STACK_USER) {
+            return self;
+        }
+
+        let mut clone = self;
+        let mut attributes = *clone.attributes;
+
+        /* Clear callchain/stack samples */
+        attributes.sample_type &= !PERF_SAMPLE_CALLCHAIN;
+        attributes.sample_type &= !PERF_SAMPLE_STACK_USER;
+        attributes.sample_type &= !PERF_SAMPLE_REGS_USER;
+
+        /* Enable IP only sample */
+        attributes.sample_type |= PERF_SAMPLE_IP;
+
+        clone.attributes = Rc::new(attributes);
+        clone
+    }
+
     pub fn for_cpu(
         &self,
         cpu: u32) -> CpuRingBuf {

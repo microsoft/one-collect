@@ -531,7 +531,12 @@ impl PerfDataSource for RingBufDataSource {
         event: &Event) -> IOResult<()> {
         /* Add in all the events and redirect to kernel outputs */
         if let Some(event_builder) = self.event_builder.as_mut() {
-            let common = event_builder.build(event.id() as u64);
+            let mut common = event_builder.build(event.id() as u64);
+
+            /* Mutate attributes based on flags */
+            if event.has_no_callstack_flag() {
+                common = common.without_callstack();
+            }
 
             Self::add_cpu_bufs(
                 self.target_pid,
