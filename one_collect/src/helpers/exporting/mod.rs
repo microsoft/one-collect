@@ -14,6 +14,9 @@ use crate::perf_event::abi::PERF_RECORD_MISC_SWITCH_OUT;
 const KERNEL_START:u64 = 0x800000000000;
 const KERNEL_END:u64 = 0xFFFFFFFFFFFFFFFF;
 
+pub mod graph;
+pub mod formats;
+
 pub mod symbols;
 pub use symbols::{
     ExportSymbolReader,
@@ -411,6 +414,8 @@ pub struct ExportMachine {
     map_index: usize,
 }
 
+pub type CommMap = HashMap<Option<usize>, Vec<u32>>;
+
 impl ExportMachine {
     pub fn new(settings: ExportSettings) -> Self {
         let strings = InternedStrings::new(settings.string_buckets);
@@ -435,6 +440,37 @@ impl ExportMachine {
     pub fn callstacks(&self) -> &InternedCallstacks { &self.callstacks }
 
     pub fn processes(&self) -> Values<u32, ExportProcess> { self.procs.values() }
+
+    pub fn find_sample_kind(
+        &self,
+        target_kind: &str) -> Option<u16> {
+        for (i, kind) in self.kinds.iter().enumerate() {
+            if kind == target_kind {
+                return Some(i as u16);
+            }
+        }
+
+        None
+    }
+
+    pub fn find_process(
+        &self,
+        pid: u32) -> Option<&ExportProcess> {
+        self.procs.get(&pid)
+    }
+
+    pub fn split_processes_by_comm(
+        &self) -> CommMap {
+        let mut map = CommMap::new();
+
+        for (pid, process) in &self.procs {
+            map.entry(process.comm_id())
+               .and_modify(|e| { e.push(*pid) })
+               .or_insert_with(|| { vec![*pid] });
+        }
+
+        map
+    }
 
     pub fn processes_mut(&mut self) -> ValuesMut<u32, ExportProcess> {
         self.procs.values_mut()
@@ -508,7 +544,7 @@ impl ExportMachine {
         self.procs.entry(pid).or_insert_with(|| ExportProcess::new(pid))
     }
 
-    fn add_mmap_exec(
+    pub(crate) fn add_mmap_exec(
         &mut self,
         pid: u32,
         addr: u64,
@@ -543,7 +579,7 @@ impl ExportMachine {
         Ok(())
     }
 
-    fn add_comm_exec(
+    pub(crate) fn add_comm_exec(
         &mut self,
         pid: u32,
         comm: &str) -> anyhow::Result<()> {
