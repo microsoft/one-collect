@@ -1,4 +1,4 @@
-use std::io::{BufRead, Seek, SeekFrom};
+use std::{fs::File, io::{BufRead, Seek, SeekFrom}};
 
 #[derive(Clone)]
 pub struct ExportSymbol {
@@ -168,5 +168,168 @@ impl ExportSymbolReader for KernelSymbolReader {
 
     fn name(&self) -> &str {
         &self.current_name
+    }
+}
+
+pub struct PerfMapSymbolReader {
+    reader: std::io::BufReader<std::fs::File>,
+    buffer: String,
+    start_ip: u64,
+    end_ip: u64,
+    name: String,
+    done: bool,
+}
+
+impl PerfMapSymbolReader {
+    pub fn new(file: File) -> Self {
+        Self {
+            reader: std::io::BufReader::new(file),
+            buffer: String::with_capacity(256),
+            name: String::with_capacity(256),
+            start_ip: 0,
+            end_ip: 0,
+            done: true,
+        }
+    }
+
+    fn load_next(&mut self) {
+        loop {
+            self.buffer.clear();
+
+            self.start_ip = 0;
+            self.end_ip = 0;
+            self.name.clear();
+
+            if let Ok(len) = self.reader.read_line(&mut self.buffer) {
+                if len == 0 {
+                    break;
+                }
+            } else {
+                break;
+            }
+
+            for (index, part) in self.buffer.splitn(3, ' ').enumerate() {
+                match index {
+                    0 => {
+                        if part.starts_with("0x") || part.starts_with("0X") {
+                            self.start_ip = u64::from_str_radix(&part[2..], 16).unwrap();
+                        }
+                        else {
+                            self.start_ip = u64::from_str_radix(part, 16).unwrap();
+                        }
+                    },
+                    1 => {
+                        let size = u64::from_str_radix(part, 16).unwrap();
+                        self.end_ip = self.start_ip + size;
+                    },
+                    _ => {
+                        self.name.push_str(part);
+                        if self.name.ends_with("\n") {
+                            self.name.pop();
+                        }
+                    },
+                }
+            }
+
+            self.done = false;
+
+            return;
+        }
+
+        self.done = true;
+    }
+}
+
+impl ExportSymbolReader for PerfMapSymbolReader {
+    fn reset(&mut self) {
+        if self.reader.seek(SeekFrom::Start(0)).is_ok() {
+            self.done = false;
+            return;
+        }
+        else {
+            // If we fail to seek to the start of the file,
+            // set the values to their defaults and set
+            // done = true to prevent further reading.
+            self.start_ip = 0;
+            self.end_ip = 0;
+            self.name.clear();
+            self.done = true;
+        }
+    }
+
+    fn next(&mut self) -> bool {
+        if self.done {
+            return false;
+        }
+
+        self.load_next();
+
+        if self.done {
+            return false;
+        }
+
+        true
+    }
+
+    fn start(&self) -> u64 {
+        self.start_ip
+    }
+
+    fn end(&self) -> u64 {
+        self.end_ip
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn perf_map_symbol_reader() {
+        let expected_count = 2435;
+        let perf_map_path = std::env::current_dir().unwrap().join(
+            "../test/assets/perfmap/dotnet-info.map");
+
+        if let Ok(file) = std::fs::File::open(perf_map_path.clone()) {
+            let mut reader = PerfMapSymbolReader::new(file);
+            reader.reset();
+
+            let mut actual_count = 0;
+            loop {
+                if !reader.next() {
+                    break;
+                }
+
+                actual_count+=1;
+                assert!(reader.start() < reader.end(), "Start must be less than end - start: {}, end: {}", reader.start(), reader.end());
+                assert!(reader.name().len() > 0);
+
+                // Check for a few known symbols.
+                match reader.start() {
+                    0x00007F148458E6A0 => {
+                        assert_eq!(0x00007F148458E6A0 + 0x1B0, reader.end());
+                        assert_eq!(reader.name(), "int32 [System.Private.CoreLib] System.SpanHelpers::IndexOf(char&,char,int32)[OptimizedTier1]");
+                    },
+                    0x00007F1484597400 => {
+                        assert_eq!(0x00007F1484597400 + 0x121, reader.end());
+                        assert_eq!(reader.name(), "native uint [System.Private.CoreLib] System.Text.ASCIIUtility::NarrowUtf16ToAscii(char*,uint8*,native uint)[Optimized]");
+                    },
+                    0x00007F1484F65380 => {
+                        assert_eq!(0x00007F1484F65380 + 0x17e, reader.end());
+                        assert_eq!(reader.name(), "instance bool [System.Linq] System.Linq.Enumerable+SelectListIterator`2[Microsoft.Extensions.DependencyModel.DependencyContextJsonReader+TargetLibrary,System.__Canon]::MoveNext()[QuickJitted]")
+                    },
+                    _ => {},
+                }
+            }
+
+            assert_eq!(actual_count, expected_count);
+        }
+        else {
+            assert!(false, "Unable to open file {}", perf_map_path.display());
+        }
     }
 }

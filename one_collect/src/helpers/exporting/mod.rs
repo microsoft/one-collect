@@ -35,6 +35,8 @@ pub use mappings::{
     ExportMapping,
 };
 
+use self::symbols::PerfMapSymbolReader;
+
 #[derive(Default)]
 struct ExportCSwitch {
     start_time: u64,
@@ -535,6 +537,58 @@ impl ExportMachine {
                 &mut self.strings);
 
             proc.add_mapping(kernel);
+        }
+    }
+
+    pub fn resolve_perf_map_symbols(
+        &mut self) {
+        let mut frames = Vec::new();
+        let mut addrs = HashSet::new();
+
+        let mut path_buf = PathBuf::new();
+        path_buf.push("tmp");
+
+        for proc in self.procs.values_mut() {
+            if !proc.has_anon_mappings() {
+                continue;
+            }
+
+            path_buf.push(format!("perf-{}.map", proc.pid()));
+            let file = proc.open_file(&path_buf);
+            path_buf.pop();
+
+            if file.is_err() {
+                continue;
+            }
+
+            let mut sym_reader = PerfMapSymbolReader::new(file.unwrap());
+
+            for i in 0..proc.mappings().len() {
+                let map = proc.mappings().get(i).unwrap();
+                if !map.anon() {
+                    continue;
+                }
+
+                proc.get_unique_user_ips(
+                    &mut addrs,
+                    &mut frames,
+                    &self.callstacks,
+                    Some(map));
+
+                if addrs.is_empty() {
+                    continue;
+                }
+
+                for addr in &addrs {
+                    frames.push(*addr);
+                }
+
+                let map_mut = proc.mappings_mut().get_mut(i).unwrap();
+                map_mut.add_matching_symbols(
+                    &mut frames,
+                    &mut sym_reader,
+                    &mut self.strings);
+            }
         }
     }
 

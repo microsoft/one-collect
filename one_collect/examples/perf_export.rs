@@ -62,6 +62,9 @@ fn main() {
     /* Pull in more data, if wanted */
     exporter.add_kernel_mappings();
 
+    println!("Resolving perfmap symbols...");
+    exporter.resolve_perf_map_symbols();
+
     println!("Exporting...");
 
     /* Split by comm name */
