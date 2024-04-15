@@ -1,4 +1,5 @@
 use std::{fs::File, io::{BufRead, Seek, SeekFrom}};
+use crate::helpers::exporting::KERNEL_END;
 
 #[derive(Clone)]
 pub struct ExportSymbol {
@@ -41,9 +42,10 @@ pub trait ExportSymbolReader {
 pub struct KernelSymbolReader {
     reader: Option<std::io::BufReader<std::fs::File>>,
     buffer: String,
-    current_ip: u64,
+    current_start: u64,
+    current_end: u64,
     current_name: String,
-    next_ip: Option<u64>,
+    next_start: Option<u64>,
     next_name: String,
     done: bool,
 }
@@ -54,8 +56,9 @@ impl KernelSymbolReader {
             reader: None,
             buffer: String::with_capacity(64),
             current_name: String::with_capacity(64),
-            current_ip: 0,
-            next_ip: None,
+            current_start: 0,
+            current_end: KERNEL_END,
+            next_start: None,
             next_name: String::with_capacity(64),
             done: true,
         }
@@ -63,12 +66,13 @@ impl KernelSymbolReader {
 
     fn load_next(&mut self) {
         /* Swap next with current */
-        if let Some(ip) = self.next_ip {
-            self.current_ip = ip;
+        if let Some(ip) = self.next_start {
+            self.current_start = ip;
+            self.current_end = KERNEL_END;
             self.current_name.clear();
             self.current_name.push_str(&self.next_name);
 
-            self.next_ip = None;
+            self.next_start = None;
             self.next_name.clear();
         }
 
@@ -108,12 +112,15 @@ impl KernelSymbolReader {
                     }
                 }
 
+                /* Set current end to be addr - 1 */
+                self.current_end = addr - 1;
+
                 /* Skip non-method symbols */
                 if !symtype.starts_with('t') && !symtype.starts_with('T') {
                     continue;
                 }
 
-                self.next_ip = Some(addr);
+                self.next_start = Some(addr);
                 self.next_name.push_str(module);
                 self.next_name.push('!');
                 self.next_name.push_str(method);
@@ -155,15 +162,11 @@ impl ExportSymbolReader for KernelSymbolReader {
     }
 
     fn start(&self) -> u64 {
-        self.current_ip
+        self.current_start
     }
 
     fn end(&self) -> u64 {
-        if let Some(next_ip) = self.next_ip {
-            next_ip - 1
-        } else {
-            0xFFFFFFFFFFFFFFFF
-        }
+        self.current_end
     }
 
     fn name(&self) -> &str {

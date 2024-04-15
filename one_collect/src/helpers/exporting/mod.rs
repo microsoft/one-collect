@@ -12,7 +12,7 @@ use crate::perf_event::{RingBufSessionBuilder, RingBufBuilder};
 use crate::perf_event::abi::PERF_RECORD_MISC_SWITCH_OUT;
 
 const KERNEL_START:u64 = 0x800000000000;
-const KERNEL_END:u64 = 0xFFFFFFFFFFFFFFFF;
+pub const KERNEL_END:u64 = 0xFFFFFFFFFFFFFFFF;
 
 pub mod graph;
 pub mod formats;
