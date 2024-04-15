@@ -188,8 +188,45 @@ impl ExportProcess {
         }
     }
 
+    pub fn add_matching_anon_symbols(
+        &mut self,
+        addrs: &mut HashSet<u64>,
+        frames: &mut Vec<u64>,
+        sym_reader: &mut impl ExportSymbolReader,
+        callstacks: &InternedCallstacks,
+        strings: &mut InternedStrings) {
+        addrs.clear();
+        frames.clear();
+
+        for map in &mut self.mappings {
+            if !map.anon() {
+                continue;
+            }
+
+            Self::get_unique_user_ips(
+                &self.samples,
+                addrs,
+                frames,
+                &callstacks,
+                Some(map));
+
+            if addrs.is_empty() {
+                continue;
+            }
+
+            for addr in addrs.iter() {
+                frames.push(*addr);
+            }
+
+            map.add_matching_symbols(
+                frames,
+                sym_reader,
+                strings);
+        }
+    }
+
     pub fn get_unique_user_ips(
-        &self,
+        samples: &[ExportProcessSample],
         addrs: &mut HashSet<u64>,
         frames: &mut Vec<u64>,
         callstacks: &InternedCallstacks,
@@ -197,7 +234,7 @@ impl ExportProcess {
         addrs.clear();
         frames.clear();
 
-        for sample in &self.samples {
+        for sample in samples {
             /* Only add user frames */
             if sample.ip() < KERNEL_START {
                 match mapping {
