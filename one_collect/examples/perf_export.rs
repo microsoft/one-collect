@@ -6,6 +6,8 @@ use one_collect::helpers::exporting::formats::perf_view::*;
 
 use one_collect::helpers::callstack::*;
 
+use one_collect::helpers::dotnet::*;
+
 fn main() {
     let args: Vec<_> = std::env::args().collect();
 
@@ -25,10 +27,14 @@ fn main() {
     let settings = ExportSettings::new()
         .without_cswitches();
 
+    let mut dotnet = DotNetHelper::new()
+        .with_perf_maps();
+
     let mut builder = RingBufSessionBuilder::new()
         .with_page_count(256)
         .with_exporter_events(&settings)
-        .with_callstack_help(&helper);
+        .with_callstack_help(&helper)
+        .with_dotnet_help(&mut dotnet);
 
     let mut session = builder.build().unwrap();
 
@@ -64,6 +70,9 @@ fn main() {
 
     println!("Resolving perfmap symbols...");
     exporter.resolve_perf_map_symbols();
+
+    dotnet.disable_perf_maps();
+    dotnet.remove_perf_maps();
 
     println!("Exporting...");
 
