@@ -206,6 +206,7 @@ pub struct PerfSession {
     mmap_event: Event,
     lost_samples_event: Event,
     cswitch_event: Event,
+    drop_event: Event,
 
     /* Ancillary data */
     ancillary: Writable<AncillaryData>,
@@ -216,6 +217,17 @@ pub struct PerfSession {
 
     /* State tracking */
     process_tracking_options: ProcessTrackingOptions,
+}
+
+impl Drop for PerfSession {
+    fn drop(&mut self) {
+        self.drop_event.process(
+            EMPTY,
+            EMPTY,
+            &mut self.errors);
+
+        self.log_errors(&self.drop_event);
+    }
 }
 
 impl PerfSession {
@@ -260,6 +272,7 @@ impl PerfSession {
             mmap_event: events::mmap(),
             lost_samples_event: events::lost_samples(),
             cswitch_event: events::cswitch(),
+            drop_event: Event::new(0, "__session_drop".into()),
 
             /* Ancillary data */
             ancillary: Writable::new(AncillaryData::default()),
@@ -422,6 +435,10 @@ impl PerfSession {
 
     pub fn cswitch_event(&mut self) -> &mut Event {
         &mut self.cswitch_event
+    }
+
+    pub fn drop_event(&mut self) -> &mut Event {
+        &mut self.drop_event
     }
 
     pub fn misc_data_ref(&self) -> DataFieldRef {
