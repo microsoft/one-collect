@@ -124,6 +124,32 @@ impl<'a> ModuleInfo<'a> {
     }
 }
 
+pub(crate) fn ns_pid(
+    pid: u32) -> Option<u32> {
+    let mut path_buf = PathBuf::new();
+    path_buf.push("/proc");
+    if pid != 0 {
+        path_buf.push(pid.to_string());
+    } else {
+        path_buf.push("self");
+    }
+    path_buf.push("status");
+
+    if let Ok(file) = File::open(&path_buf) {
+        for line in BufReader::new(file).lines().flatten() {
+            if line.starts_with("NSpid:\t") {
+                let (_, value) = line.split_at(7);
+
+                if let Ok(nspid) = value.parse::<u32>() {
+                    return Some(nspid);
+                }
+            }
+        }
+    }
+
+    None
+}
+
 pub(crate) fn iter_proc_modules(
     pid: u32,
     mut callback: impl FnMut(&ModuleInfo)) {
