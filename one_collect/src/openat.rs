@@ -39,6 +39,58 @@ impl OpenAt {
             Ok(File::from_raw_fd(fd))
         }
     }
+
+    pub fn find(
+        &self,
+        path: &Path,
+        prefix: &str) -> Option<Vec<String>> {
+        let file = self.open_file(path);
+
+        if file.is_err() {
+            return None;
+        }
+
+        let file = file.unwrap();
+        let fd = file.into_raw_fd();
+
+        let mut paths = Vec::new();
+
+        unsafe {
+            let dir = libc::fdopendir(fd);
+
+            if dir.is_null() {
+                return None;
+            }
+
+            loop {
+                let entry = libc::readdir(dir);
+
+                if entry.is_null() {
+                    break;
+                }
+
+                let name = &(*entry).d_name as *const i8;
+                let len = libc::strlen(name);
+
+                let name = std::str::from_utf8_unchecked(
+                    std::slice::from_raw_parts(
+                        name as *const u8,
+                        len));
+
+                if name.starts_with(prefix) {
+                    paths.push(name.to_string());
+                }
+            }
+
+            libc::closedir(dir);
+        }
+
+        if paths.is_empty() {
+            return None;
+        }
+
+        Some(paths)
+    }
 }
 
 impl Drop for OpenAt {
