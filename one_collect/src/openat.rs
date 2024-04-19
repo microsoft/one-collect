@@ -40,6 +40,31 @@ impl OpenAt {
         }
     }
 
+    pub fn remove(
+        &self,
+        path: &Path) -> anyhow::Result<()> {
+        let path = CString::new(path.as_os_str().as_bytes())?;
+        let mut path = path.as_bytes_with_nul();
+
+        if path[0] == b'/' {
+            path = &path[1..]
+        }
+
+        unsafe {
+            let result = libc::unlinkat(
+                self.fd,
+                path.as_ptr() as *const libc::c_char,
+                0);
+
+            /* ENOENT (Not Found) is considered success */
+            if result != 0 && result != libc::ENOENT {
+                return Err(std::io::Error::last_os_error().into());
+            }
+
+            Ok(())
+        }
+    }
+
     pub fn find(
         &self,
         path: &Path,
