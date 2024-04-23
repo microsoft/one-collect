@@ -1,4 +1,4 @@
-use std::io::{Error, Read, Seek, SeekFrom};
+use std::io::{Error, ErrorKind, Read, Seek, SeekFrom};
 use std::mem::{zeroed, size_of};
 use std::slice;
 
@@ -8,6 +8,70 @@ pub struct Symbol<'a> {
     pub start: u64,
     pub end: u64,
     pub name: &'a str,
+}
+
+pub struct Note {
+    header: ElfNoteHeader,
+    pos: u64,
+}
+
+impl Note {
+    fn new(
+        header: ElfNoteHeader,
+        pos: u64) -> Self {
+        Self {
+            header,
+            pos: pos + size_of::<ElfNoteHeader>() as u64,
+        }
+    }
+
+    pub fn note_type(&self) -> u32 { self.header.ntype }
+
+    pub fn length(&self) -> u32 { self.header.desc_len }
+
+    pub fn read_name<'a>(
+        &self,
+        reader: &mut (impl Read + Seek),
+        data: &'a mut Vec<u8>) -> Result<&'a str, Error> {
+        reader.seek(SeekFrom::Start(self.pos))?;
+
+        data.resize(self.header.name_len as usize, 0);
+        reader.read_exact(data)?;
+
+        match std::str::from_utf8(data) {
+            Ok(name) => { Ok(name) },
+            Err(_) => { Err(Error::new(ErrorKind::InvalidData, "Non-UTF8")) },
+        }
+    }
+
+    pub fn read_data(
+        &self,
+        reader: &mut (impl Read + Seek),
+        data: &mut Vec<u8>) -> Result<(), Error> {
+        /* Name is padded to u32 */
+        let name_len = (self.header.name_len + 3) & !3;
+
+        /* Data is after padded name */
+        let pos = self.pos + name_len as u64;
+        reader.seek(SeekFrom::Start(pos))?;
+
+        data.resize(self.header.desc_len as usize, 0);
+        reader.read_exact(data)?;
+
+        Ok(())
+    }
+
+    pub fn read_data_str<'a>(
+        &self,
+        reader: &mut (impl Read + Seek),
+        data: &'a mut Vec<u8>) -> Result<&'a str, Error> {
+        self.read_data(reader, data)?;
+
+        match std::str::from_utf8(data) {
+            Ok(data_str) => { Ok(data_str) },
+            Err(_) => { Err(Error::new(ErrorKind::InvalidData, "Non-UTF8")) },
+        }
+    }
 }
 
 pub struct SectionMetadata {
@@ -443,6 +507,14 @@ impl ElfSymbol32 {
 
 #[repr(C)]
 #[derive(Default)]
+struct ElfNoteHeader {
+    name_len: ElfWord,
+    desc_len: ElfWord,
+    ntype: ElfWord,
+}
+
+#[repr(C)]
+#[derive(Default)]
 struct ElfSymbol64 {
     st_name: ElfWord,
     st_info: u8,
@@ -763,6 +835,31 @@ fn get_section_metadata64(
     Ok(())
 }
 
+pub fn get_notes(
+    reader: &mut (impl Read + Seek),
+    notes: &mut Vec<Note>) -> Result<(), Error> {
+    let mut secs = Vec::new();
+
+    get_section_metadata(reader, None, 0x7, &mut secs)?;
+
+    for sec in secs {
+        let mut note = ElfNoteHeader::default();
+
+        reader.seek(SeekFrom::Start(sec.offset as u64))?;
+
+        unsafe {
+            reader.read_exact(
+                slice::from_raw_parts_mut(
+                    &mut note as *mut _ as *mut u8,
+                    size_of::<ElfNoteHeader>()))?;
+        }
+
+        notes.push(Note::new(note, sec.offset));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -793,5 +890,30 @@ mod tests {
         }).unwrap();
 
         assert!(found);
+    }
+
+    #[test]
+    fn notes() {
+        #[cfg(target_arch = "x86_64")]
+        let path = "/usr/lib/x86_64-linux-gnu/libc.so.6";
+
+        #[cfg(target_arch = "aarch64")]
+        let path = "/usr/lib/aarch64-linux-gnu/libc.so.6";
+
+        let mut file = File::open(path).unwrap();
+
+        let mut notes = Vec::new();
+        get_notes(&mut file, &mut notes).unwrap();
+
+        let mut buf = Vec::new();
+
+        for note in &notes {
+            let name = note.read_name(&mut file, &mut buf).unwrap();
+            println!("Note: Name='{}', Type={}, Length={}", name, note.note_type(), note.length());
+
+            note.read_data(&mut file, &mut buf).unwrap();
+        }
+
+        assert!(!notes.is_empty());
     }
 }
