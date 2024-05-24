@@ -11,7 +11,7 @@ pre-built as well as custom formats.
 
 The pipeline(s) are built from [events](EVENTS.md) that contain the necessary format details to decode the data. When data
 is available for that event, any registered closure is run. The base pipelines expose their key events out, so that other
-pipelines can be built on-top for when needed events fire. This is how the [exporting](one-collect/src/helpers/exporting)
+pipelines can be built on-top for when needed events fire. This is how the [exporting](one_collect/src/helpers/exporting)
 pipeline is composed.
 
 On X64, the framework supports callstack unwinding using live DWARF decoding. The unwinder also understands anonymous code
@@ -28,9 +28,9 @@ If you are simply interested in a common way to consume events and profiling via
 tweaks please use the [CLI](cli) tool directly. It can start event and profiling based sessions and save them into several
 different formats.
 
-If you are planning to integrate event or profiling data into your agent or process, please look at our [examples](one-collect/examples).
+If you are planning to integrate event or profiling data into your agent or process, please look at our [examples](one_collect/examples).
 You have a lot of options how you integrate this data, you can custom process data live via event closures. You can also
-use the pre-built [exporting](one-collect/src/helpers/exporting) mechanisms, such as the ExportMachine and ExportGraph
+use the pre-built [exporting](one_collect/src/helpers/exporting) mechanisms, such as the ExportMachine and ExportGraph
 to combine processes together, deduplicate the samples, and save into a known format with a few lines of Rust. Your
 process chooses if local symbols should be included or not, or if any local symbolic resolution should occur before
 the data is saved. The framework supports many options to suite your needs.
@@ -50,10 +50,10 @@ If you do want to contribute (Thank you!) then please send a pull request with t
 large or changes base pipeline or object functionality, then it might be better to first open an issue so we can discuss
 the general direction.
 
-If you want to contribute a file format to the known set (Awesome!) then please do so by adding a new file under [formats](one-collect/src/helpers/exporting/formats).
+If you want to contribute a file format to the known set (Awesome!) then please do so by adding a new file under [formats](one_collect/src/helpers/exporting/formats).
 If the file format works on a per-process (or per-comm name) please add a trait that extends the ExportGraph struct.
 The trait method should have the name of the format with to_ before it. For example, if the name was perf_view, you
-would add a new trait that has a method name "to_perf_view()". Please see [perf_view](one-collect/src/helpers/exporting/formats/perf_view.rs)
+would add a new trait that has a method name "to_perf_view()". Please see [perf_view](one_collect/src/helpers/exporting/formats/perf_view.rs)
 as an example. If the file format works with many processes, also extend the ExportMachine struct with the same
 method name. If something isn't clear, feel free to open an issue and ask.
 
