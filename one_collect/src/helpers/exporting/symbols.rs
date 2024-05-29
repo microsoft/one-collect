@@ -223,6 +223,12 @@ impl PerfMapSymbolReader {
                         self.end_ip = self.start_ip + size;
                     },
                     _ => {
+                        /*
+                         * Symbols sometimes have nulls in them. When we see
+                         * this we'll just use up to the null as the name.
+                         */
+                        let part = part.split('\0').next().unwrap();
+
                         self.name.push_str(part);
                         if self.name.ends_with("\n") {
                             self.name.pop();
