@@ -1,9 +1,7 @@
 use std::fs::File;
-use std::ffi::CString;
 use std::path::{Path, PathBuf};
-use std::os::unix::ffi::OsStrExt;
-use std::os::fd::{RawFd, FromRawFd, IntoRawFd};
 use crate::intern::InternedCallstacks;
+use crate::openat::OpenAt;
 use super::*;
 
 pub struct ExportProcessSample {
@@ -58,7 +56,7 @@ impl ExportProcessSample {
 pub struct ExportProcess {
     pid: u32,
     comm_id: Option<usize>,
-    root_fs: Option<RawFd>,
+    root_fs: Option<OpenAt>,
     samples: Vec<ExportProcessSample>,
     mappings: Vec<ExportMapping>,
     anon_maps: bool,
@@ -87,7 +85,7 @@ impl ExportProcess {
 
         let root = File::open(path_buf)?;
 
-        self.root_fs = Some(root.into_raw_fd());
+        self.root_fs = Some(OpenAt::new(root));
 
         Ok(())
     }
@@ -95,30 +93,12 @@ impl ExportProcess {
     pub fn open_file(
         &self,
         path: &Path) -> anyhow::Result<File> {
-        match self.root_fs {
+        match &self.root_fs {
             None => {
                 anyhow::bail!("Root fs is not set or had an error.");
             },
-            Some(root_fd) => {
-                let path = CString::new(path.as_os_str().as_bytes())?;
-                let mut path = path.as_bytes_with_nul();
-
-                if path[0] == b'/' {
-                    path = &path[1..]
-                }
-
-                unsafe {
-                    let fd = libc::openat(
-                        root_fd,
-                        path.as_ptr() as *const libc::c_char,
-                        libc::O_RDONLY | libc::O_CLOEXEC);
-
-                    if fd == -1 {
-                        return Err(std::io::Error::last_os_error().into());
-                    }
-
-                    Ok(File::from_raw_fd(fd))
-                }
+            Some(root_fs) => {
+                root_fs.open_file(path)
             }
         }
     }
@@ -277,16 +257,5 @@ impl ExportProcess {
         fork.root_fs = self.root_fs.clone();
 
         fork
-    }
-}
-
-impl Drop for ExportProcess {
-    fn drop(&mut self) {
-        /* Close root_fs, if any */
-        if let Some(fd) = self.root_fs.take() {
-            unsafe {
-                libc::close(fd);
-            }
-        }
     }
 }

@@ -7,6 +7,7 @@ pub mod session;
 pub mod state;
 pub mod helpers;
 pub mod intern;
+pub mod openat;
 
 pub use sharing::{Writable, ReadOnly};
 
