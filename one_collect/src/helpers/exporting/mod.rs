@@ -553,7 +553,13 @@ impl ExportMachine {
                 continue;
             }
 
-            path_buf.push(format!("perf-{}.map", proc.pid()));
+            let ns_pid = proc.ns_pid();
+
+            if ns_pid.is_none() {
+                continue;
+            }
+
+            path_buf.push(format!("perf-{}.map", ns_pid.unwrap()));
             let file = proc.open_file(&path_buf);
             path_buf.pop();
 

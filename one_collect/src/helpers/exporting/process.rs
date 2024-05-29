@@ -2,6 +2,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use crate::intern::InternedCallstacks;
 use crate::openat::OpenAt;
+use crate::procfs;
 use super::*;
 
 pub struct ExportProcessSample {
@@ -55,6 +56,7 @@ impl ExportProcessSample {
 
 pub struct ExportProcess {
     pid: u32,
+    ns_pid: Option<u32>,
     comm_id: Option<usize>,
     root_fs: Option<OpenAt>,
     samples: Vec<ExportProcessSample>,
@@ -66,6 +68,7 @@ impl ExportProcess {
     pub fn new(pid: u32) -> Self {
         Self {
             pid,
+            ns_pid: procfs::ns_pid(pid),
             comm_id: None,
             root_fs: None,
             samples: Vec::new(),
@@ -126,6 +129,8 @@ impl ExportProcess {
     }
 
     pub fn pid(&self) -> u32 { self.pid }
+
+    pub fn ns_pid(&self) -> Option<u32> { self.ns_pid }
 
     pub fn comm_id(&self) -> Option<usize> { self.comm_id }
 
