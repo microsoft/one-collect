@@ -127,8 +127,9 @@ impl<'a> ModuleInfo<'a> {
 }
 
 pub(crate) fn ns_pid(
+    path_buf: &mut PathBuf,
     pid: u32) -> Option<u32> {
-    let mut path_buf = PathBuf::new();
+    path_buf.clear();
     path_buf.push("/proc");
     if pid != 0 {
         path_buf.push_u32(pid);

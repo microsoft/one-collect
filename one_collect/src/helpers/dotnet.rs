@@ -1,7 +1,7 @@
 use std::os::unix::net::UnixStream;
 use std::io::{Read, BufRead, BufReader, Write};
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::collections::{HashSet};
 use std::sync::mpsc::{self, Sender, Receiver};
 use std::sync::{Arc, Mutex};
@@ -152,6 +152,7 @@ impl PerfMapTracker {
         recv: Receiver<u32>,
         arc: ArcPerfMapContexts) {
         let mut pids = HashSet::new();
+        let mut path_buf = PathBuf::new();
 
         loop {
             let pid = match recv.recv() {
@@ -168,7 +169,7 @@ impl PerfMapTracker {
                 continue;
             }
 
-            let nspid = procfs::ns_pid(pid).unwrap_or(pid);
+            let nspid = procfs::ns_pid(&mut path_buf, pid).unwrap_or(pid);
 
             if let Ok(proc) = PerfMapContext::new(pid, nspid) {
                 if let Ok(has_environ) = proc.has_perf_map_environ() {

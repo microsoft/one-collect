@@ -70,13 +70,19 @@ impl ExportProcess {
     pub fn new(pid: u32) -> Self {
         Self {
             pid,
-            ns_pid: procfs::ns_pid(pid),
+            ns_pid: None,
             comm_id: None,
             root_fs: None,
             samples: Vec::new(),
             mappings: Vec::new(),
             anon_maps: false,
         }
+    }
+
+    pub fn add_ns_pid(
+        &mut self,
+        path_buf: &mut PathBuf) {
+        self.ns_pid = procfs::ns_pid(path_buf, self.pid);
     }
 
     pub fn add_root_fs(

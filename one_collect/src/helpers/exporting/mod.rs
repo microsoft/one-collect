@@ -623,18 +623,16 @@ impl ExportMachine {
         &mut self,
         pid: u32,
         comm: &str) -> anyhow::Result<()> {
+        let path_buf = self.path_buf.clone();
         let comm_id = self.intern(comm);
-        let mut path_buf: Option<Writable<PathBuf>> = None;
-
-        if self.settings.process_fs {
-            path_buf = Some(self.path_buf.clone());
-        }
+        let fs = self.settings.process_fs;
 
         let proc = self.process_mut(pid);
 
         proc.set_comm_id(comm_id);
+        proc.add_ns_pid(&mut path_buf.borrow_mut());
 
-        if let Some(path_buf) = path_buf {
+        if fs {
             proc.add_root_fs(&mut path_buf.borrow_mut())?;
         }
 
