@@ -11,6 +11,9 @@ pub mod openat;
 
 pub use sharing::{Writable, ReadOnly};
 
+mod pathbuf_ext;
+use pathbuf_ext::{PathBufInteger};
+
 pub type IOResult<T> = std::io::Result<T>;
 pub type IOError = std::io::Error;
 

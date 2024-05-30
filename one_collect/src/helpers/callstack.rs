@@ -1,8 +1,11 @@
 use std::fs::File;
+use std::path::PathBuf;
 use std::os::fd::{FromRawFd, IntoRawFd, RawFd};
 use std::ops::DerefMut;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry::{self, Vacant};
+
+use crate::PathBufInteger;
 use crate::perf_event::*;
 use crate::event::DataFieldRef;
 use crate::Writable;
@@ -53,7 +56,7 @@ struct MachineState {
     callchain_field: DataFieldRef,
     regs_user_field: DataFieldRef,
     stack_user_field: DataFieldRef,
-    path: String,
+    path: PathBuf,
     unwinder: Option<Box<dyn MachineUnwinder>>,
 }
 
@@ -69,7 +72,7 @@ impl MachineState {
             callchain_field: empty.clone(),
             regs_user_field: empty.clone(),
             stack_user_field: empty.clone(),
-            path: String::new(),
+            path: PathBuf::new(),
             unwinder: None,
         }
     }
@@ -118,10 +121,10 @@ impl MachineState {
             if let Vacant(entry) = self.modules.entry(key) {
                 /* Try to open and keep a single FD for that file */
                 self.path.clear();
-                self.path.push_str("/proc/");
-                self.path.push_str(&pid.to_string());
-                self.path.push_str("/root");
-                self.path.push_str(filename);
+                self.path.push("/proc");
+                self.path.push_u32(pid);
+                self.path.push("root");
+                self.path.push(filename);
 
                 /* Only insert if we can actually open it */
                 if let Ok(file) = std::fs::File::open(&self.path) {

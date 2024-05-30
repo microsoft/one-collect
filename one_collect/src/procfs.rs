@@ -3,6 +3,8 @@ use std::fs::{self, File};
 use std::path::{self, PathBuf};
 use std::io::{BufRead, BufReader};
 
+use crate::PathBufInteger;
+
 pub(crate) fn get_comm(
     path: &mut path::PathBuf) -> Option<String> {
     path.push("comm");
@@ -129,7 +131,7 @@ pub(crate) fn ns_pid(
     let mut path_buf = PathBuf::new();
     path_buf.push("/proc");
     if pid != 0 {
-        path_buf.push(pid.to_string());
+        path_buf.push_u32(pid);
     } else {
         path_buf.push("self");
     }
@@ -156,7 +158,7 @@ pub(crate) fn iter_proc_modules(
     let mut path_buf = PathBuf::new();
     path_buf.push("/proc");
     if pid != 0 {
-        path_buf.push(pid.to_string());
+        path_buf.push_u32(pid);
     } else {
         path_buf.push("self");
     }

@@ -1,5 +1,7 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
+
+use crate::PathBufInteger;
 use crate::intern::InternedCallstacks;
 use crate::openat::OpenAt;
 use crate::procfs;
@@ -82,7 +84,7 @@ impl ExportProcess {
         path_buf: &mut PathBuf) -> anyhow::Result<()> {
         path_buf.clear();
         path_buf.push("/proc");
-        path_buf.push(self.pid.to_string());
+        path_buf.push_u32(self.pid);
         path_buf.push("root");
         path_buf.push(".");
 
