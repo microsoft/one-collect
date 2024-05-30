@@ -72,8 +72,11 @@ impl PerfViewXmlFormat for ExportGraph {
                 name.push_str(&format!("0x{:x}", frame.address()));
             }
 
-            if name.contains("<") || name.contains(">") {
-                name = name.replace("<", "&lt;").replace(">", "&gt;");
+            if name.contains("<") || name.contains(">") || name.contains("&") {
+                name = name
+                    .replace("&", "&amp;")
+                    .replace("<", "&lt;")
+                    .replace(">", "&gt;");
             }
 
             write!(writer, "<Frame ID=\"{}\">{}</Frame>\n", id, name)?;
