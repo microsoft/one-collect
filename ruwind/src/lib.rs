@@ -10,6 +10,22 @@ mod module;
 mod process;
 mod machine;
 
+pub trait Unwindable {
+    fn find<'a>(
+        &'a self,
+        ip: u64) -> Option<&'a dyn CodeSection>;
+}
+
+pub trait CodeSection {
+    fn anon(&self) -> bool;
+
+    fn rva(
+        &self,
+        ip: u64) -> u64;
+
+    fn key(&self) -> ModuleKey;
+}
+
 #[derive(Eq, Copy)]
 pub struct ModuleKey {
     pub dev: u64,
@@ -54,7 +70,7 @@ pub trait MachineUnwinder {
 
     fn unwind(
         &mut self,
-        process: &Process,
+        process: &dyn Unwindable,
         accessor: &dyn ModuleAccessor,
         stack_data: &[u8],
         stack_frames: &mut Vec<u64>,

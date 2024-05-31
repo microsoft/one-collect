@@ -28,6 +28,18 @@ impl PartialEq for ModuleKey {
     }
 }
 
+impl CodeSection for Module {
+    fn anon(&self) -> bool { self.anon }
+
+    fn rva(
+        &self,
+        ip: u64) -> u64 {
+        (ip - self.start) + self.offset
+    }
+
+    fn key(&self) -> ModuleKey { self.key }
+}
+
 impl Module {
     pub fn new(
         start: u64,
