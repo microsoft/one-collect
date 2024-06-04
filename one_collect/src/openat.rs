@@ -5,6 +5,26 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::fd::{RawFd, FromRawFd, IntoRawFd};
 
 #[derive(Clone)]
+pub struct DupFd {
+    fd: RawFd,
+}
+
+impl DupFd {
+    pub fn new(file: File) -> Self {
+        Self {
+            fd: file.into_raw_fd()
+        }
+    }
+
+    pub fn open(&self) -> File {
+        unsafe {
+            let cloned_fd = libc::dup(self.fd);
+            File::from_raw_fd(cloned_fd)
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct OpenAt {
     fd: RawFd,
 }
