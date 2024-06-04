@@ -10,6 +10,30 @@ impl ModuleKey {
             ino,
         }
     }
+
+    pub fn from_parts(
+        dev_maj: u32,
+        dev_min: u32,
+        ino: u64) -> Self {
+        Self {
+            dev: (dev_maj as u64) << 8 | dev_min as u64,
+            ino,
+        }
+    }
+
+    pub fn dev(&self) -> u64 { self.dev }
+    pub fn ino(&self) -> u64 { self.ino }
+}
+
+impl From<&std::fs::Metadata> for ModuleKey {
+    fn from(meta: &std::fs::Metadata) -> Self {
+        use std::os::linux::fs::MetadataExt;
+
+        Self {
+            dev: meta.st_dev(),
+            ino: meta.st_ino(),
+        }
+    }
 }
 
 impl Clone for ModuleKey {
