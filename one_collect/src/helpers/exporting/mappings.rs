@@ -1,3 +1,7 @@
+use std::cmp::Ordering;
+
+use ruwind::{CodeSection, ModuleKey};
+
 use super::*;
 
 #[derive(Clone)]
@@ -10,6 +14,51 @@ pub struct ExportMapping {
     id: usize,
     node: Option<ExportDevNode>,
     symbols: Vec<ExportSymbol>,
+}
+
+impl Ord for ExportMapping {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.start.cmp(&other.start)
+    }
+}
+
+impl PartialOrd for ExportMapping {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for ExportMapping {
+    fn eq(&self, other: &Self) -> bool {
+        self.start == other.start
+    }
+}
+
+impl Eq for ExportMapping {}
+
+impl CodeSection for ExportMapping {
+    fn anon(&self) -> bool { self.anon }
+
+    fn rva(
+        &self,
+        ip: u64) -> u64 {
+        (ip - self.start) + self.file_offset
+    }
+
+    fn key(&self) -> ModuleKey {
+        match &self.node {
+            Some(node) => {
+                ModuleKey::new(
+                    node.dev(),
+                    node.ino())
+            },
+            None => {
+                ModuleKey::new(
+                    0,
+                    0)
+            }
+        }
+    }
 }
 
 impl ExportMapping {

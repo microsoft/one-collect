@@ -1,18 +1,24 @@
 use std::collections::{HashMap, HashSet};
-use std::collections::hash_map::{Values, ValuesMut};
-use std::collections::hash_map::Entry::Occupied;
-use std::path::PathBuf;
+use std::collections::hash_map::{Values, ValuesMut, Entry};
+use std::collections::hash_map::Entry::{Vacant, Occupied};
+use std::path::{Path, PathBuf};
+use std::fs::File;
 
 use crate::{ReadOnly, Writable};
+use crate::openat::DupFd;
 use crate::event::{Event, EventFormat, DataFieldRef};
 use crate::perf_event::{AncillaryData, PerfSession};
 use crate::intern::{InternedStrings, InternedCallstacks};
-use crate::helpers::callstack::CallstackReader;
+use crate::helpers::callstack::{CallstackHelp, CallstackHelper, CallstackReader};
 use crate::perf_event::{RingBufSessionBuilder, RingBufBuilder};
 use crate::perf_event::abi::PERF_RECORD_MISC_SWITCH_OUT;
 
+use ruwind::ModuleAccessor;
+
 const KERNEL_START:u64 = 0x800000000000;
 const KERNEL_END:u64 = 0xFFFFFFFFFFFFFFFF;
+
+pub type ExportDevNode = ruwind::ModuleKey;
 
 pub mod graph;
 pub mod formats;
@@ -43,36 +49,44 @@ struct ExportCSwitch {
     sample: Option<ExportProcessSample>,
 }
 
-#[derive(Clone, PartialEq)]
-pub struct ExportDevNode {
-    dev: u64,
-    ino: u64,
+struct ExportDevNodeLookup {
+    fds: HashMap<ExportDevNode, DupFd>,
 }
 
-impl ExportDevNode {
-    fn new(
-        dev_maj: u32,
-        dev_min: u32,
-        ino: u64) -> Self {
+impl ExportDevNodeLookup {
+    pub fn new() -> Self {
         Self {
-            dev: (dev_maj as u64) << 8 | dev_min as u64,
-            ino,
+            fds: HashMap::new(),
         }
     }
 
-    pub fn dev(&self) -> u64 { self.dev }
+    fn contains(
+        &self,
+        key: &ExportDevNode) -> bool {
+        self.fds.contains_key(key)
+    }
 
-    pub fn ino(&self) -> u64 { self.ino }
+    fn entry(
+        &mut self,
+        key: ExportDevNode) -> Entry<'_, ExportDevNode, DupFd> {
+        self.fds.entry(key)
+    }
+
+    pub fn open(
+        &self,
+        node: &ExportDevNode) -> Option<File> {
+        match self.fds.get(node) {
+            Some(fd) => { Some(fd.open()) },
+            None => { None },
+        }
+    }
 }
 
-impl From<&std::fs::Metadata> for ExportDevNode {
-    fn from(meta: &std::fs::Metadata) -> Self {
-        use std::os::linux::fs::MetadataExt;
-
-        Self {
-            dev: meta.st_dev(),
-            ino: meta.st_ino(),
-        }
+impl ModuleAccessor for ExportDevNodeLookup {
+    fn open(
+        &self,
+        key: &ExportDevNode) -> Option<File> {
+        self.open(key)
     }
 }
 
@@ -325,11 +339,14 @@ pub struct ExportSettings {
     cpu_freq: u64,
     process_fs: bool,
     cswitches: bool,
+    callstack_helper: Option<CallstackHelper>,
     events: Option<Vec<ExportEventCallback>>,
 }
 
 impl ExportSettings {
-    pub fn new() -> Self {
+    pub fn new(callstack_helper: CallstackHelper) -> Self {
+        let mut callstack_helper = callstack_helper;
+
         Self {
             string_buckets: 64,
             callstack_buckets: 512,
@@ -337,6 +354,7 @@ impl ExportSettings {
             cpu_freq: 1000,
             process_fs: true,
             cswitches: true,
+            callstack_helper: Some(callstack_helper.with_external_lookup()),
             events: None,
         }
     }
@@ -409,6 +427,7 @@ pub struct ExportMachine {
     settings: ExportSettings,
     strings: InternedStrings,
     callstacks: InternedCallstacks,
+    dev_nodes: ExportDevNodeLookup,
     procs: HashMap<u32, ExportProcess>,
     cswitches: HashMap<u32, ExportCSwitch>,
     path_buf: Writable<PathBuf>,
@@ -417,6 +436,8 @@ pub struct ExportMachine {
 }
 
 pub type CommMap = HashMap<Option<usize>, Vec<u32>>;
+
+const NO_FRAMES: [u64; 1] = [0; 1];
 
 impl ExportMachine {
     pub fn new(settings: ExportSettings) -> Self {
@@ -427,6 +448,7 @@ impl ExportMachine {
             settings,
             strings,
             callstacks,
+            dev_nodes: ExportDevNodeLookup::new(),
             procs: HashMap::new(),
             cswitches: HashMap::new(),
             path_buf: Writable::new(PathBuf::new()),
@@ -594,9 +616,10 @@ impl ExportMachine {
         min: u32,
         ino: u64,
         filename: &str) -> anyhow::Result<()> {
-        let anon = filename.starts_with('[') ||
-           filename.starts_with("/memfd:") ||
-           filename.starts_with("//anon");
+        let anon = filename.is_empty() ||
+            filename.starts_with('[') ||
+            filename.starts_with("/memfd:") ||
+            filename.starts_with("//anon");
 
         let mut mapping = ExportMapping::new(
             self.intern(filename),
@@ -607,9 +630,19 @@ impl ExportMachine {
             self.map_index);
 
         if !anon {
-            let node = ExportDevNode::new(maj, min, ino);
+            let node = ExportDevNode::from_parts(maj, min, ino);
 
             mapping.set_node(node);
+
+            if !self.dev_nodes.contains(&node) {
+                if let Some(process) = self.find_process(pid) {
+                    if let Ok(file) = process.open_file(Path::new(filename)) {
+                        if let Vacant(entry) = self.dev_nodes.entry(node) {
+                            entry.insert(DupFd::new(file));
+                        }
+                    }
+                }
+            }
         }
 
         self.map_index += 1;
@@ -657,6 +690,12 @@ impl ExportMachine {
         cpu: u16,
         kind: u16,
         frames: &[u64]) -> ExportProcessSample {
+        let mut frames = frames;
+
+        if frames.is_empty() {
+            frames = &NO_FRAMES;
+        }
+
         let ip = frames[0];
         let callstack_id = self.callstacks.to_id(&frames[1..]);
 
@@ -694,13 +733,30 @@ impl ExportMachine {
 
     pub fn hook_to_session(
         mut self,
-        session: &mut PerfSession,
-        callstack_reader: CallstackReader) -> anyhow::Result<Writable<ExportMachine>> {
+        session: &mut PerfSession) -> anyhow::Result<Writable<ExportMachine>> {
         let cpu_profiling = self.settings.cpu_profiling;
         let cswitches = self.settings.cswitches;
         let events = self.settings.events.take();
 
+        let callstack_reader = match self.settings.callstack_helper.take() {
+            Some(callstack_helper) => { callstack_helper.to_reader() },
+            None => { anyhow::bail!("No callstack reader specified."); }
+        };
+
         let machine = Writable::new(self);
+
+        let callstack_machine = machine.clone();
+
+        let callstack_reader = callstack_reader.with_unwind(
+            move |request| {
+                let machine = callstack_machine.borrow_mut();
+
+                if let Some(process) = machine.find_process(request.pid()) {
+                    request.unwind_process(
+                        process,
+                        &machine.dev_nodes);
+                }
+            });
 
         if let Some(events) = events {
             let shared_sampler = Writable::new(
@@ -766,7 +822,6 @@ impl ExportMachine {
             let mut frames: Vec<u64> = Vec::new();
 
             event.add_callback(move |full_data,_fmt,_data| {
-                let mut machine = event_machine.borrow_mut();
                 let ancillary = ancillary.borrow();
 
                 let cpu = ancillary.cpu() as u16;
@@ -780,7 +835,7 @@ impl ExportMachine {
                     full_data,
                     &mut frames);
 
-                machine.add_sample(
+                event_machine.borrow_mut().add_sample(
                     time,
                     1,
                     pid,
@@ -807,7 +862,6 @@ impl ExportMachine {
             let mut frames: Vec<u64> = Vec::new();
 
             event.add_callback(move |full_data,_fmt,_data| {
-                let mut machine = event_machine.borrow_mut();
                 let ancillary = ancillary.borrow();
 
                 let cpu = ancillary.cpu() as u16;
@@ -825,6 +879,8 @@ impl ExportMachine {
                 reader.read_frames(
                     full_data,
                     &mut frames);
+
+                let mut machine = event_machine.borrow_mut();
 
                 let sample = machine.make_sample(
                     time,
@@ -850,8 +906,6 @@ impl ExportMachine {
             let event_machine = machine.clone();
 
             event.add_callback(move |full_data,_fmt,_data| {
-                let mut machine = event_machine.borrow_mut();
-
                 let misc = misc_field.get_u16(full_data)?;
                 let time = time_field.get_u64(full_data)?;
                 let pid = pid_field.get_u32(full_data)?;
@@ -861,6 +915,8 @@ impl ExportMachine {
                 if pid == 0 || tid == 0 {
                     return Ok(());
                 }
+
+                let mut machine = event_machine.borrow_mut();
 
                 match machine.cswitches.entry(tid) {
                     Occupied(mut entry) => {
@@ -1026,27 +1082,31 @@ impl ExportBuilderHelp for RingBufSessionBuilder {
             builder = builder.with_tracepoint_events(tracepoint);
         }
 
-        builder.with_kernel_events(kernel)
+        builder = builder.with_kernel_events(kernel);
+
+        match &settings.callstack_helper {
+            Some(callstack_helper) => {
+                builder.with_callstack_help(callstack_helper)
+            },
+            None => { builder },
+        }
+
     }
 }
 
 pub trait ExportSessionHelp {
     fn build_exporter(
         &mut self,
-        settings: ExportSettings,
-        reader: CallstackReader) -> anyhow::Result<Writable<ExportMachine>>;
+        settings: ExportSettings) -> anyhow::Result<Writable<ExportMachine>>;
 }
 
 impl ExportSessionHelp for PerfSession {
     fn build_exporter(
         &mut self,
-        settings: ExportSettings,
-        reader: CallstackReader) -> anyhow::Result<Writable<ExportMachine>> {
+        settings: ExportSettings) -> anyhow::Result<Writable<ExportMachine>> {
         let exporter = ExportMachine::new(settings);
 
-        exporter.hook_to_session(
-            self,
-            reader)
+        exporter.hook_to_session(self)
     }
 }
 
@@ -1057,7 +1117,7 @@ mod tests {
     use std::os::linux::fs::MetadataExt;
 
     use crate::tracefs::TraceFS;
-    use crate::helpers::callstack::{CallstackHelper, CallstackHelp};
+    use crate::helpers::callstack::CallstackHelper;
 
     #[test]
     #[ignore]
@@ -1065,7 +1125,7 @@ mod tests {
         let helper = CallstackHelper::new()
             .with_dwarf_unwinding();
 
-        let mut settings = ExportSettings::new();
+        let mut settings = ExportSettings::new(helper);
 
         /* Hookup page_fault as a new event sample */
         let tracefs = TraceFS::open().unwrap();
@@ -1098,14 +1158,11 @@ mod tests {
 
         let mut builder = RingBufSessionBuilder::new()
             .with_page_count(256)
-            .with_exporter_events(&settings)
-            .with_callstack_help(&helper);
+            .with_exporter_events(&settings);
 
         let mut session = builder.build().unwrap();
 
-        let exporter = session.build_exporter(
-            settings,
-            helper.to_reader()).unwrap();
+        let exporter = session.build_exporter(settings).unwrap();
 
         let duration = std::time::Duration::from_secs(1);
 

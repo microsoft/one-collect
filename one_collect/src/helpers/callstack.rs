@@ -250,6 +250,13 @@ pub struct CallstackReader {
 }
 
 impl CallstackReader {
+    pub fn with_unwind(
+        self,
+        unwind: impl FnMut(&mut UnwindRequest) + 'static) -> Self {
+        self.state.borrow_mut().set_unwind(unwind);
+        self
+    }
+
     pub fn read_frames(
         &self,
         full_data: &[u8],

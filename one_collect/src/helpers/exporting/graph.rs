@@ -316,8 +316,10 @@ mod tests {
 
     #[test]
     fn it_works() {
+        let callstacks = CallstackHelper::new();
+
         /* Ignore process FS to avoid permissions, etc */
-        let settings = ExportSettings::new()
+        let settings = ExportSettings::new(callstacks)
             .without_process_fs();
 
         let mut exporter = ExportMachine::new(settings);
