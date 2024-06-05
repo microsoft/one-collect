@@ -8,6 +8,7 @@ use super::*;
 use crate::sharing::*;
 use crate::event::*;
 use crate::state::*;
+use crate::PathBufInteger;
 
 pub mod abi;
 pub mod rb;
@@ -327,7 +328,7 @@ impl PerfSession {
 
                     // Check procfs if proc_name is 15 chars (length limit of comm_event).
                     if proc_name.len() == 15 {
-                        path_buf.push(pid.to_string());
+                        path_buf.push_u32(pid);
                         if let Some(proc_name) = procfs::get_comm(&mut path_buf) {
                             use_procfs = true;
                             proc.set_name(proc_name.as_str());
