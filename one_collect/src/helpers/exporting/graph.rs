@@ -113,6 +113,23 @@ impl ExportGraph {
         id
     }
 
+    fn charge(
+        &mut self,
+        parent_id: usize,
+        value: u64) {
+        let mut id = self.nodes[parent_id].parent_id;
+
+        loop {
+            self.nodes[id].total += value;
+
+            if id == 0 {
+                break;
+            }
+
+            id = self.nodes[id].parent_id;
+        }
+    }
+
     fn merge(
         &mut self,
         parent_id: usize,
@@ -253,7 +270,12 @@ impl ExportGraph {
             let id = match callstack_id_to_node.entry(callstack_id) {
                 Occupied(entry) => {
                     /* Already imported */
-                    *entry.get()
+                    let id = *entry.get();
+
+                    /* Add value to node children */
+                    self.charge(id, value);
+
+                    id
                 },
                 Vacant(entry) => {
                     /* Need to import and merge */
