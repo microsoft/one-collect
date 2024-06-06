@@ -129,6 +129,9 @@ impl KernelSymbolReader {
 
 impl ExportSymbolReader for KernelSymbolReader {
     fn reset(&mut self) {
+        self.current_ip = 0;
+        self.next_ip = None;
+
         if let Some(reader) = &mut self.reader {
             if reader.seek(SeekFrom::Start(0)).is_ok() {
                 self.done = false;

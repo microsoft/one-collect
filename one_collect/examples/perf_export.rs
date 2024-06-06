@@ -79,6 +79,7 @@ fn main() {
     let cpu = exporter.find_sample_kind("cpu").expect("CPU sample kind should be known.");
 
     let mut graph = ExportGraph::new();
+    let mut buf: String;
 
     for (comm_id, pids) in comm_map {
         match comm_id {
@@ -113,7 +114,14 @@ fn main() {
 
                 /* Merge by name */
                 let comm = match exporter.strings().from_id(comm_id) {
-                    Ok(comm) => { comm },
+                    Ok(comm) => {
+                        if comm.contains(":") || comm.contains("/") {
+                            buf = comm.replace(":", "_").replace("/", "_");
+                            &buf
+                        } else {
+                            comm
+                        }
+                    },
                     Err(_) => { "Unknown" },
                 };
 
