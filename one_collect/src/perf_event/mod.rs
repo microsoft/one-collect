@@ -1,3 +1,5 @@
+use std::fs::File;
+use std::os::fd::FromRawFd;
 use std::path::PathBuf;
 use std::time::Duration;
 use std::array::TryFromSliceError;
@@ -13,6 +15,7 @@ use crate::PathBufInteger;
 pub mod abi;
 pub mod rb;
 mod events;
+mod bpf;
 
 use abi::*;
 
@@ -211,6 +214,9 @@ pub struct PerfSession {
     cswitch_event: Event,
     drop_event: Event,
 
+    /* BPF */
+    bpf_map_files: Vec<File>,
+
     /* Ancillary data */
     ancillary: Writable<AncillaryData>,
 
@@ -262,6 +268,9 @@ impl PerfSession {
             branch_stack_field: DataFieldRef::new(),
             regs_user_field: DataFieldRef::new(),
             stack_user_field: DataFieldRef::new(),
+
+            /* BPF */
+            bpf_map_files: Vec::new(),
 
             /* Options */
             read_timeout: Duration::from_millis(15),
@@ -521,6 +530,66 @@ impl PerfSession {
 
     pub fn create_bpf_fds(&mut self) -> IOResult<Vec<i32>> {
         self.source.create_bpf_fds()
+    }
+
+    pub fn attach_to_bpf_map_path(
+        &mut self,
+        path: &str) -> IOResult<()> {
+        let path = std::ffi::CString::new(path)?;
+
+        let fd = bpf::bpf_get_map_fd_by_path(&path)?;
+
+        self.attach_to_bpf_map_fd(fd)
+    }
+
+    pub fn attach_to_bpf_map_id(
+        &mut self,
+        id: u32) -> IOResult<()> {
+        let fd = bpf::bpf_get_map_fd(id)?;
+
+        self.attach_to_bpf_map_fd(fd)
+    }
+
+    pub fn attach_to_bpf_map_fd(
+        &mut self,
+        fd: i32) -> IOResult<()> {
+        let bpf_fds = match self.create_bpf_fds() {
+            Ok(bpf_fds) => { bpf_fds },
+            Err(err) => {
+                /* Close FD, no BPF programs */
+                unsafe {
+                    libc::close(fd);
+                }
+
+                return Err(err);
+            }
+        };
+
+        for (i, perf_fd) in bpf_fds.iter().enumerate() {
+            match bpf::bpf_set_map_element(
+                fd,
+                i as u64,
+                (*perf_fd) as u64) {
+                Ok(()) => {
+                    /* Take ownership of FD */
+                    let file = unsafe {
+                        File::from_raw_fd(fd)
+                    };
+
+                    self.bpf_map_files.push(file);
+                },
+                Err(err) => {
+                    /* Close FD on error */
+                    unsafe {
+                        libc::close(fd);
+                    }
+
+                    return Err(err);
+                }
+            }
+        }
+
+        Ok(())
     }
 
     pub fn add_event(
