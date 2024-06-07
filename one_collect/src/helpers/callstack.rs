@@ -467,6 +467,12 @@ impl CallstackHelp for RingBufSessionBuilder {
                             .with_ip());
                     }
 
+                    if let Some(bpf) = builder.take_bpf_events() {
+                        builder.replace_bpf_events(
+                            bpf
+                            .with_ip());
+                    }
+
                     return;
                 }
 
@@ -487,6 +493,12 @@ impl CallstackHelp for RingBufSessionBuilder {
                     if let Some(cswitch) = builder.take_cswitch_events() {
                         builder.replace_cswitch_events(
                             cswitch
+                            .with_callchain_data());
+                    }
+
+                    if let Some(bpf) = builder.take_bpf_events() {
+                        builder.replace_bpf_events(
+                            bpf
                             .with_callchain_data());
                     }
 
@@ -534,6 +546,18 @@ impl CallstackHelp for RingBufSessionBuilder {
                 if let Some(cswitch) = builder.take_cswitch_events() {
                     builder.replace_cswitch_events(
                         cswitch
+                        .with_callchain_data()
+                        .without_user_callchain_data()
+                        .with_user_regs_data(
+                            abi::PERF_REG_BP |
+                            abi::PERF_REG_SP |
+                            abi::PERF_REG_IP)
+                        .with_user_stack_data(stack_size));
+                }
+
+                if let Some(bpf) = builder.take_bpf_events() {
+                    builder.replace_bpf_events(
+                        bpf
                         .with_callchain_data()
                         .without_user_callchain_data()
                         .with_user_regs_data(
