@@ -95,7 +95,7 @@ impl Unwinder {
 
     fn unwind_prolog(
         &mut self,
-        process: &Process,
+        process: &dyn Unwindable,
         stack_data: &[u8],
         result: &mut UnwindResult) -> Option<u64> {
 
@@ -273,13 +273,13 @@ impl MachineUnwinder for Unwinder {
 
     fn unwind(
         &mut self,
-        process: &Process,
+        process: &dyn Unwindable,
         accessor: &dyn ModuleAccessor,
         stack_data: &[u8],
         stack_frames: &mut Vec<u64>,
         result: &mut UnwindResult) {
         while let Some(module) = process.find(self.rip) {
-            let ip = if module.anon {
+            let ip = if module.anon() {
                 /* Anonymous code, no DWARF */
                 self.unwind_prolog(
                     process,
@@ -287,10 +287,10 @@ impl MachineUnwinder for Unwinder {
                     result)
             } else {
                 /* File backed code, use DWARF */
-                let rva = (self.rip - module.start) + module.offset;
+                let rva = module.rva(self.rip);
 
                 self.unwind_module(
-                    &module.key,
+                    &module.key(),
                     accessor,
                     rva,
                     stack_data,

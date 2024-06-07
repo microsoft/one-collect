@@ -113,6 +113,23 @@ impl ExportGraph {
         id
     }
 
+    fn charge(
+        &mut self,
+        parent_id: usize,
+        value: u64) {
+        let mut id = self.nodes[parent_id].parent_id;
+
+        loop {
+            self.nodes[id].total += value;
+
+            if id == 0 {
+                break;
+            }
+
+            id = self.nodes[id].parent_id;
+        }
+    }
+
     fn merge(
         &mut self,
         parent_id: usize,
@@ -175,8 +192,12 @@ impl ExportGraph {
 
                 /* Calc file address, unless anonymous */
                 if !mapping.anon() {
-                    target.address = ip - mapping.start();
-                    target.address += mapping.file_offset();
+                    if ip > KERNEL_START {
+                        target.address = ip;
+                    } else {
+                        target.address = ip - mapping.start();
+                        target.address += mapping.file_offset();
+                    }
                 }
 
                 /* Symbol lookup, if any */
@@ -253,7 +274,12 @@ impl ExportGraph {
             let id = match callstack_id_to_node.entry(callstack_id) {
                 Occupied(entry) => {
                     /* Already imported */
-                    *entry.get()
+                    let id = *entry.get();
+
+                    /* Add value to node children */
+                    self.charge(id, value);
+
+                    id
                 },
                 Vacant(entry) => {
                     /* Need to import and merge */
@@ -316,8 +342,10 @@ mod tests {
 
     #[test]
     fn it_works() {
+        let callstacks = CallstackHelper::new();
+
         /* Ignore process FS to avoid permissions, etc */
-        let settings = ExportSettings::new()
+        let settings = ExportSettings::new(callstacks)
             .without_process_fs();
 
         let mut exporter = ExportMachine::new(settings);

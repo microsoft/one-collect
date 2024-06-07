@@ -5,6 +5,9 @@ use crate::PathBufInteger;
 use crate::intern::InternedCallstacks;
 use crate::openat::OpenAt;
 use crate::procfs;
+
+use ruwind::{CodeSection, Unwindable};
+
 use super::*;
 
 pub struct ExportProcessSample {
@@ -66,6 +69,14 @@ pub struct ExportProcess {
     anon_maps: bool,
 }
 
+impl Unwindable for ExportProcess {
+    fn find<'a>(
+        &'a self,
+        ip: u64) -> Option<&'a dyn CodeSection> {
+        self.find_section(ip)
+    }
+}
+
 impl ExportProcess {
     pub fn new(pid: u32) -> Self {
         Self {
@@ -77,6 +88,28 @@ impl ExportProcess {
             mappings: Vec::new(),
             anon_maps: false,
         }
+    }
+
+    fn find_section(
+        &self,
+        ip: u64) -> Option<&dyn CodeSection> {
+        if self.mappings.is_empty() {
+            return None;
+        }
+
+        let mut index = self.mappings.partition_point(
+            |map| map.start() <= ip );
+
+        index = index.saturating_sub(1);
+
+        let map = &self.mappings[index];
+
+        if map.start() <= ip &&
+           map.end() >= ip {
+            return Some(map);
+        }
+
+        None
     }
 
     pub fn add_ns_pid(
@@ -122,6 +155,7 @@ impl ExportProcess {
         }
 
         self.mappings.push(mapping);
+        self.mappings.sort();
     }
 
     pub fn add_sample(
@@ -270,5 +304,61 @@ impl ExportProcess {
         fork.root_fs = self.root_fs.clone();
 
         fork
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn new_mapping(
+        start: u64,
+        end: u64,
+        id: usize) -> ExportMapping {
+        let mut map = ExportMapping::new(0, start, end, 0, false, id);
+        map.set_node(ExportDevNode::from_parts(0, 0, id as u64));
+        map
+    }
+
+    #[test]
+    fn find_section() {
+        let mut proc = ExportProcess::new(1);
+        proc.add_mapping(new_mapping(0, 1023, 1));
+        proc.add_mapping(new_mapping(1024, 2047, 2));
+        proc.add_mapping(new_mapping(2048, 3071, 3));
+
+        /* Find should work properly */
+        let found = proc.find_section(0);
+        assert!(found.is_some());
+        let found = found.unwrap();
+        assert_eq!(1, found.key().ino);
+
+        let found = proc.find_section(512);
+        assert!(found.is_some());
+        let found = found.unwrap();
+        assert_eq!(1, found.key().ino);
+
+        let found = proc.find_section(1024);
+        assert!(found.is_some());
+        let found = found.unwrap();
+        assert_eq!(2, found.key().ino);
+
+        let found = proc.find_section(2000);
+        assert!(found.is_some());
+        let found = found.unwrap();
+        assert_eq!(2, found.key().ino);
+
+        let found = proc.find_section(2048);
+        assert!(found.is_some());
+        let found = found.unwrap();
+        assert_eq!(3, found.key().ino);
+
+        let found = proc.find_section(3071);
+        assert!(found.is_some());
+        let found = found.unwrap();
+        assert_eq!(3, found.key().ino);
+
+        /* Outside all should find none */
+        assert!(proc.find_section(3072).is_none());
     }
 }

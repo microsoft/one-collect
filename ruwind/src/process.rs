@@ -1,5 +1,13 @@
 use super::*;
 
+impl Unwindable for Process {
+    fn find<'a>(
+        &'a self,
+        ip: u64) -> Option<&'a dyn CodeSection> {
+        self.find(ip)
+    }
+}
+
 impl Process {
     pub fn new() -> Self { Self::default() }
 
@@ -30,7 +38,7 @@ impl Process {
 
     pub fn find(
         &self,
-        ip: u64) -> Option<&Module> {
+        ip: u64) -> Option<&dyn CodeSection> {
         if self.mods.is_empty() {
             return None;
         }
@@ -76,24 +84,24 @@ mod tests {
 
         /* First module case */
         let found = proc.find(1).unwrap();
-        assert!(found.key.dev == 1);
+        assert!(found.key().dev == 1);
 
         let found = proc.find(1024).unwrap();
-        assert!(found.key.dev == 1);
+        assert!(found.key().dev == 1);
 
         /* Second module case */
         let found = proc.find(1025).unwrap();
-        assert!(found.key.dev == 2);
+        assert!(found.key().dev == 2);
 
         let found = proc.find(2048).unwrap();
-        assert!(found.key.dev == 2);
+        assert!(found.key().dev == 2);
 
         /* Third module case */
         let found = proc.find(2049).unwrap();
-        assert!(found.key.dev == 3);
+        assert!(found.key().dev == 3);
 
         let found = proc.find(3072).unwrap();
-        assert!(found.key.dev == 3);
+        assert!(found.key().dev == 3);
 
         /* Entirely out of bounds (End) */
         match proc.find(3073) {

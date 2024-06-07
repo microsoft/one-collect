@@ -24,7 +24,7 @@ fn main() {
     let helper = CallstackHelper::new()
         .with_dwarf_unwinding();
 
-    let settings = ExportSettings::new()
+    let settings = ExportSettings::new(helper)
         .without_cswitches();
 
     let mut dotnet = DotNetHelper::new()
@@ -33,14 +33,11 @@ fn main() {
     let mut builder = RingBufSessionBuilder::new()
         .with_page_count(256)
         .with_exporter_events(&settings)
-        .with_callstack_help(&helper)
         .with_dotnet_help(&mut dotnet);
 
     let mut session = builder.build().unwrap();
 
-    let exporter = session.build_exporter(
-        settings,
-        helper.to_reader()).unwrap();
+    let exporter = session.build_exporter(settings).unwrap();
 
     session.lost_event().add_callback(|_,_,_| {
         println!("WARN: Lost event data");
@@ -82,6 +79,7 @@ fn main() {
     let cpu = exporter.find_sample_kind("cpu").expect("CPU sample kind should be known.");
 
     let mut graph = ExportGraph::new();
+    let mut buf: String;
 
     for (comm_id, pids) in comm_map {
         match comm_id {
@@ -116,7 +114,14 @@ fn main() {
 
                 /* Merge by name */
                 let comm = match exporter.strings().from_id(comm_id) {
-                    Ok(comm) => { comm },
+                    Ok(comm) => {
+                        if comm.contains(":") || comm.contains("/") {
+                            buf = comm.replace(":", "_").replace("/", "_");
+                            &buf
+                        } else {
+                            comm
+                        }
+                    },
                     Err(_) => { "Unknown" },
                 };
 

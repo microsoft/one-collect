@@ -58,6 +58,7 @@ struct MachineState {
     stack_user_field: DataFieldRef,
     path: PathBuf,
     unwinder: Option<Box<dyn MachineUnwinder>>,
+    unwind: Box<dyn FnMut(&mut UnwindRequest)>,
 }
 
 impl MachineState {
@@ -74,7 +75,16 @@ impl MachineState {
             stack_user_field: empty.clone(),
             path: PathBuf::new(),
             unwinder: None,
+            unwind: Box::new(|request| {
+                request.unwind_machine();
+            }),
         }
+    }
+
+    fn set_unwind(
+        &mut self,
+        unwind: impl FnMut(&mut UnwindRequest) + 'static) {
+        self.unwind = Box::new(unwind);
     }
 
     fn add_comm_exec(
@@ -157,11 +167,96 @@ impl MachineState {
     }
 }
 
+pub struct UnwindRequest<'a> {
+    pid: u32,
+    rip: u64,
+    rbp: u64,
+    rsp: u64,
+    machine: &'a mut Machine,
+    unwinder: &'a mut dyn MachineUnwinder,
+    modules: &'a dyn ModuleAccessor,
+    stack_data: &'a [u8],
+    frames: &'a mut Vec<u64>,
+}
+
+impl<'a> UnwindRequest<'a> {
+    pub fn new(
+        pid: u32,
+        rip: u64,
+        rbp: u64,
+        rsp: u64,
+        machine: &'a mut Machine,
+        unwinder: &'a mut dyn MachineUnwinder,
+        modules: &'a dyn ModuleAccessor,
+        stack_data: &'a [u8],
+        frames: &'a mut Vec<u64>) -> Self {
+        Self {
+            pid,
+            rip,
+            rbp,
+            rsp,
+            machine,
+            unwinder,
+            modules,
+            stack_data,
+            frames,
+        }
+    }
+
+    pub fn pid(&self) -> u32 { self.pid }
+
+    pub fn machine(&mut self) -> &Machine { self.machine }
+
+    pub fn unwind_machine(
+        &mut self) -> UnwindResult {
+        self.machine.unwind_process(
+            self.pid,
+            self.unwinder,
+            self.modules,
+            self.rip,
+            self.rbp,
+            self.rsp,
+            self.stack_data,
+            self.frames)
+    }
+
+    pub fn unwind_process(
+        &mut self,
+        process: &dyn Unwindable,
+        accessor: &dyn ModuleAccessor) -> UnwindResult {
+        let mut result = UnwindResult::new();
+
+        self.unwinder.reset(
+            self.rip,
+            self.rbp,
+            self.rsp);
+
+        self.frames.push(self.rip);
+        result.frames_pushed += 1;
+
+        self.unwinder.unwind(
+            process,
+            accessor,
+            self.stack_data,
+            self.frames,
+            &mut result);
+
+        result
+    }
+}
+
 pub struct CallstackReader {
     state: Writable<MachineState>,
 }
 
 impl CallstackReader {
+    pub fn with_unwind(
+        self,
+        unwind: impl FnMut(&mut UnwindRequest) + 'static) -> Self {
+        self.state.borrow_mut().set_unwind(unwind);
+        self
+    }
+
     pub fn read_frames(
         &self,
         full_data: &[u8],
@@ -218,15 +313,18 @@ impl CallstackReader {
                 /* Stack data */
                 let data = state.stack_user_field.get_data(full_data);
 
-                state.machine.unwind_process(
+                let mut request = UnwindRequest::new(
                     pid,
-                    unwinder.deref_mut(),
-                    &state.modules,
                     rip,
                     rbp,
                     rsp,
+                    &mut state.machine,
+                    unwinder.deref_mut(),
+                    &state.modules,
                     data,
                     frames);
+
+                (state.unwind)(&mut request);
             }
         });
     }
@@ -243,6 +341,7 @@ impl Clone for CallstackReader {
 pub struct CallstackHelper {
     state: Writable<MachineState>,
     unwinder: Option<Box<dyn MachineUnwinder>>,
+    external_lookup: bool,
     ip_only: bool,
     stack_size: u32,
 }
@@ -252,6 +351,7 @@ impl CallstackHelper {
         Self {
             state: self.state.clone(),
             unwinder: self.unwinder.take(),
+            external_lookup: self.external_lookup,
             ip_only: self.ip_only,
             stack_size: self.stack_size,
         }
@@ -261,9 +361,18 @@ impl CallstackHelper {
         Self {
             state: Writable::new(MachineState::new()),
             unwinder: None,
+            external_lookup: false,
             ip_only: false,
             stack_size: 4096,
         }
+    }
+
+    pub fn with_external_lookup(&mut self) -> Self {
+        let mut clone = self.clone_mut();
+
+        clone.external_lookup = true;
+
+        clone
     }
 
     pub fn with_ip_only(&mut self) -> Self {
@@ -293,8 +402,13 @@ impl CallstackHelper {
     }
 
     pub fn to_reader(self) -> CallstackReader {
-        self.state.write(|state| {
+        let unwind_op = |request: &mut UnwindRequest| {
+            request.unwind_machine();
+        };
+
+        self.state.write(move |state| {
             state.unwinder = self.unwinder;
+            state.set_unwind(unwind_op);
         });
 
         CallstackReader {
@@ -314,6 +428,7 @@ impl CallstackHelp for RingBufSessionBuilder {
         &mut self,
         helper: &CallstackHelper) -> Self {
         let dwarf = helper.unwinder.is_some();
+        let external_lookup = helper.external_lookup;
         let ip_only = helper.ip_only;
         let stack_size = helper.stack_size;
         let session_state = helper.state.clone();
@@ -437,7 +552,7 @@ impl CallstackHelp for RingBufSessionBuilder {
                 });
 
                 /* No need to hook unless DWARF with callchains */
-                if !dwarf || ip_only{
+                if !dwarf || ip_only {
                     return;
                 }
 
@@ -447,6 +562,11 @@ impl CallstackHelp for RingBufSessionBuilder {
                     state.regs_user_field = session.regs_user_data_ref();
                     state.stack_user_field = session.stack_user_data_ref();
                 });
+
+                /* If using an external/common lookup don't track */
+                if external_lookup {
+                    return;
+                }
 
                 /* Hook mmap records */
                 let event = session.mmap_event();
