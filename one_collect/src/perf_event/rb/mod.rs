@@ -151,6 +151,7 @@ pub struct Profiling;
 pub struct ContextSwitches;
 pub struct Tracepoint;
 pub struct Kernel;
+pub struct Bpf;
 
 pub struct RingBufBuilder<T = Profiling> {
     attributes: perf_event_attr,
@@ -174,18 +175,6 @@ impl RingBufBuilder {
             /* Leave rest default */
             .. Default::default()
         }
-    }
-
-    pub(crate) fn for_bpf_fd() -> CommonRingBuf {
-        let mut attributes = Self::common_attributes();
-
-        attributes.event_type = PERF_TYPE_SOFTWARE;
-        attributes.config = PERF_COUNT_SW_BPF_OUTPUT;
-        attributes.sample_period_freq = 1;
-
-        attributes.sample_type |= abi::PERF_SAMPLE_RAW;
-
-        CommonRingBuf::new(attributes)
     }
 
     pub fn for_kernel() -> RingBufBuilder<Kernel> {
@@ -239,6 +228,21 @@ impl RingBufBuilder {
         RingBufBuilder::<Tracepoint> {
             attributes,
             _type: PhantomData::<Tracepoint>,
+        }
+    }
+
+    pub fn for_bpf() -> RingBufBuilder<Bpf> {
+        let mut attributes = Self::common_attributes();
+
+        attributes.event_type = PERF_TYPE_SOFTWARE;
+        attributes.config = PERF_COUNT_SW_BPF_OUTPUT;
+        attributes.sample_period_freq = 1;
+
+        attributes.sample_type |= abi::PERF_SAMPLE_RAW;
+
+        RingBufBuilder::<Bpf> {
+            attributes,
+            _type: PhantomData::<Bpf>,
         }
     }
 }
@@ -307,6 +311,26 @@ impl RingBufBuilder<Tracepoint> {
         attributes.config = tracepoint_id;
 
         CommonRingBuf::new(attributes)
+    }
+}
+
+impl RingBufOptions for RingBufBuilder<Bpf> {
+    fn clone_options(&self) -> Self {
+        Self {
+            attributes: self.attributes,
+            _type: self._type,
+        }
+    }
+
+    fn attributes_mut(&mut self) -> &mut perf_event_attr {
+        &mut self.attributes
+    }
+}
+
+impl RingBufBuilder<Bpf> {
+    pub(crate) fn build(
+        &self) -> CommonRingBuf {
+        CommonRingBuf::new(self.attributes)
     }
 }
 

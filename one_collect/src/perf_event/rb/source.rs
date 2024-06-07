@@ -34,6 +34,7 @@ pub struct RingBufSessionBuilder {
     event_builder: Option<RingBufBuilder<Tracepoint>>,
     profiling_builder: Option<RingBufBuilder<Profiling>>,
     cswitch_builder: Option<RingBufBuilder<ContextSwitches>>,
+    bpf_builder: Option<RingBufBuilder<Bpf>>,
     process_tracking_options: ProcessTrackingOptions,
     hooks: Option<Vec<RingBufSessionHook>>,
 }
@@ -53,6 +54,7 @@ impl RingBufSessionBuilder {
             event_builder: None,
             profiling_builder: None,
             cswitch_builder: None,
+            bpf_builder: None,
             process_tracking_options: ProcessTrackingOptions::default(),
             hooks: None,
         }
@@ -69,6 +71,7 @@ impl RingBufSessionBuilder {
             profiling_builder: self.profiling_builder.take(),
             cswitch_builder: self.cswitch_builder.take(),
             process_tracking_options: self.process_tracking_options,
+            bpf_builder: self.bpf_builder.take(),
             hooks: self.hooks.take(),
         }
     }
@@ -84,6 +87,7 @@ impl RingBufSessionBuilder {
             profiling_builder: self.profiling_builder.take(),
             cswitch_builder: self.cswitch_builder.take(),
             process_tracking_options: self.process_tracking_options,
+            bpf_builder: self.bpf_builder.take(),
             hooks: self.hooks.take(),
         }
     }
@@ -99,6 +103,7 @@ impl RingBufSessionBuilder {
             profiling_builder: self.profiling_builder.take(),
             cswitch_builder: self.cswitch_builder.take(),
             process_tracking_options: self.process_tracking_options,
+            bpf_builder: self.bpf_builder.take(),
             hooks: self.hooks.take(),
         }
     }
@@ -125,6 +130,7 @@ impl RingBufSessionBuilder {
             profiling_builder: self.profiling_builder.take(),
             cswitch_builder: self.cswitch_builder.take(),
             process_tracking_options: self.process_tracking_options,
+            bpf_builder: self.bpf_builder.take(),
             hooks: self.hooks.take(),
         }
     }
@@ -151,6 +157,7 @@ impl RingBufSessionBuilder {
             profiling_builder: Some(builder),
             cswitch_builder: self.cswitch_builder.take(),
             process_tracking_options: self.process_tracking_options,
+            bpf_builder: self.bpf_builder.take(),
             hooks: self.hooks.take(),
         }
     }
@@ -177,6 +184,7 @@ impl RingBufSessionBuilder {
             profiling_builder: self.profiling_builder.take(),
             cswitch_builder: Some(builder),
             process_tracking_options: self.process_tracking_options,
+            bpf_builder: self.bpf_builder.take(),
             hooks: self.hooks.take(),
         }
     }
@@ -192,6 +200,7 @@ impl RingBufSessionBuilder {
             profiling_builder: self.profiling_builder.take(),
             cswitch_builder: self.cswitch_builder.take(),
             process_tracking_options: options,
+            bpf_builder: self.bpf_builder.take(),
             hooks: self.hooks.take(),
         }
     }
@@ -205,6 +214,33 @@ impl RingBufSessionBuilder {
         &mut self,
         builder: RingBufBuilder<ContextSwitches>) -> Option<RingBufBuilder<ContextSwitches>> {
         self.cswitch_builder.replace(builder)
+    }
+
+    pub fn with_bpf_events(
+        &mut self,
+        builder: RingBufBuilder<Bpf>) -> Self {
+        Self {
+            pages: self.pages,
+            target_pid: self.target_pid.take(),
+            kernel_builder: self.kernel_builder.take(),
+            event_builder: self.event_builder.take(),
+            profiling_builder: self.profiling_builder.take(),
+            cswitch_builder: self.cswitch_builder.take(),
+            process_tracking_options: self.process_tracking_options,
+            bpf_builder: Some(builder),
+            hooks: self.hooks.take(),
+        }
+    }
+
+    pub fn take_bpf_events(
+        &mut self) -> Option<RingBufBuilder<Bpf>> {
+        self.bpf_builder.take()
+    }
+
+    pub fn replace_bpf_events(
+        &mut self,
+        builder: RingBufBuilder<Bpf>) -> Option<RingBufBuilder<Bpf>> {
+        self.bpf_builder.replace(builder)
     }
 
     pub fn with_hooks(
@@ -226,6 +262,7 @@ impl RingBufSessionBuilder {
             profiling_builder: self.profiling_builder.take(),
             cswitch_builder: self.cswitch_builder.take(),
             process_tracking_options: self.process_tracking_options,
+            bpf_builder: self.bpf_builder.take(),
             hooks: Some(hooks),
         }
     }
@@ -247,7 +284,8 @@ impl RingBufSessionBuilder {
             self.kernel_builder.take(),
             self.event_builder.take(),
             self.profiling_builder.take(),
-            self.cswitch_builder.take());
+            self.cswitch_builder.take(),
+            self.bpf_builder.take());
 
         source.build()?;
 
@@ -278,6 +316,7 @@ pub struct RingBufDataSource {
     event_builder: Option<RingBufBuilder<Tracepoint>>,
     profiling_builder: Option<RingBufBuilder<Profiling>>,
     cswitch_builder: Option<RingBufBuilder<ContextSwitches>>,
+    bpf_builder: Option<RingBufBuilder<Bpf>>,
     next_time: Option<u64>,
     oldest_cpu: Option<usize>,
 }
@@ -289,7 +328,8 @@ impl RingBufDataSource {
         kernel_builder: Option<RingBufBuilder<Kernel>>,
         event_builder: Option<RingBufBuilder<Tracepoint>>,
         profiling_builder: Option<RingBufBuilder<Profiling>>,
-        cswitch_builder: Option<RingBufBuilder<ContextSwitches>>) -> Self {
+        cswitch_builder: Option<RingBufBuilder<ContextSwitches>>,
+        bpf_builder: Option<RingBufBuilder<Bpf>>) -> Self {
         Self {
             readers: Vec::new(),
             cursors: Vec::new(),
@@ -302,6 +342,7 @@ impl RingBufDataSource {
             event_builder,
             profiling_builder,
             cswitch_builder,
+            bpf_builder,
             next_time: None,
             oldest_cpu: None,
             enabled: false,
@@ -534,15 +575,18 @@ impl PerfDataSource for RingBufDataSource {
     }
 
     fn create_bpf_fds(&mut self) -> IOResult<Vec<i32>> {
-        let common = RingBufBuilder::for_bpf_fd();
         let mut fds = Vec::new();
 
-        Self::add_cpu_bufs(
-            self.target_pid,
-            &self.leader_ids,
-            &mut self.ring_bufs,
-            common,
-            Some(&mut fds))?;
+        if let Some(bpf_builder) = self.bpf_builder.as_mut() {
+            let common = bpf_builder.build();
+
+            Self::add_cpu_bufs(
+                self.target_pid,
+                &self.leader_ids,
+                &mut self.ring_bufs,
+                common,
+                Some(&mut fds))?;
+        }
 
         Ok(fds)
     }
