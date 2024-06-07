@@ -123,6 +123,7 @@ pub const PERF_EVENT_IOC_SET_OUTPUT: i32 = 9221;
 
 pub const PERF_COUNT_SW_CPU_CLOCK: u64 = 0;
 pub const PERF_COUNT_SW_CONTEXT_SWITCHES: u64 = 3;
+pub const PERF_COUNT_SW_BPF_OUTPUT: u64 = 10;
 pub const PERF_COUNT_SW_DUMMY: u64 = 9;
 
 pub const PERF_ATTR_SIZE_VER4: u32 = 104;

@@ -154,6 +154,8 @@ pub trait PerfDataSource {
 
     fn disable(&mut self) -> IOResult<()>;
 
+    fn create_bpf_fds(&mut self) -> IOResult<Vec<i32>>;
+
     fn add_event(
         &mut self,
         event: &Event) -> IOResult<()>;
@@ -235,6 +237,7 @@ impl PerfSession {
     pub fn new(
         source: Box<dyn PerfDataSource>,
         process_tracking_options: ProcessTrackingOptions) -> Self {
+
         let mut session = Self {
             source,
             source_enabled: false,
@@ -514,6 +517,10 @@ impl PerfSession {
         &mut self,
         timeout: Duration) {
         self.read_timeout = timeout;
+    }
+
+    pub fn create_bpf_fds(&mut self) -> IOResult<Vec<i32>> {
+        self.source.create_bpf_fds()
     }
 
     pub fn add_event(
@@ -1158,6 +1165,10 @@ mod tests {
         fn enable(&mut self) -> IOResult<()> { Ok(()) }
 
         fn disable(&mut self) -> IOResult<()> { Ok(()) }
+
+        fn create_bpf_fds(&mut self) -> IOResult<Vec<i32>> {
+            Ok(Vec::new())
+        }
 
         fn add_event(
             &mut self,

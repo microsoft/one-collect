@@ -176,6 +176,18 @@ impl RingBufBuilder {
         }
     }
 
+    pub(crate) fn for_bpf_fd() -> CommonRingBuf {
+        let mut attributes = Self::common_attributes();
+
+        attributes.event_type = PERF_TYPE_SOFTWARE;
+        attributes.config = PERF_COUNT_SW_BPF_OUTPUT;
+        attributes.sample_period_freq = 1;
+
+        attributes.sample_type |= abi::PERF_SAMPLE_RAW;
+
+        CommonRingBuf::new(attributes)
+    }
+
     pub fn for_kernel() -> RingBufBuilder<Kernel> {
         let mut attributes = Self::common_attributes();
 

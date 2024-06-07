@@ -312,7 +312,8 @@ impl RingBufDataSource {
         target_pid: Option<i32>,
         leader_ids: &HashMap<u32, u64>,
         ring_bufs: &mut HashMap<u64, CpuRingBuf>,
-        common_buf: CommonRingBuf) -> IOResult<()> {
+        common_buf: CommonRingBuf,
+        mut fds: Option<&mut Vec<i32>>) -> IOResult<()> {
         /*
          * Utility function to allocate per-cpu buffers and
          * redirect them to the kernel leader buffers on the
@@ -328,6 +329,10 @@ impl RingBufDataSource {
             match cpu_buf.id() {
                 Some(id) => {
                     cpu_buf.redirect_to(leader)?;
+
+                    if let Some(fds) = fds.as_mut() {
+                        fds.push(cpu_buf.fd.unwrap());
+                    }
 
                     ring_bufs.insert(id, cpu_buf);
                 },
@@ -379,7 +384,8 @@ impl RingBufDataSource {
                 self.target_pid,
                 &self.leader_ids,
                 &mut self.ring_bufs,
-                common)?;
+                common,
+                None)?;
         }
 
         /* Add in cswitch samples and redirect to kernel outputs */
@@ -390,7 +396,8 @@ impl RingBufDataSource {
                 self.target_pid,
                 &self.leader_ids,
                 &mut self.ring_bufs,
-                common)?;
+                common,
+                None)?;
         }
 
         Ok(())
@@ -526,6 +533,20 @@ impl PerfDataSource for RingBufDataSource {
         self.disable()
     }
 
+    fn create_bpf_fds(&mut self) -> IOResult<Vec<i32>> {
+        let common = RingBufBuilder::for_bpf_fd();
+        let mut fds = Vec::new();
+
+        Self::add_cpu_bufs(
+            self.target_pid,
+            &self.leader_ids,
+            &mut self.ring_bufs,
+            common,
+            Some(&mut fds))?;
+
+        Ok(fds)
+    }
+
     fn add_event(
         &mut self,
         event: &Event) -> IOResult<()> {
@@ -542,7 +563,8 @@ impl PerfDataSource for RingBufDataSource {
                 self.target_pid,
                 &self.leader_ids,
                 &mut self.ring_bufs,
-                common)?;
+                common,
+                None)?;
         }
 
         Ok(())
