@@ -354,7 +354,7 @@ impl RingBufDataSource {
         leader_ids: &HashMap<u32, u64>,
         ring_bufs: &mut HashMap<u64, CpuRingBuf>,
         common_buf: CommonRingBuf,
-        mut fds: Option<&mut Vec<i32>>) -> IOResult<()> {
+        mut fds: Option<&mut Vec<PerfDataFile>>) -> IOResult<()> {
         /*
          * Utility function to allocate per-cpu buffers and
          * redirect them to the kernel leader buffers on the
@@ -372,7 +372,10 @@ impl RingBufDataSource {
                     cpu_buf.redirect_to(leader)?;
 
                     if let Some(fds) = fds.as_mut() {
-                        fds.push(cpu_buf.fd.unwrap());
+                        fds.push(
+                            PerfDataFile::new(
+                                id,
+                                cpu_buf.fd.unwrap()));
                     }
 
                     ring_bufs.insert(id, cpu_buf);
@@ -574,8 +577,8 @@ impl PerfDataSource for RingBufDataSource {
         self.disable()
     }
 
-    fn create_bpf_fds(&mut self) -> IOResult<Vec<i32>> {
-        let mut fds = Vec::new();
+    fn create_bpf_files(&mut self) -> IOResult<Vec<PerfDataFile>> {
+        let mut files = Vec::new();
 
         if let Some(bpf_builder) = self.bpf_builder.as_mut() {
             let common = bpf_builder.build();
@@ -585,10 +588,10 @@ impl PerfDataSource for RingBufDataSource {
                 &self.leader_ids,
                 &mut self.ring_bufs,
                 common,
-                Some(&mut fds))?;
+                Some(&mut files))?;
         }
 
-        Ok(fds)
+        Ok(files)
     }
 
     fn add_event(

@@ -152,12 +152,32 @@ impl<'a> PerfData<'a> {
     }
 }
 
+pub struct PerfDataFile {
+    id: u64,
+    fd: i32,
+}
+
+impl PerfDataFile {
+    pub fn new(
+        id: u64,
+        fd: i32) -> Self {
+        Self {
+            id,
+            fd,
+        }
+    }
+
+    pub fn id(&self) -> u64 { self.id }
+
+    pub fn fd(&self) -> i32 { self.fd }
+}
+
 pub trait PerfDataSource {
     fn enable(&mut self) -> IOResult<()>;
 
     fn disable(&mut self) -> IOResult<()>;
 
-    fn create_bpf_fds(&mut self) -> IOResult<Vec<i32>>;
+    fn create_bpf_files(&mut self) -> IOResult<Vec<PerfDataFile>>;
 
     fn add_event(
         &mut self,
@@ -215,6 +235,7 @@ pub struct PerfSession {
     drop_event: Event,
 
     /* BPF */
+    bpf_events: HashMap<u64, Writable<Event>>,
     bpf_map_files: Vec<File>,
 
     /* Ancillary data */
@@ -270,6 +291,7 @@ impl PerfSession {
             stack_user_field: DataFieldRef::new(),
 
             /* BPF */
+            bpf_events: HashMap::new(),
             bpf_map_files: Vec::new(),
 
             /* Options */
@@ -528,33 +550,36 @@ impl PerfSession {
         self.read_timeout = timeout;
     }
 
-    pub fn create_bpf_fds(&mut self) -> IOResult<Vec<i32>> {
-        self.source.create_bpf_fds()
+    pub fn create_bpf_files(&mut self) -> IOResult<Vec<PerfDataFile>> {
+        self.source.create_bpf_files()
     }
 
     pub fn attach_to_bpf_map_path(
         &mut self,
-        path: &str) -> IOResult<()> {
+        path: &str,
+        event: Event) -> IOResult<()> {
         let path = std::ffi::CString::new(path)?;
 
         let fd = bpf::bpf_get_map_fd_by_path(&path)?;
 
-        self.attach_to_bpf_map_fd(fd)
+        self.attach_to_bpf_map_fd(fd, event)
     }
 
     pub fn attach_to_bpf_map_id(
         &mut self,
-        id: u32) -> IOResult<()> {
+        id: u32,
+        event: Event) -> IOResult<()> {
         let fd = bpf::bpf_get_map_fd(id)?;
 
-        self.attach_to_bpf_map_fd(fd)
+        self.attach_to_bpf_map_fd(fd, event)
     }
 
     pub fn attach_to_bpf_map_fd(
         &mut self,
-        fd: i32) -> IOResult<()> {
-        let bpf_fds = match self.create_bpf_fds() {
-            Ok(bpf_fds) => { bpf_fds },
+        fd: i32,
+        event: Event) -> IOResult<()> {
+        let bpf_files = match self.create_bpf_files() {
+            Ok(bpf_files) => { bpf_files },
             Err(err) => {
                 /* Close FD, no BPF programs */
                 unsafe {
@@ -565,11 +590,13 @@ impl PerfSession {
             }
         };
 
-        for (i, perf_fd) in bpf_fds.iter().enumerate() {
+        let event = Writable::new(event);
+
+        for (i, perf_file) in bpf_files.iter().enumerate() {
             match bpf::bpf_set_map_element(
                 fd,
                 i as u64,
-                (*perf_fd) as u64) {
+                (perf_file.fd()) as u64) {
                 Ok(()) => {
                     /* Take ownership of FD */
                     let file = unsafe {
@@ -577,6 +604,7 @@ impl PerfSession {
                     };
 
                     self.bpf_map_files.push(file);
+                    self.bpf_events.insert(perf_file.id(), event.clone());
                 },
                 Err(err) => {
                     /* Close FD on error */
@@ -758,9 +786,8 @@ impl PerfSession {
 
                 /* PERF_SAMPLE_ID */
                 if perf_data.has_format(abi::PERF_SAMPLE_ID) {
+                    /* Update only, no reset */
                     offset += self.id_field.update(offset, 8);
-                } else {
-                    self.id_field.reset();
                 }
 
                 /* PERF_SAMPLE_STREAM_ID */
@@ -865,7 +892,28 @@ impl PerfSession {
                 }
 
                 /* Process if we have an ID to use */
-                if let Some(id) = &id {
+                if perf_data.ancillary.config() == PERF_COUNT_SW_BPF_OUTPUT {
+                    /* BPF Event */
+                    let full_data = perf_data.raw_data;
+
+                    if let Some(id) = self.id_field.try_get_u64(full_data) {
+                        if let Some(event) = self.bpf_events.get_mut(&id) {
+                            let event_data = self.raw_field.get_data(full_data);
+
+                            event.borrow_mut().process(
+                                full_data,
+                                event_data,
+                                &mut self.errors);
+                        }
+
+                        if !self.errors.is_empty() {
+                            if let Some(event) = self.bpf_events.get(&id) {
+                                self.log_errors(&event.borrow());
+                            }
+                        }
+                    }
+                } else if let Some(id) = &id {
+                    /* Tracepoint Event */
                     if let Some(event) = self.events.get_mut(id) {
                         let full_data = perf_data.raw_data;
                         let event_data = self.raw_field.get_data(full_data);
@@ -1235,7 +1283,7 @@ mod tests {
 
         fn disable(&mut self) -> IOResult<()> { Ok(()) }
 
-        fn create_bpf_fds(&mut self) -> IOResult<Vec<i32>> {
+        fn create_bpf_files(&mut self) -> IOResult<Vec<PerfDataFile>> {
             Ok(Vec::new())
         }
 
