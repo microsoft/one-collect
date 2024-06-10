@@ -177,7 +177,9 @@ pub trait PerfDataSource {
 
     fn disable(&mut self) -> IOResult<()>;
 
-    fn create_bpf_files(&mut self) -> IOResult<Vec<PerfDataFile>>;
+    fn create_bpf_files(
+        &mut self,
+        event: Option<&Event>) -> IOResult<Vec<PerfDataFile>>;
 
     fn add_event(
         &mut self,
@@ -550,8 +552,10 @@ impl PerfSession {
         self.read_timeout = timeout;
     }
 
-    pub fn create_bpf_files(&mut self) -> IOResult<Vec<PerfDataFile>> {
-        self.source.create_bpf_files()
+    pub fn create_bpf_files(
+        &mut self,
+        event: Option<&Event>) -> IOResult<Vec<PerfDataFile>> {
+        self.source.create_bpf_files(event)
     }
 
     pub fn attach_to_bpf_map_path(
@@ -578,7 +582,7 @@ impl PerfSession {
         &mut self,
         fd: i32,
         event: Event) -> IOResult<()> {
-        let bpf_files = match self.create_bpf_files() {
+        let bpf_files = match self.create_bpf_files(Some(&event)) {
             Ok(bpf_files) => { bpf_files },
             Err(err) => {
                 /* Close FD, no BPF programs */
@@ -1283,7 +1287,9 @@ mod tests {
 
         fn disable(&mut self) -> IOResult<()> { Ok(()) }
 
-        fn create_bpf_files(&mut self) -> IOResult<Vec<PerfDataFile>> {
+        fn create_bpf_files(
+            &mut self,
+            _event: Option<&Event>) -> IOResult<Vec<PerfDataFile>> {
             Ok(Vec::new())
         }
 

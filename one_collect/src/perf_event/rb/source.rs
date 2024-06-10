@@ -577,11 +577,19 @@ impl PerfDataSource for RingBufDataSource {
         self.disable()
     }
 
-    fn create_bpf_files(&mut self) -> IOResult<Vec<PerfDataFile>> {
+    fn create_bpf_files(
+        &mut self,
+        event: Option<&Event>) -> IOResult<Vec<PerfDataFile>> {
         let mut files = Vec::new();
 
         if let Some(bpf_builder) = self.bpf_builder.as_mut() {
-            let common = bpf_builder.build();
+            let mut common = bpf_builder.build();
+
+            if let Some(event) = &event {
+                if event.has_no_callstack_flag() {
+                    common = common.without_callstack();
+                }
+            }
 
             Self::add_cpu_bufs(
                 self.target_pid,
