@@ -1,6 +1,10 @@
 use std::hash::{Hash, Hasher};
 use twox_hash::XxHash64;
 
+/// `InternedSpan` represents a span of interned data in memory.
+///
+/// This struct is used to keep track of the start and end indices of interned data,
+/// effectively representing a slice of the data without owning it.
 #[derive(Default, Clone, Copy, PartialEq)]
 pub struct InternedSpan {
     start: usize,
@@ -8,6 +12,12 @@ pub struct InternedSpan {
 }
 
 impl InternedSpan {
+    /// Returns the length of the interned span.
+    ///
+    /// This is calculated as the difference between the end and start indices.
+    ///
+    /// # Returns
+    /// * `usize`: The length of the interned span.
     pub fn len(&self) -> usize {
         self.end - self.start
     }
@@ -19,6 +29,11 @@ struct InternedBucket {
     index: usize,
 }
 
+/// `InternedSlices` represents a collection of interned slices of type `T`.
+///
+/// Interning is a method of storing only one copy of each distinct slice value, which must be immutable.
+/// This struct is used to keep track of all the interned slices, their individual spans,
+/// and a hash map for quick access to these slices.
 pub struct InternedSlices<T> {
     buckets: Vec<Vec<InternedBucket>>,
     mask: u64,
@@ -27,6 +42,13 @@ pub struct InternedSlices<T> {
 }
 
 impl<T: Copy + std::cmp::Eq + std::hash::Hash> InternedSlices<T> {
+    /// Creates a new collection of interned slices.
+    ///
+    /// # Parameters
+    /// * `bucket_count`: The initial capacity of the hash map in number of buckets.
+    ///
+    /// # Returns
+    /// * `Self`: A new `InternedSlices` instance.
     pub fn new(
         bucket_count: usize) -> Self {
         let mut bucket_count = bucket_count;
@@ -49,6 +71,13 @@ impl<T: Copy + std::cmp::Eq + std::hash::Hash> InternedSlices<T> {
         }
     }
 
+    /// Interns a slice and returns its ID.
+    ///
+    /// # Parameters
+    /// * `slice`: The slice of type `T` to be interned.
+    ///
+    /// # Returns
+    /// * `usize`: The ID (index) of the interned slice.
     pub fn to_id(
         &mut self,
         slice: &[T]) -> usize {
@@ -94,6 +123,13 @@ impl<T: Copy + std::cmp::Eq + std::hash::Hash> InternedSlices<T> {
         span_index
     }
 
+    /// Returns the slice corresponding to the given ID returned by to_id().
+    ///
+    /// # Parameters
+    /// * `id`: The ID (index) of the interned slice to retrieve.
+    ///
+    /// # Returns
+    /// * `Option<&[T]>`: The interned slice if found, or `None` otherwise.
     pub fn from_id(
         &self,
         id: usize) -> Option<&[T]> {
@@ -105,6 +141,10 @@ impl<T: Copy + std::cmp::Eq + std::hash::Hash> InternedSlices<T> {
         None
     }
 
+    /// Executes a function for each interned slice.
+    ///
+    /// # Parameters
+    /// * `f`: A closure that takes an index and a slice, and returns nothing. This closure is executed for each interned slice.
     pub fn for_each(
         &self,
         mut f: impl FnMut(usize, &[T])) {
@@ -114,23 +154,52 @@ impl<T: Copy + std::cmp::Eq + std::hash::Hash> InternedSlices<T> {
     }
 }
 
+/// `InternedCallstacks` represents a collection of interned call stacks.
+///
+/// Each call stack is a sequence of frame addresses, and this struct provides methods
+/// to intern these call stacks and retrieve them by ID.
+///
+/// Interning is a method of storing only one copy of each distinct call stack,
+/// which must be immutable. This helps in efficient memory utilization and faster comparisons.
 pub struct InternedCallstacks {
     frames: InternedSlices<u64>,
 }
 
 impl InternedCallstacks {
+    /// Creates a new collection of interned call stacks.
+    ///
+    /// # Parameters
+    /// * `bucket_count`: The initial capacity of the hash map in number of buckets.
+    ///
+    /// # Returns
+    /// * `Self`: A new `InternedCallstacks` instance.
     pub fn new(bucket_count: usize) -> Self {
         Self {
             frames: InternedSlices::new(bucket_count),
         }
     }
 
+    /// Interns a call stack and returns its ID.
+    ///
+    /// # Parameters
+    /// * `frames`: The call stack to be interned, represented as a slice of frame addresses.
+    ///
+    /// # Returns
+    /// * `usize`: The ID (index) of the interned call stack.
     pub fn to_id(
         &mut self,
         frames: &[u64]) -> usize {
         self.frames.to_id(frames)
     }
 
+    /// Retrieves a call stack by its ID returned by to_id().
+    ///
+    /// # Parameters
+    /// * `id`: The ID (index) of the interned call stack to retrieve.
+    /// * `frames`: A mutable reference to a `Vec<u64>` where the retrieved call stack will be stored.
+    ///
+    /// # Returns
+    /// * `anyhow::Result<()>`: `Ok(())` if the call stack was successfully retrieved, or an `Err` with a description of what went wrong.
     pub fn from_id(
         &self,
         id: usize,
@@ -148,6 +217,26 @@ impl InternedCallstacks {
         Ok(())
     }
 
+    /// Executes a function for each interned call stack.
+    ///
+    /// # Parameters
+    /// * `f`: A closure that takes an index and a call stack (slice of frame addresses), and returns nothing.
+    ///         This closure is executed for each interned call stack.
+    ///
+    /// # Example
+    /// ```
+    /// use one_collect::intern::InternedCallstacks;
+    ///
+    /// let mut interned_callstacks = InternedCallstacks::new(16);
+    /// interned_callstacks.to_id(&[0x12345678, 0x9abcdef0]);
+    /// interned_callstacks.to_id(&[0xdeadbeef, 0xcafebabe]);
+    /// interned_callstacks.for_each(|id, callstack| {
+    ///     println!("ID: {}, Callstack: {:?}", id, callstack);
+    /// });
+    /// ```
+    /// The above example will print:
+    /// ID: 0, Callstack: [305419896, 2638827904]
+    /// ID: 1, Callstack: [3735928559, 3405691582]
     pub fn for_each(
         &self,
         f: impl FnMut(usize, &[u64])) {
@@ -155,23 +244,52 @@ impl InternedCallstacks {
     }
 }
 
+/// `InternedStrings` represents a collection of interned strings.
+///
+/// Each string is converted to bytes and interned as a slice of bytes.
+/// This struct provides methods to intern these strings and retrieve them by ID.
+///
+/// Interning is a method of storing only one copy of each distinct string,
+/// which must be immutable. This helps in efficient memory utilization and faster comparisons.
 pub struct InternedStrings {
     strings: InternedSlices<u8>,
 }
 
 impl InternedStrings {
+    /// Creates a new collection of interned strings.
+    ///
+    /// # Parameters
+    /// * `bucket_count`: The initial capacity of the hash map in number of buckets.
+    ///     In general the more buckets the faster the query performance will be.
+    ///
+    /// # Returns
+    /// * `Self`: A new `InternedStrings` instance.
     pub fn new(bucket_count: usize) -> Self {
         Self {
             strings: InternedSlices::new(bucket_count),
         }
     }
 
+    /// Interns a string and returns its ID.
+    ///
+    /// # Parameters
+    /// * `string`: The string to be interned.
+    ///
+    /// # Returns
+    /// * `usize`: The ID (index) of the interned string.
     pub fn to_id(
         &mut self,
         string: &str) -> usize {
         self.strings.to_id(string.as_bytes())
     }
 
+    /// Returns the string corresponding to the given ID returned by to_id().
+    ///
+    /// # Parameters
+    /// * `id`: The ID (index) of the interned string to retrieve.
+    ///
+    /// # Returns
+    /// * `anyhow::Result<&str>`: The interned string if found, or an `Err` with a description of what went wrong.
     pub fn from_id(
         &self,
         id: usize) -> anyhow::Result<&str> {
@@ -185,6 +303,26 @@ impl InternedStrings {
         }
     }
 
+    /// Executes a function for each interned string.
+    ///
+    /// # Parameters
+    /// * `f`: A closure that takes an index and a string, and returns nothing.
+    ///         This closure is executed for each interned string.
+    ///
+    /// # Example
+    /// ```
+    /// use one_collect::intern::InternedStrings;
+    ///
+    /// let mut interned_strings = InternedStrings::new(16);
+    /// interned_strings.to_id("hello");
+    /// interned_strings.to_id("world");
+    /// interned_strings.for_each(|id, string| {
+    ///     println!("ID: {}, String: {}", id, string);
+    /// });
+    /// ```
+    /// The above example will print:
+    /// ID: 0, String: hello
+    /// ID: 1, String: world
     pub fn for_each(
         &self,
         mut f: impl FnMut(usize, &str)) {
