@@ -1,10 +1,24 @@
+/// `PathBufInteger` is a trait that extends the functionality of `std::path::PathBuf`
+/// with methods for pushing integer values to the path buffer temporary allocations.
 pub trait PathBufInteger {
+    /// Pushes a u64 value to the path buffer as a string without allocations.
+    ///
+    /// # Parameters
+    /// * `value`: The u64 value to be pushed.
     fn push_u64(&mut self, value: u64);
 
+    /// Pushes a u32 value to the path buffer as a string without allocations.
+    ///
+    /// # Parameters
+    /// * `value`: The u32 value to be pushed.
     fn push_u32(&mut self, value: u32) {
         self.push_u64(value as u64);
     }
 
+    /// Pushes a u16 value to the path buffer as a string without allocations.
+    ///
+    /// # Parameters
+    /// * `value`: The u16 value to be pushed.
     fn push_u16(&mut self, value: u16) {
         self.push_u64(value as u64);
     }
@@ -13,6 +27,10 @@ pub trait PathBufInteger {
 const NUMS: &[u8; 10] = b"0123456789";
 
 impl PathBufInteger for std::path::PathBuf {
+    /// Pushes a u64 value to the path buffer as a string without allocations.
+    ///
+    /// # Parameters
+    /// * `value`: The u64 value to be pushed.
     fn push_u64(&mut self, value: u64) {
         if value == 0 {
             self.push("0");
