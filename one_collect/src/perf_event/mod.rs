@@ -1,3 +1,5 @@
+use std::fs::File;
+use std::os::fd::FromRawFd;
 use std::path::PathBuf;
 use std::time::Duration;
 use std::array::TryFromSliceError;
@@ -13,6 +15,7 @@ use crate::PathBufInteger;
 pub mod abi;
 pub mod rb;
 mod events;
+mod bpf;
 
 use abi::*;
 
@@ -149,10 +152,34 @@ impl<'a> PerfData<'a> {
     }
 }
 
+pub struct PerfDataFile {
+    id: u64,
+    fd: i32,
+}
+
+impl PerfDataFile {
+    pub fn new(
+        id: u64,
+        fd: i32) -> Self {
+        Self {
+            id,
+            fd,
+        }
+    }
+
+    pub fn id(&self) -> u64 { self.id }
+
+    pub fn fd(&self) -> i32 { self.fd }
+}
+
 pub trait PerfDataSource {
     fn enable(&mut self) -> IOResult<()>;
 
     fn disable(&mut self) -> IOResult<()>;
+
+    fn create_bpf_files(
+        &mut self,
+        event: Option<&Event>) -> IOResult<Vec<PerfDataFile>>;
 
     fn add_event(
         &mut self,
@@ -209,6 +236,10 @@ pub struct PerfSession {
     cswitch_event: Event,
     drop_event: Event,
 
+    /* BPF */
+    bpf_events: HashMap<u64, Writable<Event>>,
+    bpf_map_files: Vec<File>,
+
     /* Ancillary data */
     ancillary: Writable<AncillaryData>,
 
@@ -235,6 +266,7 @@ impl PerfSession {
     pub fn new(
         source: Box<dyn PerfDataSource>,
         process_tracking_options: ProcessTrackingOptions) -> Self {
+
         let mut session = Self {
             source,
             source_enabled: false,
@@ -259,6 +291,10 @@ impl PerfSession {
             branch_stack_field: DataFieldRef::new(),
             regs_user_field: DataFieldRef::new(),
             stack_user_field: DataFieldRef::new(),
+
+            /* BPF */
+            bpf_events: HashMap::new(),
+            bpf_map_files: Vec::new(),
 
             /* Options */
             read_timeout: Duration::from_millis(15),
@@ -516,6 +552,78 @@ impl PerfSession {
         self.read_timeout = timeout;
     }
 
+    pub fn create_bpf_files(
+        &mut self,
+        event: Option<&Event>) -> IOResult<Vec<PerfDataFile>> {
+        self.source.create_bpf_files(event)
+    }
+
+    pub fn attach_to_bpf_map_path(
+        &mut self,
+        path: &str,
+        event: Event) -> IOResult<()> {
+        let path = std::ffi::CString::new(path)?;
+
+        let fd = bpf::bpf_get_map_fd_by_path(&path)?;
+
+        self.attach_to_bpf_map_fd(fd, event)
+    }
+
+    pub fn attach_to_bpf_map_id(
+        &mut self,
+        id: u32,
+        event: Event) -> IOResult<()> {
+        let fd = bpf::bpf_get_map_fd(id)?;
+
+        self.attach_to_bpf_map_fd(fd, event)
+    }
+
+    pub fn attach_to_bpf_map_fd(
+        &mut self,
+        fd: i32,
+        event: Event) -> IOResult<()> {
+        let bpf_files = match self.create_bpf_files(Some(&event)) {
+            Ok(bpf_files) => { bpf_files },
+            Err(err) => {
+                /* Close FD, no BPF programs */
+                unsafe {
+                    libc::close(fd);
+                }
+
+                return Err(err);
+            }
+        };
+
+        let event = Writable::new(event);
+
+        for (i, perf_file) in bpf_files.iter().enumerate() {
+            match bpf::bpf_set_map_element(
+                fd,
+                i as u64,
+                (perf_file.fd()) as u64) {
+                Ok(()) => {
+                    /* Take ownership of FD */
+                    let file = unsafe {
+                        File::from_raw_fd(fd)
+                    };
+
+                    self.bpf_map_files.push(file);
+                    self.bpf_events.insert(perf_file.id(), event.clone());
+                },
+                Err(err) => {
+                    /* Close FD on error */
+                    unsafe {
+                        libc::close(fd);
+                    }
+
+                    return Err(err);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn add_event(
         &mut self,
         event: Event) -> IOResult<()> {
@@ -682,9 +790,8 @@ impl PerfSession {
 
                 /* PERF_SAMPLE_ID */
                 if perf_data.has_format(abi::PERF_SAMPLE_ID) {
+                    /* Update only, no reset */
                     offset += self.id_field.update(offset, 8);
-                } else {
-                    self.id_field.reset();
                 }
 
                 /* PERF_SAMPLE_STREAM_ID */
@@ -789,7 +896,28 @@ impl PerfSession {
                 }
 
                 /* Process if we have an ID to use */
-                if let Some(id) = &id {
+                if perf_data.ancillary.config() == PERF_COUNT_SW_BPF_OUTPUT {
+                    /* BPF Event */
+                    let full_data = perf_data.raw_data;
+
+                    if let Some(id) = self.id_field.try_get_u64(full_data) {
+                        if let Some(event) = self.bpf_events.get_mut(&id) {
+                            let event_data = self.raw_field.get_data(full_data);
+
+                            event.borrow_mut().process(
+                                full_data,
+                                event_data,
+                                &mut self.errors);
+                        }
+
+                        if !self.errors.is_empty() {
+                            if let Some(event) = self.bpf_events.get(&id) {
+                                self.log_errors(&event.borrow());
+                            }
+                        }
+                    }
+                } else if let Some(id) = &id {
+                    /* Tracepoint Event */
                     if let Some(event) = self.events.get_mut(id) {
                         let full_data = perf_data.raw_data;
                         let event_data = self.raw_field.get_data(full_data);
@@ -1158,6 +1286,12 @@ mod tests {
         fn enable(&mut self) -> IOResult<()> { Ok(()) }
 
         fn disable(&mut self) -> IOResult<()> { Ok(()) }
+
+        fn create_bpf_files(
+            &mut self,
+            _event: Option<&Event>) -> IOResult<Vec<PerfDataFile>> {
+            Ok(Vec::new())
+        }
 
         fn add_event(
             &mut self,
