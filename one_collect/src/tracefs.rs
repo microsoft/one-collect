@@ -4,11 +4,17 @@ use std::fs::File;
 
 use crate::event::*;
 
+/// Struct representing the trace file system.
 pub struct TraceFS {
     root: String,
 }
 
 impl TraceFS {
+    /// Opens the first found trace file system and returns a `TraceFS` instance.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` which is `Ok` if the tracefs is successfully opened, and `Err` otherwise.
     pub fn open() -> Result<TraceFS> {
         let mounts = File::open("/proc/mounts")?;
         let reader = BufReader::new(mounts);
@@ -35,6 +41,15 @@ impl TraceFS {
                     "mount -t tracefs nodev /sys/kernel/tracing.")))
     }
 
+    /// Opens the trace file system at the given path and returns a `TraceFS` instance.
+    ///
+    /// # Parameters
+    ///
+    /// * `path`: The path where the tracefs is located.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` which is `Ok` if the tracefs is successfully opened, and `Err` otherwise.
     pub fn open_at(path: &str) -> Result<TraceFS> {
         /* Ensure we have access */
         let _ = std::fs::metadata(format!("{}/README", path))?;
@@ -46,6 +61,15 @@ impl TraceFS {
         Ok(tracefs)
     }
 
+    /// Parses a line from the tracefs and returns an `EventField`.
+    ///
+    /// # Parameters
+    ///
+    /// * `line`: The line to be parsed.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` which is `Ok` if the line is successfully parsed, and `Err` otherwise.
     fn field_from_line(
         line: &str) -> Result<EventField> {
         /* Split upon ';' */
@@ -133,6 +157,17 @@ impl TraceFS {
             fsize.unwrap()))
     }
 
+    /// Parses the format of an event from the tracefs and returns an `Event`.
+    ///
+    /// # Parameters
+    ///
+    /// * `system`: The system of the event.
+    /// * `name`: The name of the event.
+    /// * `reader`: A mutable reference to a `BufRead` instance.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` which is `Ok` if the event format is successfully parsed, and `Err` otherwise.
     #[allow(clippy::while_let_on_iterator)]
     fn event_from_format(
         system: &str,
@@ -196,6 +231,30 @@ impl TraceFS {
         Ok(event)
     }
 
+    /// Finds an event in the trace filesystem.
+    ///
+    /// # Arguments
+    ///
+    /// * `system` - A string slice that holds the name of the system.
+    /// * `name` - A string slice that holds the name of the event.
+    ///
+    /// # Returns
+    ///
+    /// * `Event` - An `Event` instance that has been found. Returns a `Result` which is an `Ok` if the event is found, `Err` otherwise.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use one_collect::tracefs::TraceFS;
+    ///
+    /// if let Ok(tracefs) = TraceFS::open() {
+    ///     let event = tracefs.find_event("sched", "sched_waking");
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if the event is not found or the file cannot be opened.
     pub fn find_event(
         &self,
         system: &str,
@@ -248,6 +307,16 @@ impl TraceFS {
         self.find_event(system, name)
     }
 
+    /// Unregisters a uprobe from the trace filesystem.
+    ///
+    /// # Arguments
+    ///
+    /// * `system` - A string slice that holds the name of the system.
+    /// * `name` - A string slice that holds the name of the uprobe.
+    ///
+    /// # Returns
+    ///
+    /// * `()` - Returns a `Result` which is an `Ok` if the uprobe is unregistered, `Err` otherwise.
     pub fn unregister_uprobe(
         &self,
         system: &str,
@@ -271,6 +340,20 @@ impl TraceFS {
         Ok(())
     }
 
+    /// Registers a uprobe in the trace filesystem.
+    ///
+    /// # Arguments
+    ///
+    /// * `system` - A string slice that holds the name of the system.
+    /// * `name` - A string slice that holds the name of the uprobe.
+    /// * `file` - A string slice that indicates the file associated with the uprobe.
+    /// * `address` - The address where the uprobe is placed.
+    /// * `fetch_args` - The arguments to fetch when the uprobe is hit.
+    ///
+    /// # Returns
+    ///
+    /// * `Event` - An `Event` instance that has been registered. Returns a `Result` which is an `Ok` if the uprobe is registered, `Err` otherwise.
+    ///
     pub fn register_uprobe(
         &self,
         system: &str,
@@ -287,6 +370,20 @@ impl TraceFS {
             fetch_args)
     }
 
+    /// Registers a return uprobe in the trace filesystem.
+    ///
+    /// # Arguments
+    ///
+    /// * `system` - A string slice that holds the name of the system.
+    /// * `name` - A string slice that holds the name of the uprobe.
+    /// * `file` - A string slice that indicates the file associated with the uprobe.
+    /// * `address` - The address where the uprobe is placed.
+    /// * `fetch_args` - The arguments to fetch when the uprobe is hit.
+    ///
+    /// # Returns
+    ///
+    /// * `Event` - An `Event` instance that has been registered. Returns a `Result` which is an `Ok` if the uprobe is registered, `Err` otherwise.
+    ///
     pub fn register_uretprobe(
         &self,
         system: &str,

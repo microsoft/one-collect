@@ -8,11 +8,26 @@ use crate::perf_event::PerfSession;
 use crate::perf_event::rb::{RingBufBuilder, source::RingBufSessionBuilder};
 use crate::state::ProcessTrackingOptions;
 
+/// Specifies the mode of session data output.
+///
+/// The enum has two variants:
+/// - File: This variant is used when session data is to be written to a file. It holds a `FileSessionEgress` instance which contains the path of the output file.
+/// - Live: This variant is used when session data is to be outputted live.
+///
 pub enum SessionEgress<'a> {
     File(FileSessionEgress<'a>),
     Live,
 }
 
+/// Configures the file output for a session.
+///
+/// This struct holds the path of the output file.
+///
+/// # Methods
+///
+/// * `new(path: &'a str) -> Self`: Constructs a new `FileSessionEgress` with the given file path.
+/// * `path() -> &str`: Returns the path of the output file.
+///
 pub struct FileSessionEgress<'a> {
     path: &'a str,
 }
@@ -29,6 +44,18 @@ impl<'a> FileSessionEgress<'a> {
     }
 }
 
+/// Builder for configuring and creating a `Session`.
+///
+/// This builder allows you to configure a session with options such as profiling, call stacks, page count, profiling frequency, and process tracking options.
+///
+/// # Methods
+///
+/// * `new(egress: SessionEgress<'a>) -> Self`: Constructs a new `SessionBuilder` with the given egress mode.
+/// * `with_profiling(self, frequency: u64) -> Self`: Enables profiling with the given frequency.
+/// * `with_call_stacks(self) -> Self`: Enables call stacks.
+/// * `track_process_state(self, options: ProcessTrackingOptions) -> Self`: Tracks the process state with the given options.
+/// * `build(self) -> Result<Session<'a>, io::Error>`: Builds and returns a `Session`.
+///
 pub struct SessionBuilder<'a> {
     egress: SessionEgress<'a>,
     with_profiling: bool,
@@ -78,6 +105,29 @@ impl<'a> SessionBuilder<'a> {
     }
 }
 
+/// A `Session` represents a profiling session.
+///
+/// This struct contains the configuration and state of a profiling session, including the mode of session data output, a
+/// `PerfSession` for interfacing with perf_events, and a `CallstackReader` for reading call stacks.
+///
+/// # Methods
+///
+/// * `build(builder: SessionBuilder<'a>) -> Result<Self, io::Error>`: Builds a `Session` from a `SessionBuilder`.
+/// * `egress_info(&self) -> &SessionEgress<'a>`: Returns information about the egress mode.
+/// * `perf_session_mut(&mut self) -> &mut Option<PerfSession>`: Returns a mutable reference to the `PerfSession`.
+///
+/// # Example
+///
+/// ```
+/// use one_collect::session::{SessionBuilder, FileSessionEgress, SessionEgress};
+/// use one_collect::state::ProcessTrackingOptions;
+///
+/// let session_builder = SessionBuilder::new(SessionEgress::File(FileSessionEgress::new("output.txt")))
+///     .with_profiling(1000)
+///     .with_call_stacks()
+///     .track_process_state(ProcessTrackingOptions::default());
+/// let session = session_builder.build();
+/// ```
 pub struct Session<'a> {
     egress: SessionEgress<'a>,
     perf_session: Option<PerfSession>,
@@ -85,6 +135,17 @@ pub struct Session<'a> {
 }
 
 impl<'a> Session<'a> {
+    /// Builds a new `Session` from a given `SessionBuilder`.
+    ///
+    /// This method also configures the `PerfSession` and `CallstackReader` based on the settings in the `SessionBuilder`.
+    ///
+    /// # Arguments
+    ///
+    /// * `builder` - A `SessionBuilder` instance containing the configuration for the new `Session`.
+    ///
+    /// # Returns
+    ///
+    /// * `Result<Session, io::Error>` - Returns a new `Session` if successful, or an `io::Error` if an error occurred during the build.
     pub(crate) fn build(builder: SessionBuilder<'a>) -> Result<Self, io::Error> {
 
         let mut stack_reader = None;
@@ -132,28 +193,70 @@ impl<'a> Session<'a> {
         Ok(session)
     }
 
+    /// Returns a reference to the `SessionEgress` of the `Session`.
+    ///
+    /// # Returns
+    ///
+    /// * `&SessionEgress` - A reference to the `SessionEgress` of the `Session`.
     pub fn egress_info(&self) -> &SessionEgress<'a> {
         &self.egress
     }
 
+    /// Returns a mutable reference to the `PerfSession` of the `Session`.
+    ///
+    /// # Returns
+    ///
+    /// * `&mut Option<PerfSession>` - A mutable reference to the `PerfSession` of the `Session`.
     pub fn perf_session_mut(&mut self) -> &mut Option<PerfSession> {
         &mut self.perf_session
     }
 
+    /// Enables the session. It primarily enables the perf session if it exists.
+    ///
+    /// # Returns
+    ///
+    /// This function returns an IOResult, which can either be Ok if the session was successfully enabled, or an error if one occurred.
+    ///
     pub fn enable(&mut self) -> IOResult<()> {
         self.perf_session.as_mut().unwrap().enable()
     }
 
+    /// Disables the session. It primarily disables the perf session if it exists.
+    ///
+    /// # Returns
+    ///
+    /// This function returns an IOResult, which can either be Ok if the session was successfully disabled, or an error if one occurred.
+    ///
     pub fn disable(&mut self) -> IOResult<()> {
         self.perf_session.as_mut().unwrap().disable()
     }
 
+    /// Parses all the events in the session.
+    ///
+    /// This method captures the environment and calls the `parse_all` method on the `perf_session`.
+    ///
+    /// # Returns
+    ///
+    /// This function returns a Result. If the events are successfully parsed, Ok is returned. If an error occurs, the error is returned in the Result.
+    ///
     pub fn parse_all(
         &mut self) -> Result<(), TryFromSliceError> {
             self.capture_environment();
             self.perf_session.as_mut().unwrap().parse_all()
     }
 
+    /// Parses events in the session for a specified duration.
+    ///
+    /// This method captures the environment and calls the `parse_for_duration` method on the `perf_session`.
+    ///
+    /// # Parameters
+    ///
+    /// * `duration`: The duration for which events should be parsed.
+    ///
+    /// # Returns
+    ///
+    /// This function returns a Result. If the events are successfully parsed for the given duration, Ok is returned. If an error occurs, the error is returned in the Result.
+    ///
     pub fn parse_for_duration(
         &mut self,
         duration: Duration) -> Result<(), TryFromSliceError> {
@@ -161,6 +264,18 @@ impl<'a> Session<'a> {
             self.perf_session.as_mut().unwrap().parse_for_duration(duration)
     }
 
+    /// Parses events in the session until a certain condition is met.
+    ///
+    /// This method captures the environment and calls the `parse_until` method on the `perf_session`.
+    ///
+    /// # Parameters
+    ///
+    /// * `should_stop`: A function that returns a boolean value. Parsing continues until this function returns true.
+    ///
+    /// # Returns
+    ///
+    /// This function returns a Result. If the events are successfully parsed until the condition is met, Ok is returned. If an error occurs, the error is returned in the Result.
+    ///
     pub fn parse_until(
         &mut self,
         should_stop: impl Fn() -> bool) -> Result<(), TryFromSliceError> {
@@ -168,6 +283,10 @@ impl<'a> Session<'a> {
             self.perf_session.as_mut().unwrap().parse_until(should_stop)
     }
 
+    /// Captures the current environment of the session.
+    ///
+    /// This method checks if the process tracking options require process names. If so, it calls the `capture_environment` method on the `perf_session`.
+    ///
     fn capture_environment(&mut self) {
         let session = self.perf_session.as_mut().unwrap();
 
@@ -176,6 +295,13 @@ impl<'a> Session<'a> {
         }
     }
 
+    /// Provides the call stack reader for the session.
+    ///
+    /// This method checks if the `stack_reader` is available and returns a clone of it if available. If the `stack_reader` is not available, it returns `None`.
+    ///
+    /// # Returns
+    ///
+    /// This function returns an `Option` that contains a `CallstackReader` if it is available, or `None` if it is not.
     pub fn stack_reader(&self) -> Option<CallstackReader> {
         match &self.stack_reader {
             Some(reader) => Some(reader.clone()),

@@ -5,6 +5,21 @@ use std::io::{BufRead, BufReader};
 
 use crate::PathBufInteger;
 
+/// Gets the `comm` value from a process's procfs entry. The `comm` value typically holds the process's name.
+///
+/// # Arguments
+///
+/// * `path` - A mutable reference to a PathBuf pointing to the procfs directory of a process (e.g. /proc/[pid]).
+///
+/// # Returns
+///
+/// * `Some(String)` - The `comm` value as a String if it can be read successfully.
+/// * `None` - If there is an error reading the `comm` value.
+///
+/// # Remarks
+///
+/// If the `comm` value is exactly 15 characters long (the maximum length for this field), this can be an indication
+/// that the process's actual name is longer. In such a case, the function attempts to retreive the full process name.
 pub(crate) fn get_comm(
     path: &mut path::PathBuf) -> Option<String> {
     path.push("comm");
@@ -32,6 +47,26 @@ pub(crate) fn get_comm(
     }
 }
 
+/// `ModuleInfo` is a struct that provides information about a loaded module within a process.
+///
+/// This struct contains information about the start and end addresses of the module in memory,
+/// the offset of the module, the inode number of the module, the major and minor device ID
+/// where the module resides, and an optional path to the module.
+///
+/// # Struct Fields
+///
+/// * `start_addr` - A u64 representing the start address where the module is loaded in memory.
+/// * `end_addr` - A u64 representing the end address where the module is loaded in memory.
+/// * `offset` - A u64 representing the offset of the module.
+/// * `ino` - A u64 representing the inode number of the module.
+/// * `dev_maj` - A u32 representing the major ID of the device where the module resides.
+/// * `dev_min` - A u32 representing the minor ID of the device where the module resides.
+/// * `path` - An optional reference to a str representing the path to the module.
+///
+/// # Remarks
+///
+/// This struct is typically used in conjunction with other process-related information to provide
+/// a comprehensive view of a process's state.
 #[derive(Default)]
 pub(crate) struct ModuleInfo<'a> {
     pub start_addr: u64,
@@ -44,10 +79,26 @@ pub(crate) struct ModuleInfo<'a> {
 }
 
 impl<'a> ModuleInfo<'a> {
+    /// Returns the size of the module in memory. Calculated as the difference between the end and start addresses.
+    ///
+    /// # Returns
+    ///
+    /// A `u64` representing the size of the module.
     pub fn len(&self) -> u64 {
         (self.end_addr - self.start_addr) + 1
     }
 
+    /// Constructs a `ModuleInfo` instance from a line of text.
+    ///
+    /// The line should contain information about a module in the format used by the `/proc/[pid]/maps` file in a Linux system.
+    ///
+    /// # Parameters
+    ///
+    /// * `line`: A reference to a string slice containing the module information.
+    ///
+    /// # Returns
+    ///
+    /// An `Option` that contains a `ModuleInfo` instance if the line could be parsed successfully, or `None` otherwise.
     pub fn from_line(line: &'a str) -> Option<Self> {
         let parts = line.split_whitespace();
         let mut module = ModuleInfo::default();
@@ -126,6 +177,19 @@ impl<'a> ModuleInfo<'a> {
     }
 }
 
+/// Returns the namespace PID (process ID) associated with a given PID.
+///
+/// The function reads the `/proc/{pid}/status` file to get the namespace PID.
+/// If the provided PID is zero, it reads the `/proc/self/status` file.
+///
+/// # Parameters
+///
+/// * `path_buf`: A mutable reference to a `PathBuf` instance. This buffer is cleared and used to build the path to the status file.
+/// * `pid`: The process ID for which to get the namespace PID. If this is zero, the function will get the namespace PID for the current process.
+///
+/// # Returns
+///
+/// An `Option` that contains the namespace PID if it could be read successfully, or `None` otherwise.
 pub(crate) fn ns_pid(
     path_buf: &mut PathBuf,
     pid: u32) -> Option<u32> {
@@ -153,6 +217,18 @@ pub(crate) fn ns_pid(
     None
 }
 
+/// Iterates over the memory modules of a process and applies a callback function to each module.
+///
+/// The function reads the `/proc/{pid}/maps` file to get the list of memory modules.
+/// If the provided PID is zero, it reads the `/proc/self/maps` file.
+///
+/// # Parameters
+///
+/// * `pid`: The process ID for which to iterate over the memory modules. If this is zero, the function
+///     will iterate over the modules of the current process.
+/// * `callback`: A mutable closure that takes a `ModuleInfo` reference as its argument and returns nothing.
+///     This closure is called for each module.
+///
 pub(crate) fn iter_proc_modules(
     pid: u32,
     mut callback: impl FnMut(&ModuleInfo)) {
@@ -174,6 +250,16 @@ pub(crate) fn iter_proc_modules(
     }
 }
 
+/// Iterates over each process and its modules in the system.
+///
+/// The function accepts a mutable callback function that is invoked for each module of every process.
+/// The callback function receives the process identifier (PID) and a reference to the module information.
+///
+/// # Arguments
+///
+/// * `callback` - A mutable callback function that gets executed for each module of every process.
+///     The callback function takes two parameters: a u32 representing the PID and a reference to the ModuleInfo struct.
+///
 pub(crate) fn iter_modules(
     mut callback: impl FnMut(u32, &ModuleInfo)) {
     iter_processes(|pid,path| {
@@ -191,6 +277,24 @@ pub(crate) fn iter_modules(
     });
 }
 
+/// Parses the command line of a process from the proc filesystem.
+///
+/// This function reads the `cmdline` file from the `/proc` directory for a given process,
+/// which contains the command that was used to launch the process. The function truncates
+/// the command at the first null character and returns it.
+///
+/// # Arguments
+///
+/// * `path` - A mutable reference to a PathBuf containing the path to the proc directory of the process.
+///
+/// # Returns
+///
+/// * `Option<String>` - The command used to launch the process, or None if the file could not be read.
+///
+/// # Errors
+///
+/// This function will return None if the `cmdline` file could not be read.
+///
 fn parse_long_comm(
     path: &mut path::PathBuf) -> Option<String> {
     path.push("cmdline");
@@ -220,6 +324,17 @@ fn parse_long_comm(
     }
 }
 
+/// Iterates over each process in the system.
+///
+/// The function accepts a mutable callback function that is invoked for each process.
+/// The callback function receives the process identifier (PID) and a mutable reference to the process path.
+///
+/// # Arguments
+///
+/// * `callback` - A mutable callback function that gets executed for each process.
+///     The callback function takes two parameters: a u32 representing the PID and a mutable reference to the
+///     PathBuf instance representing the process path.
+///
 pub(crate) fn iter_processes(mut callback: impl FnMut(u32, &mut PathBuf)) {
     let mut path_buf = PathBuf::new();
     path_buf.push("/proc");

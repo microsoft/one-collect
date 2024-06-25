@@ -5,18 +5,35 @@ static EMPTY: &[u8] = &[];
 
 type BoxedCallback = Box<dyn FnMut(&[u8], &EventFormat, &[u8]) -> anyhow::Result<()>>;
 
+/// `DataFieldRef` is a wrapper for a `DataField` contained in a `Cell`, wrapped in a `Rc`.
+/// This allows the `DataField` to be shared and updated across multiple consumers.
 #[derive(Clone)]
 pub struct DataFieldRef(Rc<Cell<DataField>>);
 
 impl DataFieldRef {
+    /// Creates a new reference to a `DataField`.
+    ///
+    /// # Returns
+    /// - A new `DataFieldRef` instance.
     pub fn new() -> Self {
         DataFieldRef(Rc::new(Cell::new(DataField::default())))
     }
 
+    /// Gets the data field that the reference is pointing to.
+    ///
+    /// # Returns
+    /// - A `DataField`.
     pub fn get(&self) -> DataField {
         (*self.0).get()
     }
 
+    /// Gets the data associated with the data field.
+    ///
+    /// # Parameters
+    /// - `data`: The event data from which to retrieve the field data.
+    ///
+    /// # Returns
+    /// - A slice of the data.
     pub fn get_data<'a>(
         &self,
         data: &'a [u8]) -> &'a [u8] {
@@ -27,6 +44,13 @@ impl DataFieldRef {
         &data[field.start() .. field.end()]
     }
 
+    /// Tries to retrieve the data that the `DataFieldRef` points to as a u64.
+    ///
+    /// # Parameters
+    /// - `data`: The data from which to retrieve the slice.
+    ///
+    /// # Returns
+    /// - A `Result` that contains the u64 value if successful, or an error if not.
     pub fn get_u64(
         &self,
         data: &[u8]) -> Result<u64, anyhow::Error> {
@@ -35,6 +59,13 @@ impl DataFieldRef {
         Ok(u64::from_ne_bytes(slice[0..8].try_into()?))
     }
 
+    /// Tries to retrieve the data that the `DataFieldRef` points to as a u64.
+    ///
+    /// # Parameters
+    /// - `data`: The data from which to retrieve the slice.
+    ///
+    /// # Returns
+    /// - An `Option` that contains the u64 value if successful, or `None` if not.
     pub fn try_get_u64(
         &self,
         data: &[u8]) -> Option<u64> {
@@ -48,6 +79,13 @@ impl DataFieldRef {
         }
     }
 
+    /// Tries to retrieve the data that the `DataFieldRef` points to as a u32.
+    ///
+    /// # Parameters
+    /// - `data`: The data from which to retrieve the slice.
+    ///
+    /// # Returns
+    /// - A `Result` that contains the u32 value if successful, or an error if not.
     pub fn get_u32(
         &self,
         data: &[u8]) -> Result<u32, anyhow::Error> {
@@ -56,6 +94,13 @@ impl DataFieldRef {
         Ok(u32::from_ne_bytes(slice[0..4].try_into()?))
     }
 
+    /// Tries to retrieve the data that the `DataFieldRef` points to as a u32.
+    ///
+    /// # Parameters
+    /// - `data`: The data from which to retrieve the slice.
+    ///
+    /// # Returns
+    /// - An `Option` that contains the u32 value if successful, or `None` if not.
     pub fn try_get_u32(
         &self,
         data: &[u8]) -> Option<u32> {
@@ -69,6 +114,13 @@ impl DataFieldRef {
         }
     }
 
+    /// Tries to retrieve the data that the `DataFieldRef` points to as a u16.
+    ///
+    /// # Parameters
+    /// - `data`: The data from which to retrieve the slice.
+    ///
+    /// # Returns
+    /// - A `Result` that contains the u16 value if successful, or an error if not.
     pub fn get_u16(
         &self,
         data: &[u8]) -> Result<u16, anyhow::Error> {
@@ -77,6 +129,13 @@ impl DataFieldRef {
         Ok(u16::from_ne_bytes(slice[0..2].try_into()?))
     }
 
+    /// Tries to retrieve the data that the `DataFieldRef` points to as a u16.
+    ///
+    /// # Parameters
+    /// - `data`: The data from which to retrieve the slice.
+    ///
+    /// # Returns
+    /// - An `Option` that contains the u16 value if successful, or `None` if not.
     pub fn try_get_u16(
         &self,
         data: &[u8]) -> Option<u16> {
@@ -90,10 +149,19 @@ impl DataFieldRef {
         }
     }
 
+    /// Resets the `DataField`'s start and end to 0.
     pub fn reset(&self) {
         self.update(0, 0);
     }
 
+    /// Updates the `DataField` that the `DataFieldRef` points to with a new start and length.
+    ///
+    /// # Parameters
+    /// - `start`: The start index of the new data field.
+    /// - `len`: The length of the new data field.
+    ///
+    /// # Returns
+    /// - The length of the new data field.
     pub fn update(
         &self,
         start: usize,
@@ -106,60 +174,107 @@ impl DataFieldRef {
 }
 
 impl Default for DataFieldRef {
+    /// Provides a default instance of `DataFieldRef`.
+    /// The default instance is created with a new `DataFieldRef`.
     fn default() -> Self {
         Self::new()
     }
 }
 
+/// `DataField` represents a slice of data with a start and end index.
+/// It is used to fetch specific portions of data.
 #[derive(Clone)]
 #[derive(Copy)]
 #[derive(Default)]
 pub struct DataField(u32, u32);
 
 impl DataField {
+    /// Constructs a new `DataField`.
+    ///
+    /// # Parameters
+    /// - `start`: The start position of the data field.
+    /// - `end`: The end position of the data field.
+    ///
+    /// # Returns
+    /// - A new `DataField` instance.
     fn new(
         start: u32,
         end: u32) -> Self {
         Self(start, end)
     }
 
+    /// Gets the start position of the data field.
+    ///
+    /// # Returns
+    /// - The start position as usize.
     fn start(&self) -> usize {
         self.0 as usize
     }
 
+    /// Gets the end position of the data field.
+    ///
+    /// # Returns
+    /// - The end position as usize.
     fn end(&self) -> usize {
         self.1 as usize
     }
 }
 
+/// `EventFieldRef` is a reference to an `EventField` in an `EventFormat`.
+/// It holds the index of the `EventField` in the `EventFormat`'s `fields` vector.
 #[derive(Clone)]
 #[derive(Copy)]
 pub struct EventFieldRef(usize);
 
 impl From<EventFieldRef> for usize {
+    /// Allows an `EventFieldRef` to be converted into a `usize`.
     fn from(val: EventFieldRef) -> Self {
         val.0
     }
 }
 
+/// `LocationType` is used to classify the type of location of an `EventField`.
+/// It describes if the location is static, dynamic, or a static string.
 #[derive(Debug)]
 #[derive(PartialEq)]
 pub enum LocationType {
+    /// Represents a static location that holds binary data.
     Static,
+    /// Represents a static location that holds a string.
     StaticString,
+    /// Represents a dynamic location, with the position being relative to another field.
     DynRelative,
+    /// Represents a dynamic location, with the position being an absolute index into the data.
     DynAbsolute,
 }
 
+/// `EventField` represents a field in an event.
+/// It holds information about the field name, type, location, offset, and size.
 pub struct EventField {
+    /// The name of the field.
     pub name: String,
+    /// The type of the field.
     pub type_name: String,
+    /// The location type of the field, which could be static, dynamic, or a static string.
     pub location: LocationType,
+    /// The offset of the field in the event data.
     pub offset: usize,
+    /// The size of the field in bytes.
     pub size: usize,
 }
 
 impl EventField {
+    /// Constructs a new `EventField`.
+    ///
+    /// # Parameters
+    /// - `name`: The name of the field.
+    /// - `type_name`: The type of the field.
+    /// - `location`: The location type of the field.
+    /// - `offset`: The offset of the field in the event data.
+    /// - `size`: The size of the field data.
+    ///
+    /// # Returns
+    /// - A new `EventField` instance.
     pub fn new(
         name: String,
         type_name: String,
@@ -176,39 +291,72 @@ impl EventField {
     }
 }
 
+/// `EventFormat` represents the format of an event.
+/// It holds a collection of `EventField`s which describe the fields within an event.
 pub struct EventFormat {
     fields: Vec<EventField>,
 }
 
 impl Default for EventFormat {
+    /// Creates a new `EventFormat` instance with an empty `fields` vector.
     fn default() -> Self {
         EventFormat::new()
     }
 }
 
 impl EventFormat {
+    /// Creates a new `EventFormat` instance with an empty `fields` vector.
     pub fn new() -> Self {
         Self {
             fields: Vec::new(),
         }
     }
 
+    /// Adds a new `EventField` to the `fields` vector.
+    ///
+    /// # Parameters
+    ///
+    /// - `field`: The `EventField` to add.
     pub fn add_field(
         &mut self,
         field: EventField) {
         self.fields.push(field);
     }
 
+    /// Returns a reference to the `fields` vector.
+    ///
+    /// # Returns
+    ///
+    /// A slice containing all the `EventField`s.
     pub fn fields(&self) -> &[EventField] {
         &self.fields
     }
 
+    /// Returns a reference to an `EventField` in the `fields` vector based on its name, if it exists.
+    /// This method does not perform any bounds checking.
+    ///
+    /// # Parameters
+    ///
+    /// - `name`: The name of the field.
+    ///
+    /// # Returns
+    ///
+    /// An `EventFieldRef` if a field with the given name exists, `None` otherwise.
     pub fn get_field_ref_unchecked(
         &self,
         name: &str) -> EventFieldRef {
         self.get_field_ref(name).unwrap()
     }
 
+    /// Returns a reference to an `EventField` in the `fields` vector based on its name, if it exists.
+    ///
+    /// # Parameters
+    ///
+    /// - `name`: The name of the field.
+    ///
+    /// # Returns
+    ///
+    /// An `EventFieldRef` if a field with the given name exists, `None` otherwise.
     pub fn get_field_ref(
         &self,
         name: &str) -> Option<EventFieldRef> {
@@ -221,6 +369,14 @@ impl EventFormat {
         None
     }
 
+    /// Retrieves the data associated with a given `EventFieldRef` within the provided data slice.
+    ///
+    /// # Parameters
+    /// - `field_ref`: A reference to the `EventField` for which to retrieve the data.
+    /// - `data`: The data slice from which to retrieve the field data.
+    ///
+    /// # Returns
+    /// - A slice of the provided data that corresponds to the requested `EventFieldRef`.
     pub fn get_data<'a>(
             &self,
             field_ref: EventFieldRef,
@@ -269,6 +425,18 @@ impl EventFormat {
         }
     }
 
+    /// Retrieves the value of a specified field from the event data as a 64-bit unsigned integer.
+    ///
+    /// # Parameters
+    ///
+    /// - `field_ref`: A reference to the `EventField` for which to retrieve the data.
+    /// - `data`: The event data from which to retrieve the field value.
+    ///
+    /// # Returns
+    ///
+    /// - A `Result` which is:
+    ///     - `Ok` variant containing the value of the field if it exists and can be read as a 64-bit unsigned integer;
+    ///     - `Err` variant containing an error if the field does not exist or cannot be read as a 64-bit unsigned integer.
     pub fn get_u64(
         &self,
         field_ref: EventFieldRef,
@@ -278,6 +446,18 @@ impl EventFormat {
         Ok(u64::from_ne_bytes(slice[0..8].try_into()?))
     }
 
+    /// Tries to retrieve the value of a specified field from the event data as a 64-bit unsigned integer.
+    ///
+    /// # Parameters
+    ///
+    /// - `field_ref`: A reference to the `EventField` for which to retrieve the data.
+    /// - `data`: The event data from which to retrieve the field value.
+    ///
+    /// # Returns
+    ///
+    /// - An `Option` which is:
+    ///     - `Some` variant containing the value of the field if it exists and can be read as a 64-bit unsigned integer;
+    ///     - `None` if the field does not exist or cannot be read as a 64-bit unsigned integer.
     pub fn try_get_u64(
         &self,
         field_ref: EventFieldRef,
@@ -292,6 +472,18 @@ impl EventFormat {
         }
     }
 
+    /// Retrieves the value of a specified field from the event data as a 32-bit unsigned integer.
+    ///
+    /// # Parameters
+    ///
+    /// - `field_ref`: A reference to the `EventField` for which to retrieve the data.
+    /// - `data`: The event data from which to retrieve the field value.
+    ///
+    /// # Returns
+    ///
+    /// - A `Result` which is:
+    ///     - `Ok` variant containing the value of the field if it exists and can be read as a 32-bit unsigned integer;
+    ///     - `Err` variant containing an error if the field does not exist or cannot be read as a 32-bit unsigned integer.
     pub fn get_u32(
         &self,
         field_ref: EventFieldRef,
@@ -301,6 +493,18 @@ impl EventFormat {
         Ok(u32::from_ne_bytes(slice[0..4].try_into()?))
     }
 
+    /// Tries to retrieve the value of a specified field from the event data as a 32-bit unsigned integer.
+    ///
+    /// # Parameters
+    ///
+    /// - `field_ref`: A reference to the `EventField` for which to retrieve the data.
+    /// - `data`: The event data from which to retrieve the field value.
+    ///
+    /// # Returns
+    ///
+    /// - An `Option` which is:
+    ///     - `Some` variant containing the value of the field if it exists and can be read as a 32-bit unsigned integer;
+    ///     - `None` if the field does not exist or cannot be read as a 32-bit unsigned integer.
     pub fn try_get_u32(
         &self,
         field_ref: EventFieldRef,
@@ -315,6 +519,18 @@ impl EventFormat {
         }
     }
 
+    /// Retrieves the value of a specified field from the event data as a 16-bit unsigned integer.
+    ///
+    /// # Parameters
+    ///
+    /// - `field_ref`: A reference to the `EventField` for which to retrieve the data.
+    /// - `data`: The event data from which to retrieve the field value.
+    ///
+    /// # Returns
+    ///
+    /// - A `Result` which is:
+    ///     - `Ok` variant containing the value of the field if it exists and can be read as a 16-bit unsigned integer;
+    ///     - `Err` variant containing an error if the field does not exist or cannot be read as a 16-bit unsigned integer.
     pub fn get_u16(
         &self,
         field_ref: EventFieldRef,
@@ -324,6 +540,18 @@ impl EventFormat {
         Ok(u16::from_ne_bytes(slice[0..2].try_into()?))
     }
 
+    /// Tries to retrieve the value of a specified field from the event data as a 16-bit unsigned integer.
+    ///
+    /// # Parameters
+    ///
+    /// - `field_ref`: A reference to the `EventField` for which to retrieve the data.
+    /// - `data`: The event data from which to retrieve the field value.
+    ///
+    /// # Returns
+    ///
+    /// - An `Option` which is:
+    ///     - `Some` variant containing the value of the field if it exists and can be read as a 16-bit unsigned integer;
+    ///     - `None` if the field does not exist or cannot be read as a 16-bit unsigned integer.
     pub fn try_get_u16(
         &self,
         field_ref: EventFieldRef,
@@ -338,6 +566,18 @@ impl EventFormat {
         }
     }
 
+    /// Retrieves the value of a specified field from the event data as a string.
+    ///
+    /// # Parameters
+    ///
+    /// - `field_ref`: A reference to the `EventField` for which to retrieve the data.
+    /// - `data`: The event data from which to retrieve the field value.
+    ///
+    /// # Returns
+    ///
+    /// - A `Result` which is:
+    ///     - `Ok` variant containing the value of the field if it exists and can be read as a string;
+    ///     - `Err` variant containing an error if the field does not exist or cannot be read as a string.
     pub fn get_str<'a>(
         &self,
         field_ref: EventFieldRef,
@@ -348,6 +588,18 @@ impl EventFormat {
         Ok(std::str::from_utf8(slice)?)
     }
 
+    /// Tries to retrieve the value of a specified field from the event data as a string.
+    ///
+    /// # Parameters
+    ///
+    /// - `field_ref`: A reference to the `EventField` for which to retrieve the data.
+    /// - `data`: The event data from which to retrieve the field value.
+    ///
+    /// # Returns
+    ///
+    /// - An `Option` which is:
+    ///     - `Some` variant containing the value of the field if it exists and can be read as a string;
+    ///     - `None` if the field does not exist or cannot be read as a string.
     pub fn try_get_str<'a>(
         &self,
         field_ref: EventFieldRef,
@@ -365,6 +617,7 @@ impl EventFormat {
 
 const EVENT_FLAG_NO_CALLSTACK:u64 = 1u64 << 0;
 
+/// `Event` represents a system event in the context of event collection and profiling.
 pub struct Event {
     id: usize,
     name: String,
@@ -374,6 +627,12 @@ pub struct Event {
 }
 
 impl Event {
+    /// Constructs a new Event.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The ID of the event.
+    /// * `name` - The name of the event.
     pub fn new(
         id: usize,
         name: String) -> Self {
@@ -386,36 +645,56 @@ impl Event {
         }
     }
 
+    /// Returns the ID of the event.
     pub fn id(&self) -> usize {
         self.id
     }
 
+    /// Returns the name of the event.
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// Sets the no_callstack flag for the event. Use this when events are expected
+    /// to have high volumes and callstacks should not be collected for performance
+    /// reasons.
     pub fn set_no_callstack_flag(&mut self) {
         self.flags |= EVENT_FLAG_NO_CALLSTACK;
     }
 
+    /// Checks if the no_callstack flag is set for the event.
     pub fn has_no_callstack_flag(&self) -> bool {
         self.flags & EVENT_FLAG_NO_CALLSTACK != 0
     }
 
+    /// Returns a mutable reference to the event format.
     pub fn format_mut(&mut self) -> &mut EventFormat {
         &mut self.format
     }
 
+    /// Returns a reference to the event format.
     pub fn format(&self) -> &EventFormat {
         &self.format
     }
 
+    /// Adds a callback function to the event that runs each time the event is processed.
+    ///
+    /// # Arguments
+    ///
+    /// * `callback` - A callback function that returns a Result.
     pub fn add_callback(
         &mut self,
         callback: impl FnMut(&[u8], &EventFormat, &[u8]) -> anyhow::Result<()> + 'static) {
         self.callbacks.push(Box::new(callback));
     }
 
+    /// Processes the event by running all callbacks with the supplied data.
+    ///
+    /// # Arguments
+    ///
+    /// * `full_data` - The full data related to the event.
+    /// * `event_data` - The event-related data.
+    /// * `errors` - A vector to store any errors that occur during the process.
     pub fn process(
         &mut self,
         full_data: &[u8],
