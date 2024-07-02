@@ -20,7 +20,7 @@ use crate::PathBufInteger;
 ///
 /// If the `comm` value is exactly 15 characters long (the maximum length for this field), this can be an indication
 /// that the process's actual name is longer. In such a case, the function attempts to retreive the full process name.
-pub(crate) fn get_comm(
+pub fn get_comm(
     path: &mut path::PathBuf) -> Option<String> {
     path.push("comm");
     let result = fs::read_to_string(&path);
@@ -68,7 +68,7 @@ pub(crate) fn get_comm(
 /// This struct is typically used in conjunction with other process-related information to provide
 /// a comprehensive view of a process's state.
 #[derive(Default)]
-pub(crate) struct ModuleInfo<'a> {
+pub struct ModuleInfo<'a> {
     pub start_addr: u64,
     pub end_addr: u64,
     pub offset: u64,
@@ -190,7 +190,7 @@ impl<'a> ModuleInfo<'a> {
 /// # Returns
 ///
 /// An `Option` that contains the namespace PID if it could be read successfully, or `None` otherwise.
-pub(crate) fn ns_pid(
+pub fn ns_pid(
     path_buf: &mut PathBuf,
     pid: u32) -> Option<u32> {
     path_buf.clear();
@@ -229,7 +229,7 @@ pub(crate) fn ns_pid(
 /// * `callback`: A mutable closure that takes a `ModuleInfo` reference as its argument and returns nothing.
 ///     This closure is called for each module.
 ///
-pub(crate) fn iter_proc_modules(
+pub fn iter_proc_modules(
     pid: u32,
     mut callback: impl FnMut(&ModuleInfo)) {
     let mut path_buf = PathBuf::new();
@@ -260,7 +260,7 @@ pub(crate) fn iter_proc_modules(
 /// * `callback` - A mutable callback function that gets executed for each module of every process.
 ///     The callback function takes two parameters: a u32 representing the PID and a reference to the ModuleInfo struct.
 ///
-pub(crate) fn iter_modules(
+pub fn iter_modules(
     mut callback: impl FnMut(u32, &ModuleInfo)) {
     iter_processes(|pid,path| {
         path.push("maps");
@@ -335,7 +335,7 @@ fn parse_long_comm(
 ///     The callback function takes two parameters: a u32 representing the PID and a mutable reference to the
 ///     PathBuf instance representing the process path.
 ///
-pub(crate) fn iter_processes(mut callback: impl FnMut(u32, &mut PathBuf)) {
+pub fn iter_processes(mut callback: impl FnMut(u32, &mut PathBuf)) {
     let mut path_buf = PathBuf::new();
     path_buf.push("/proc");
 
