@@ -408,9 +408,11 @@ impl RingBufDataSource {
             .get_or_insert_with(RingBufBuilder::for_kernel)
             .build();
 
-        let pids = match self.target_pids.take() {
+        let empty_pids = Vec::new();
+
+        let pids = match &self.target_pids {
             Some(pids) => { pids },
-            None => { Vec::new() },
+            None => { &empty_pids },
         };
 
         /* Build the kernel only dummy rings first */
@@ -466,7 +468,7 @@ impl RingBufDataSource {
                     &common,
                     None)?;
             } else {
-                for pid in &pids {
+                for pid in pids {
                     Self::add_cpu_bufs(
                         Some(*pid),
                         &self.leader_ids,
@@ -489,7 +491,7 @@ impl RingBufDataSource {
                     &common,
                     None)?;
             } else {
-                for pid in &pids {
+                for pid in pids {
                     Self::add_cpu_bufs(
                         Some(*pid),
                         &self.leader_ids,
