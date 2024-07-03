@@ -10,6 +10,7 @@ use ruwind::{CodeSection, Unwindable};
 
 use super::*;
 
+#[derive(Clone, Copy)]
 pub struct ExportProcessSample {
     time: u64,
     value: u64,
