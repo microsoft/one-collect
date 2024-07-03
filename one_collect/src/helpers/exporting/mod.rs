@@ -730,7 +730,7 @@ impl ExportMachine {
         Ok(())
     }
 
-    fn add_custom_sample(
+    pub fn add_custom_sample(
         &mut self,
         pid: u32,
         sample: ExportProcessSample) -> anyhow::Result<()> {
