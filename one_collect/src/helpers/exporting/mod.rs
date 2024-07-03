@@ -162,8 +162,7 @@ impl ExportSampler {
         &mut self,
         pid: u32,
         sample: ExportProcessSample) -> anyhow::Result<()> {
-        self.exporter.borrow_mut().process_mut(pid).add_sample(sample);
-        Ok(())
+        self.exporter.borrow_mut().add_custom_sample(pid, sample)
     }
 
     fn add_sample(
@@ -726,6 +725,15 @@ impl ExportMachine {
             kind,
             frames);
 
+        self.process_mut(pid).add_sample(sample);
+
+        Ok(())
+    }
+
+    fn add_custom_sample(
+        &mut self,
+        pid: u32,
+        sample: ExportProcessSample) -> anyhow::Result<()> {
         self.process_mut(pid).add_sample(sample);
 
         Ok(())
