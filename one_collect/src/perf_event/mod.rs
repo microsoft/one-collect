@@ -3,7 +3,7 @@ use std::os::fd::FromRawFd;
 use std::path::PathBuf;
 use std::time::Duration;
 use std::array::TryFromSliceError;
-use std::collections::HashMap;
+use std::collections::{HashSet, HashMap};
 use std::rc::Rc;
 
 use super::*;
@@ -176,6 +176,8 @@ pub trait PerfDataSource {
     fn enable(&mut self) -> IOResult<()>;
 
     fn disable(&mut self) -> IOResult<()>;
+
+    fn target_pids(&self) -> Option<&[i32]>;
 
     fn create_bpf_files(
         &mut self,
@@ -1099,7 +1101,9 @@ impl PerfSession {
         Ok(())
     }
 
-    pub fn capture_environment_comms(&mut self) {
+    pub fn capture_environment_comms(
+        &mut self,
+        pid_lookup: &Option<HashSet<i32>>) {
         let attributes = RingBufBuilder::common_attributes();
         let enabled = self.source_enabled;
 
@@ -1110,6 +1114,13 @@ impl PerfSession {
         let id_bytes = 0u64.to_ne_bytes();
 
         procfs::iter_processes(move |pid, path_buf| {
+            // Skip non-target PIDs if we have them
+            if let Some(pid_lookup) = &pid_lookup {
+                if !pid_lookup.contains(&(pid as i32)) {
+                    return;
+                }
+            }
+
             // Comm is encoded as a UTF-8 string.
             let comm = procfs::get_comm(path_buf)
                 .unwrap_or(String::new());
@@ -1159,7 +1170,9 @@ impl PerfSession {
         });
     }
 
-    pub fn capture_environment_modules(&mut self) {
+    pub fn capture_environment_modules(
+        &mut self,
+        pid_lookup: &Option<HashSet<i32>>) {
         let attributes = RingBufBuilder::common_attributes();
         let enabled = self.source_enabled;
         let mut event_data: Vec<u8> = Vec::new();
@@ -1174,6 +1187,13 @@ impl PerfSession {
         procfs::iter_modules(move |pid, module| {
             if module.path.is_none() {
                 return;
+            }
+
+            // Skip non-target PIDs if we have them
+            if let Some(pid_lookup) = &pid_lookup {
+                if !pid_lookup.contains(&(pid as i32)) {
+                    return;
+                }
             }
 
             let path = module.path.unwrap();
@@ -1232,8 +1252,20 @@ impl PerfSession {
     }
 
     pub fn capture_environment(&mut self) {
-        self.capture_environment_comms();
-        self.capture_environment_modules();
+        let mut pid_lookup = None;
+
+        if let Some(pids) = self.source.target_pids() {
+            let mut lookup = HashSet::new();
+
+            for pid in pids {
+                lookup.insert(*pid);
+            }
+
+            pid_lookup = Some(lookup);
+        }
+
+        self.capture_environment_comms(&pid_lookup);
+        self.capture_environment_modules(&pid_lookup);
     }
 }
 
@@ -1286,6 +1318,8 @@ mod tests {
         fn enable(&mut self) -> IOResult<()> { Ok(()) }
 
         fn disable(&mut self) -> IOResult<()> { Ok(()) }
+
+        fn target_pids(&self) -> Option<&[i32]> { None }
 
         fn create_bpf_files(
             &mut self,

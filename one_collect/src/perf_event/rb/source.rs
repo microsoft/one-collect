@@ -635,6 +635,13 @@ impl PerfDataSource for RingBufDataSource {
         self.disable()
     }
 
+    fn target_pids(&self) -> Option<&[i32]> {
+        match &self.target_pids {
+            Some(pids) => { Some(&pids) },
+            None => { None },
+        }
+    }
+
     fn create_bpf_files(
         &mut self,
         event: Option<&Event>) -> IOResult<Vec<PerfDataFile>> {
