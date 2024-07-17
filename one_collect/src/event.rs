@@ -3,7 +3,51 @@ use std::rc::Rc;
 
 static EMPTY: &[u8] = &[];
 
-type BoxedCallback = Box<dyn FnMut(&[u8], &EventFormat, &[u8]) -> anyhow::Result<()>>;
+pub struct EventData<'a> {
+    full_data: &'a [u8],
+    event_data: &'a [u8],
+    format: &'a EventFormat,
+}
+
+impl<'a> EventData<'a> {
+    /// Constructs a new EventData.
+    ///
+    /// # Arguments
+    ///
+    /// * `full_data` - The full data for the event.
+    /// * `event_data` - The event specific payload data.
+    /// * `format` - The format of the event describing the payload data.
+    pub fn new(
+        full_data: &'a [u8],
+        event_data: &'a [u8],
+        format: &'a EventFormat) -> Self {
+        Self {
+            full_data,
+            event_data,
+            format,
+        }
+    }
+
+    /// Gets the full data for the event, including non-payload data.
+    ///
+    /// # Returns
+    /// - A slice of the full data.
+    pub fn full_data(&self) -> &[u8] { self.full_data }
+
+    /// Gets the payload data for the event.
+    ///
+    /// # Returns
+    /// - A slice of the event specific payload data.
+    pub fn event_data(&self) -> &[u8] { self.event_data }
+
+    /// Gets the format of the event.
+    ///
+    /// # Returns
+    /// - A `EventFormat` reference of the event.
+    pub fn format(&self) -> &EventFormat { self.format }
+}
+
+type BoxedCallback = Box<dyn FnMut(&EventData) -> anyhow::Result<()>>;
 
 /// `DataFieldRef` is a wrapper for a `DataField` contained in a `Cell`, wrapped in a `Rc`.
 /// This allows the `DataField` to be shared and updated across multiple consumers.
@@ -684,7 +728,7 @@ impl Event {
     /// * `callback` - A callback function that returns a Result.
     pub fn add_callback(
         &mut self,
-        callback: impl FnMut(&[u8], &EventFormat, &[u8]) -> anyhow::Result<()> + 'static) {
+        callback: impl FnMut(&EventData) -> anyhow::Result<()> + 'static) {
         self.callbacks.push(Box::new(callback));
     }
 
@@ -700,8 +744,13 @@ impl Event {
         full_data: &[u8],
         event_data: &[u8],
         errors: &mut Vec<anyhow::Error>) {
+        let data = EventData::new(
+            full_data,
+            event_data,
+            &self.format);
+
         for callback in &mut self.callbacks {
-            if let Err(e) = (callback)(full_data, &self.format, event_data) {
+            if let Err(e) = (callback)(&data) {
                 errors.push(e);
             }
         }
@@ -742,7 +791,10 @@ mod tests {
         let second = format.get_field_ref("2").unwrap();
         let third = format.get_field_ref("3").unwrap();
 
-        e.add_callback(move |_full_data, format, event_data| {
+        e.add_callback(move |data| {
+            let format = data.format();
+            let event_data = data.event_data();
+
             let a = format.get_data(first, event_data);
             let b = format.get_data(second, event_data);
             let c = format.get_data(third, event_data);
@@ -794,7 +846,7 @@ mod tests {
     #[test]
     fn error_reporting() {
         let mut e = create_abc();
-        e.add_callback(|_full_data, _format, _event_data| {
+        e.add_callback(|_| {
             Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 "Oops").into())

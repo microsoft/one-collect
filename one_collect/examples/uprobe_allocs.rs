@@ -71,7 +71,10 @@ fn main() -> Result<(), anyhow::Error> {
     let swap = total.clone();
     let size_ref = alloc_event.format().get_field_ref_unchecked("size");
 
-    alloc_event.add_callback(move |_full_data,format,event_data| {
+    alloc_event.add_callback(move |data| {
+        let format = data.format();
+        let event_data = data.event_data();
+
         let size = format.get_u64(size_ref, event_data)?;
         total.write(|value| { *value += size; });
         Ok(())

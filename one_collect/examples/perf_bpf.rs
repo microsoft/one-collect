@@ -27,7 +27,10 @@ fn main() {
     let pid_field = session.pid_field_ref();
     let time_field = session.time_data_ref();
 
-    event.add_callback(move |full_data, _format, event_data| {
+    event.add_callback(move |data| {
+        let full_data = data.full_data();
+        let event_data = data.event_data();
+
         println!("CPU={}, PID={}, Time={}, Data={} Bytes:",
             ancillary.borrow().cpu(),
             pid_field.get_u32(full_data)?,
@@ -71,13 +74,13 @@ fn main() {
         map_path,
         event).expect("Attach should work");
 
-    session.lost_event().add_callback(|_,_,_| {
+    session.lost_event().add_callback(|_| {
         println!("WARN: Lost event data");
 
         Ok(())
     });
 
-    session.lost_samples_event().add_callback(|_,_,_| {
+    session.lost_samples_event().add_callback(|_| {
         println!("WARN: Lost samples data");
 
         Ok(())

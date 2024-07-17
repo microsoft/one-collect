@@ -39,13 +39,13 @@ fn main() {
 
     let exporter = session.build_exporter(settings).unwrap();
 
-    session.lost_event().add_callback(|_,_,_| {
+    session.lost_event().add_callback(|_| {
         println!("WARN: Lost event data");
 
         Ok(())
     });
 
-    session.lost_samples_event().add_callback(|_,_,_| {
+    session.lost_samples_event().add_callback(|_| {
         println!("WARN: Lost samples data");
 
         Ok(())

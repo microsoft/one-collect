@@ -302,7 +302,10 @@ impl DotNetHelp for RingBufSessionBuilder {
                     let perfmap = Writable::new(tracker);
                     let perfmap_close = perfmap.clone();
 
-                    event.add_callback(move |_full_data,fmt,data| {
+                    event.add_callback(move |data| {
+                        let fmt = data.format();
+                        let data = data.event_data();
+
                         let prot = fmt.get_u32(prot, data)? as i32;
 
                         /* Skip non-executable mmaps */
@@ -325,7 +328,7 @@ impl DotNetHelp for RingBufSessionBuilder {
                     /* When session drops, stop worker thread */
                     let event = session.drop_event();
 
-                    event.add_callback(move |_full_data,_fmt,_data| {
+                    event.add_callback(move |_| {
                         perfmap_close.borrow_mut().disable()
                     });
                 }

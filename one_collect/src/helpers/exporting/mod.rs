@@ -799,14 +799,14 @@ impl ExportMachine {
                 let event_sampler = shared_sampler.clone();
 
                 /* Trampoline between event callback and exporter callback */
-                event.add_callback(move |full_data, format, event_data| {
+                event.add_callback(move |data| {
                     (callback.trace)(
                         &mut ExportTraceContext::new(
                             &mut event_sampler.borrow_mut(),
                             sample_kind,
-                            full_data,
-                            event_data,
-                            format))
+                            data.full_data(),
+                            data.event_data(),
+                            data.format()))
                 });
 
                 /* Add event to session */
@@ -829,7 +829,9 @@ impl ExportMachine {
             let event_machine = machine.clone();
             let mut frames: Vec<u64> = Vec::new();
 
-            event.add_callback(move |full_data,_fmt,_data| {
+            event.add_callback(move |data| {
+                let full_data = data.full_data();
+
                 let ancillary = ancillary.borrow();
 
                 let cpu = ancillary.cpu() as u16;
@@ -869,7 +871,9 @@ impl ExportMachine {
             let event_machine = machine.clone();
             let mut frames: Vec<u64> = Vec::new();
 
-            event.add_callback(move |full_data,_fmt,_data| {
+            event.add_callback(move |data| {
+                let full_data = data.full_data();
+
                 let ancillary = ancillary.borrow();
 
                 let cpu = ancillary.cpu() as u16;
@@ -913,7 +917,9 @@ impl ExportMachine {
             let event = session.cswitch_event();
             let event_machine = machine.clone();
 
-            event.add_callback(move |full_data,_fmt,_data| {
+            event.add_callback(move |data| {
+                let full_data = data.full_data();
+
                 let misc = misc_field.get_u16(full_data)?;
                 let time = time_field.get_u64(full_data)?;
                 let pid = pid_field.get_u32(full_data)?;
@@ -989,7 +995,10 @@ impl ExportMachine {
         let filename = fmt.get_field_ref_unchecked("filename[]");
 
         const PROT_EXEC: u32 = 4;
-        event.add_callback(move |_full_data,fmt,data| {
+        event.add_callback(move |data| {
+            let fmt = data.format();
+            let data = data.event_data();
+
             let prot = fmt.get_u32(prot, data)?;
 
             /* Skip non-executable mmaps */
@@ -1016,7 +1025,10 @@ impl ExportMachine {
         let tid = fmt.get_field_ref_unchecked("tid");
         let comm = fmt.get_field_ref_unchecked("comm[]");
 
-        event.add_callback(move |_full_data,fmt,data| {
+        event.add_callback(move |data| {
+            let fmt = data.format();
+            let data = data.event_data();
+
             let pid = fmt.get_u32(pid, data)?;
             let tid = fmt.get_u32(tid, data)?;
 
@@ -1037,7 +1049,10 @@ impl ExportMachine {
         let ppid = fmt.get_field_ref_unchecked("ppid");
         let tid = fmt.get_field_ref_unchecked("tid");
 
-        event.add_callback(move |_full_data,fmt,data| {
+        event.add_callback(move |data| {
+            let fmt = data.format();
+            let data = data.event_data();
+
             let pid = fmt.get_u32(pid, data)?;
             let tid = fmt.get_u32(tid, data)?;
 
@@ -1174,13 +1189,13 @@ mod tests {
 
         let duration = std::time::Duration::from_secs(1);
 
-        session.lost_event().add_callback(|_,_,_| {
+        session.lost_event().add_callback(|_| {
             println!("WARN: Lost event data");
 
             Ok(())
         });
 
-        session.lost_samples_event().add_callback(|_,_,_| {
+        session.lost_samples_event().add_callback(|_| {
             println!("WARN: Lost samples data");
 
             Ok(())

@@ -50,7 +50,11 @@ fn main() {
     let final_output = output.clone();
     let mut i = 0u64;
 
-    cswitch.add_callback(move |full_data,format,event_data| {
+    cswitch.add_callback(move |data| {
+        let full_data = data.full_data();
+        let format = data.format();
+        let event_data = data.event_data();
+
         let pid = format.get_u32(next_prev_pid, event_data)?;
 
         if pid == 0 {

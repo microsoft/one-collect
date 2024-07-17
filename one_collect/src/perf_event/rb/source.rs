@@ -857,7 +857,9 @@ mod tests {
 
         let atomic_time = Arc::new(AtomicUsize::new(0));
 
-        prof_event.add_callback(move |full_data,_format,_event_data| {
+        prof_event.add_callback(move |data| {
+            let full_data = data.full_data();
+
             let time = time_data.try_get_u64(full_data).unwrap() as usize;
             let prev = atomic_time.load(Ordering::Relaxed);
             let mut cpu: u32 = 0;
