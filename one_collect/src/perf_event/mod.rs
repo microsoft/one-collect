@@ -351,7 +351,10 @@ impl PerfSession {
         let mut path_buf = PathBuf::new();
         path_buf.push("/proc");
 
-        comm_event.add_callback(move |_full_data, format, event_data| {
+        comm_event.add_callback(move |data| {
+            let format = data.format();
+            let event_data = data.event_data();
+
             let pid = format.get_u32(pid_field, event_data)?;
             let tid = format.get_u32(tid_field, event_data)?;
 
@@ -389,7 +392,10 @@ impl PerfSession {
         let pid_field: EventFieldRef = fork_event_format.get_field_ref_unchecked("pid");
         let ppid_field = fork_event_format.get_field_ref_unchecked("ppid");
 
-        fork_event.add_callback(move |_full_data, format, event_data| {
+        fork_event.add_callback(move |data| {
+            let format = data.format();
+            let event_data = data.event_data();
+
             let pid = format.get_u32(pid_field, event_data)?;
             let ppid = format.get_u32(ppid_field, event_data)?;
 
@@ -406,7 +412,10 @@ impl PerfSession {
         let pid_field = exit_event_format.get_field_ref_unchecked("pid");
         let tid_field = exit_event_format.get_field_ref_unchecked("tid");
 
-        exit_event.add_callback(move |_full_data, format, event_data| {
+        exit_event.add_callback(move |data| {
+            let format = data.format();
+            let event_data = data.event_data();
+
             let pid = format.get_u32(pid_field, event_data)?;
             let tid = format.get_u32(tid_field, event_data)?;
 
@@ -1390,7 +1399,10 @@ mod tests {
         let second = format.get_field_ref("2").unwrap();
         let third = format.get_field_ref("3").unwrap();
 
-        e.add_callback(move |_full_data, format, event_data| {
+        e.add_callback(move |data| {
+            let format = data.format();
+            let event_data = data.event_data();
+
             let a = format.get_data(first, event_data);
             let b = format.get_data(second, event_data);
             let c = format.get_data(third, event_data);
@@ -1499,7 +1511,11 @@ mod tests {
         let magic_ref = format.get_field_ref("magic").unwrap();
 
         /* Parse upon being read with this code */
-        e.add_callback(move |full_data, format, event_data| {
+        e.add_callback(move |data| {
+            let full_data = data.full_data();
+            let format = data.format();
+            let event_data = data.event_data();
+
             let read_time = time_data.try_get_u64(full_data).unwrap();
             let read_magic = format.try_get_u64(magic_ref, event_data).unwrap();
 

@@ -606,7 +606,10 @@ impl CallstackHelp for RingBufSessionBuilder {
                 let filename = fmt.get_field_ref_unchecked("filename[]");
                 let state = session_state.clone();
 
-                event.add_callback(move |_full_data,fmt,data| {
+                event.add_callback(move |data| {
+                    let fmt = data.format();
+                    let data = data.event_data();
+
                     let prot = fmt.get_u32(prot, data)? as i32;
 
                     /* Skip non-executable mmaps */
@@ -636,7 +639,10 @@ impl CallstackHelp for RingBufSessionBuilder {
                 let tid = fmt.get_field_ref_unchecked("tid");
                 let state = session_state.clone();
 
-                event.add_callback(move |_full_data,fmt,data| {
+                event.add_callback(move |data| {
+                    let fmt = data.format();
+                    let data = data.event_data();
+
                     let pid = fmt.get_u32(pid, data)?;
                     let tid = fmt.get_u32(tid, data)?;
 
@@ -659,7 +665,10 @@ impl CallstackHelp for RingBufSessionBuilder {
                 let tid = fmt.get_field_ref_unchecked("tid");
                 let state = session_state.clone();
 
-                event.add_callback(move |_full_data,fmt,data| {
+                event.add_callback(move |data| {
+                    let fmt = data.format();
+                    let data = data.event_data();
+
                     let pid = fmt.get_u32(pid, data)?;
                     let tid = fmt.get_u32(tid, data)?;
 
@@ -682,7 +691,10 @@ impl CallstackHelp for RingBufSessionBuilder {
                 let pid = fmt.get_field_ref_unchecked("pid");
                 let state = session_state.clone();
 
-                event.add_callback(move |_full_data,fmt,data| {
+                event.add_callback(move |data| {
+                    let fmt = data.format();
+                    let data = data.event_data();
+
                     let pid = fmt.get_u32(pid, data)?;
 
                     state.write(|state| {
@@ -725,7 +737,9 @@ mod tests {
         let bad_count = Writable::new(0u64);
         let callback_count = bad_count.clone();
 
-        waking.add_callback(move |full_data,_fmt,_data| {
+        waking.add_callback(move |data| {
+            let full_data = data.full_data();
+
             frames.clear();
 
             stack_reader.read_frames(
@@ -779,7 +793,9 @@ mod tests {
         let event = session.cpu_profile_event();
         let mut frames = Vec::new();
 
-        event.add_callback(move |full_data,_fmt,_data| {
+        event.add_callback(move |data| {
+            let full_data = data.full_data();
+
             let pid = pid_field.try_get_u32(full_data).unwrap();
             frames.clear();
 
@@ -798,13 +814,13 @@ mod tests {
             Ok(())
         });
 
-        session.lost_event().add_callback(|_,_,_| {
+        session.lost_event().add_callback(|_| {
             println!("WARN: Lost event data");
 
             Ok(())
         });
 
-        session.lost_samples_event().add_callback(|_,_,_| {
+        session.lost_samples_event().add_callback(|_| {
             println!("WARN: Lost samples data");
 
             Ok(())

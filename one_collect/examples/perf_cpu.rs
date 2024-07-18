@@ -37,7 +37,7 @@ impl Utilization {
         /* Setup to inc cpu by 1 on each cpu profile */
         session
             .cpu_profile_event()
-            .add_callback(move |_full_data,_event_format,_event_data| {
+            .add_callback(move |_| {
                 let mut cpu: u32 = 0;
 
                 ancillary.read(|values| {

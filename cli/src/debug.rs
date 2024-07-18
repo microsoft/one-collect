@@ -95,7 +95,10 @@ impl<'a> DebugConsoleSession<'a> {
         let comm_tid_ref = comm_event_format.get_field_ref_unchecked("tid");
         let comm_comm_ref = comm_event_format.get_field_ref_unchecked("comm[]");
 
-        comm_event.add_callback( move |full_data,format,event_data| {
+        comm_event.add_callback( move |data| {
+            let full_data = data.full_data();
+            let format = data.format();
+            let event_data = data.event_data();
 
             // timestamp
             let time = time_data.get_u64(full_data)? as usize;
@@ -132,7 +135,10 @@ impl<'a> DebugConsoleSession<'a> {
         let exit_pid_ref = exit_event_format.get_field_ref_unchecked("pid");
         let exit_tid_ref = exit_event_format.get_field_ref_unchecked("tid");
 
-        exit_event.add_callback( move |full_data,format,event_data| {
+        exit_event.add_callback( move |data| {
+            let full_data = data.full_data();
+            let format = data.format();
+            let event_data = data.event_data();
 
             // timestamp
             let time = time_data.get_u64(full_data)? as usize;
@@ -166,7 +172,8 @@ impl<'a> DebugConsoleSession<'a> {
         let pid_field = perf_session.pid_field_ref();
         let tid_field = perf_session.tid_data_ref();
 
-        perf_session.cpu_profile_event().add_callback( move |full_data,_format,_event_data| {
+        perf_session.cpu_profile_event().add_callback( move |data| {
+            let full_data = data.full_data();
 
             // timestamp
             let time = time_data.get_u64(full_data)? as usize;
@@ -224,7 +231,10 @@ impl<'a> DebugConsoleSession<'a> {
         let id_field = lost_event_format.get_field_ref_unchecked("id");
         let lost_field = lost_event_format.get_field_ref_unchecked("lost");
 
-        lost_event.add_callback(move |full_data,format,event_data| {
+        lost_event.add_callback(move |data| {
+            let full_data = data.full_data();
+            let format = data.format();
+            let event_data = data.event_data();
 
             // timestamp
             let time = time_data.get_u64(full_data)? as usize;
@@ -256,7 +266,10 @@ impl<'a> DebugConsoleSession<'a> {
         let lost_samples_event_format = lost_samples_event.format();
         let lost_field = lost_samples_event_format.get_field_ref_unchecked("lost");
 
-        lost_samples_event.add_callback(move |full_data,format,event_data| {
+        lost_samples_event.add_callback(move |data| {
+            let full_data = data.full_data();
+            let format = data.format();
+            let event_data = data.event_data();
 
             // timestamp
             let time = time_data.get_u64(full_data)? as usize;
