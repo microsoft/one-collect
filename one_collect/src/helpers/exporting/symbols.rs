@@ -42,6 +42,7 @@ pub struct KernelSymbolReader {
     reader: Option<BufReader<File>>,
     buffer: String,
     current_ip: u64,
+    current_end: Option<u64>,
     current_name: String,
     next_ip: Option<u64>,
     next_name: String,
@@ -55,6 +56,7 @@ impl KernelSymbolReader {
             buffer: String::with_capacity(64),
             current_name: String::with_capacity(64),
             current_ip: 0,
+            current_end: None,
             next_ip: None,
             next_name: String::with_capacity(64),
             done: true,
@@ -72,6 +74,7 @@ impl KernelSymbolReader {
         /* Swap next with current */
         if let Some(ip) = self.next_ip {
             self.current_ip = ip;
+            self.current_end = None;
             self.current_name.clear();
             self.current_name.push_str(&self.next_name);
 
@@ -115,6 +118,10 @@ impl KernelSymbolReader {
                     }
                 }
 
+                if self.current_end.is_none() && self.current_ip != 0 {
+                    self.current_end = Some(addr - 1);
+                }
+
                 /* Skip non-method symbols */
                 if !symtype.starts_with('t') && !symtype.starts_with('T') {
                     continue;
@@ -137,6 +144,7 @@ impl KernelSymbolReader {
 impl ExportSymbolReader for KernelSymbolReader {
     fn reset(&mut self) {
         self.current_ip = 0;
+        self.current_end = None;
         self.next_ip = None;
 
         if let Some(reader) = &mut self.reader {
@@ -169,10 +177,9 @@ impl ExportSymbolReader for KernelSymbolReader {
     }
 
     fn end(&self) -> u64 {
-        if let Some(next_ip) = self.next_ip {
-            next_ip - 1
-        } else {
-            0xFFFFFFFFFFFFFFFF
+        match self.current_end {
+            Some(end) => { end },
+            None => { 0xFFFFFFFFFFFFFFFF },
         }
     }
 
@@ -303,6 +310,42 @@ impl ExportSymbolReader for PerfMapSymbolReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kernel_symbol_reader() {
+        let kern_syms_path = std::env::current_dir().unwrap().join(
+            "../test/assets/kernel/symbols.map");
+
+        let mut reader = KernelSymbolReader::new();
+
+        reader.set_file(File::open(kern_syms_path).unwrap());
+
+        for _ in 0..4 {
+            /* method1 */
+            assert!(reader.next());
+            assert_eq!(0x0A, reader.start());
+            assert_eq!(0xA9, reader.end());
+            assert_eq!("vmlinux!method1", reader.name());
+
+            /* method2 */
+            assert!(reader.next());
+            assert_eq!(0xAC, reader.start());
+            assert_eq!(0xBA, reader.end());
+            assert_eq!("vmlinux!method2", reader.name());
+
+            /* method3 */
+            assert!(reader.next());
+            assert_eq!(0xBB, reader.start());
+            assert_eq!(0xFFFFFFFFFFFFFFFF, reader.end());
+            assert_eq!("vmlinux!method3", reader.name());
+
+            /* End */
+            assert!(!reader.next());
+
+            /* Reset */
+            reader.reset();
+        }
+    }
 
     #[test]
     fn perf_map_symbol_reader() {
