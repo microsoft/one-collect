@@ -1,4 +1,4 @@
-use std::{fs::File, io::{BufRead, Seek, SeekFrom}};
+use std::{fs::File, io::{BufRead, BufReader, Seek, SeekFrom}};
 
 #[derive(Clone)]
 pub struct ExportSymbol {
@@ -39,9 +39,10 @@ pub trait ExportSymbolReader {
 }
 
 pub struct KernelSymbolReader {
-    reader: Option<std::io::BufReader<std::fs::File>>,
+    reader: Option<BufReader<File>>,
     buffer: String,
     current_ip: u64,
+    current_end: Option<u64>,
     current_name: String,
     next_ip: Option<u64>,
     next_name: String,
@@ -55,16 +56,25 @@ impl KernelSymbolReader {
             buffer: String::with_capacity(64),
             current_name: String::with_capacity(64),
             current_ip: 0,
+            current_end: None,
             next_ip: None,
             next_name: String::with_capacity(64),
             done: true,
         }
     }
 
+    pub fn set_file(
+        &mut self,
+        file: File) {
+        self.reader = Some(BufReader::new(file));
+        self.reset()
+    }
+
     fn load_next(&mut self) {
         /* Swap next with current */
         if let Some(ip) = self.next_ip {
             self.current_ip = ip;
+            self.current_end = None;
             self.current_name.clear();
             self.current_name.push_str(&self.next_name);
 
@@ -108,6 +118,10 @@ impl KernelSymbolReader {
                     }
                 }
 
+                if self.current_end.is_none() && self.current_ip != 0 {
+                    self.current_end = Some(addr - 1);
+                }
+
                 /* Skip non-method symbols */
                 if !symtype.starts_with('t') && !symtype.starts_with('T') {
                     continue;
@@ -130,6 +144,7 @@ impl KernelSymbolReader {
 impl ExportSymbolReader for KernelSymbolReader {
     fn reset(&mut self) {
         self.current_ip = 0;
+        self.current_end = None;
         self.next_ip = None;
 
         if let Some(reader) = &mut self.reader {
@@ -140,8 +155,8 @@ impl ExportSymbolReader for KernelSymbolReader {
             }
         }
 
-        if let Ok(file) = std::fs::File::open("/proc/kallsyms") {
-            self.reader = Some(std::io::BufReader::new(file));
+        if let Ok(file) = File::open("/proc/kallsyms") {
+            self.reader = Some(BufReader::new(file));
             self.done = false;
             self.load_next();
         }
@@ -162,10 +177,9 @@ impl ExportSymbolReader for KernelSymbolReader {
     }
 
     fn end(&self) -> u64 {
-        if let Some(next_ip) = self.next_ip {
-            next_ip - 1
-        } else {
-            0xFFFFFFFFFFFFFFFF
+        match self.current_end {
+            Some(end) => { end },
+            None => { 0xFFFFFFFFFFFFFFFF },
         }
     }
 
@@ -175,7 +189,7 @@ impl ExportSymbolReader for KernelSymbolReader {
 }
 
 pub struct PerfMapSymbolReader {
-    reader: std::io::BufReader<std::fs::File>,
+    reader: BufReader<File>,
     buffer: String,
     start_ip: u64,
     end_ip: u64,
@@ -186,7 +200,7 @@ pub struct PerfMapSymbolReader {
 impl PerfMapSymbolReader {
     pub fn new(file: File) -> Self {
         Self {
-            reader: std::io::BufReader::new(file),
+            reader: BufReader::new(file),
             buffer: String::with_capacity(256),
             name: String::with_capacity(256),
             start_ip: 0,
@@ -298,12 +312,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn kernel_symbol_reader() {
+        let kern_syms_path = std::env::current_dir().unwrap().join(
+            "../test/assets/kernel/symbols.map");
+
+        let mut reader = KernelSymbolReader::new();
+
+        reader.set_file(File::open(kern_syms_path).unwrap());
+
+        for _ in 0..4 {
+            /* method1 */
+            assert!(reader.next());
+            assert_eq!(0x0A, reader.start());
+            assert_eq!(0xA9, reader.end());
+            assert_eq!("vmlinux!method1", reader.name());
+
+            /* method2 */
+            assert!(reader.next());
+            assert_eq!(0xAC, reader.start());
+            assert_eq!(0xBA, reader.end());
+            assert_eq!("vmlinux!method2", reader.name());
+
+            /* method3 */
+            assert!(reader.next());
+            assert_eq!(0xBB, reader.start());
+            assert_eq!(0xFFFFFFFFFFFFFFFF, reader.end());
+            assert_eq!("vmlinux!method3", reader.name());
+
+            /* End */
+            assert!(!reader.next());
+
+            /* Reset */
+            reader.reset();
+        }
+    }
+
+    #[test]
     fn perf_map_symbol_reader() {
         let expected_count = 2435;
         let perf_map_path = std::env::current_dir().unwrap().join(
             "../test/assets/perfmap/dotnet-info.map");
 
-        if let Ok(file) = std::fs::File::open(perf_map_path.clone()) {
+        if let Ok(file) = File::open(perf_map_path.clone()) {
             let mut reader = PerfMapSymbolReader::new(file);
             reader.reset();
 
