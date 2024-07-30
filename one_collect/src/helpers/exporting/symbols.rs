@@ -98,7 +98,7 @@ impl KernelSymbolReader {
                 let mut addr: u64 = 0;
                 let mut symtype: &str = "";
                 let mut method: &str = "";
-                let mut module: &str = "vmlinux";
+                let mut module: Option<&str> = None;
 
                 for (index, part) in self.buffer.split_whitespace().enumerate() {
                     match index {
@@ -112,7 +112,7 @@ impl KernelSymbolReader {
                             method = part;
                         },
                         3 => {
-                            module = part;
+                            module = Some(part);
                         },
                         _ => {},
                     }
@@ -128,8 +128,10 @@ impl KernelSymbolReader {
                 }
 
                 self.next_ip = Some(addr);
-                self.next_name.push_str(module);
-                self.next_name.push('!');
+                if let Some(module) = module {
+                    self.next_name.push_str(module);
+                    self.next_name.push_str(" ");
+                }
                 self.next_name.push_str(method);
                 self.done = false;
 
@@ -325,19 +327,19 @@ mod tests {
             assert!(reader.next());
             assert_eq!(0x0A, reader.start());
             assert_eq!(0xA9, reader.end());
-            assert_eq!("vmlinux!method1", reader.name());
+            assert_eq!("method1", reader.name());
 
             /* method2 */
             assert!(reader.next());
             assert_eq!(0xAC, reader.start());
             assert_eq!(0xBA, reader.end());
-            assert_eq!("vmlinux!method2", reader.name());
+            assert_eq!("[module] method2", reader.name());
 
             /* method3 */
             assert!(reader.next());
             assert_eq!(0xBB, reader.start());
             assert_eq!(0xFFFFFFFFFFFFFFFF, reader.end());
-            assert_eq!("vmlinux!method3", reader.name());
+            assert_eq!("method3", reader.name());
 
             /* End */
             assert!(!reader.next());
