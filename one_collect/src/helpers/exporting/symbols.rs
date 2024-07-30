@@ -1,4 +1,4 @@
-use std::{fs::File, io::{BufRead, Seek, SeekFrom}};
+use std::{fs::File, io::{BufRead, BufReader, Seek, SeekFrom}};
 
 #[derive(Clone)]
 pub struct ExportSymbol {
@@ -39,7 +39,7 @@ pub trait ExportSymbolReader {
 }
 
 pub struct KernelSymbolReader {
-    reader: Option<std::io::BufReader<std::fs::File>>,
+    reader: Option<BufReader<File>>,
     buffer: String,
     current_ip: u64,
     current_name: String,
@@ -59,6 +59,13 @@ impl KernelSymbolReader {
             next_name: String::with_capacity(64),
             done: true,
         }
+    }
+
+    pub fn set_file(
+        &mut self,
+        file: File) {
+        self.reader = Some(BufReader::new(file));
+        self.reset()
     }
 
     fn load_next(&mut self) {
@@ -140,8 +147,8 @@ impl ExportSymbolReader for KernelSymbolReader {
             }
         }
 
-        if let Ok(file) = std::fs::File::open("/proc/kallsyms") {
-            self.reader = Some(std::io::BufReader::new(file));
+        if let Ok(file) = File::open("/proc/kallsyms") {
+            self.reader = Some(BufReader::new(file));
             self.done = false;
             self.load_next();
         }
@@ -175,7 +182,7 @@ impl ExportSymbolReader for KernelSymbolReader {
 }
 
 pub struct PerfMapSymbolReader {
-    reader: std::io::BufReader<std::fs::File>,
+    reader: BufReader<File>,
     buffer: String,
     start_ip: u64,
     end_ip: u64,
@@ -186,7 +193,7 @@ pub struct PerfMapSymbolReader {
 impl PerfMapSymbolReader {
     pub fn new(file: File) -> Self {
         Self {
-            reader: std::io::BufReader::new(file),
+            reader: BufReader::new(file),
             buffer: String::with_capacity(256),
             name: String::with_capacity(256),
             start_ip: 0,
@@ -303,7 +310,7 @@ mod tests {
         let perf_map_path = std::env::current_dir().unwrap().join(
             "../test/assets/perfmap/dotnet-info.map");
 
-        if let Ok(file) = std::fs::File::open(perf_map_path.clone()) {
+        if let Ok(file) = File::open(perf_map_path.clone()) {
             let mut reader = PerfMapSymbolReader::new(file);
             reader.reset();
 
