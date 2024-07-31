@@ -519,12 +519,11 @@ impl ExportMachine {
         self.strings.to_id(value)
     }
 
-    pub fn add_kernel_mappings(
-        &mut self) {
+    pub fn add_kernel_mappings_with(
+        &mut self,
+        kernel_symbols: &mut impl ExportSymbolReader) {
         let mut frames = Vec::new();
         let mut addrs = HashSet::new();
-
-        let mut kernel_symbols = KernelSymbolReader::new();
 
         for proc in self.procs.values_mut() {
             proc.get_unique_kernel_ips(
@@ -554,11 +553,18 @@ impl ExportMachine {
 
             kernel.add_matching_symbols(
                 &mut frames,
-                &mut kernel_symbols,
+                kernel_symbols,
                 &mut self.strings);
 
             proc.add_mapping(kernel);
         }
+    }
+
+    pub fn add_kernel_mappings(
+        &mut self) {
+        let mut kernel_symbols = KernelSymbolReader::new();
+
+        self.add_kernel_mappings_with(&mut kernel_symbols);
     }
 
     pub fn resolve_perf_map_symbols(
