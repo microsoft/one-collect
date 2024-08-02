@@ -65,6 +65,10 @@ pub fn enum_uprobe_modules(
     pid: u32,
     mut callback: impl FnMut(&str)) {
     iter_proc_modules(pid, |module| {
+        if !module.is_exec() {
+            return;
+        }
+
         if let Some(path) = module.path {
             if !path.starts_with("[") {
                 callback(path);

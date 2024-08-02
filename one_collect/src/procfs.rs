@@ -47,6 +47,11 @@ pub fn get_comm(
     }
 }
 
+const MOD_FLAG_READ: u8 = 1u8 << 0;
+const MOD_FLAG_WRITE: u8 = 1u8 << 1;
+const MOD_FLAG_EXEC: u8 = 1u8 << 2;
+const MOD_FLAG_PRIVATE: u8 = 1u8 << 3;
+
 /// `ModuleInfo` is a struct that provides information about a loaded module within a process.
 ///
 /// This struct contains information about the start and end addresses of the module in memory,
@@ -76,6 +81,7 @@ pub struct ModuleInfo<'a> {
     pub dev_maj: u32,
     pub dev_min: u32,
     pub path: Option<&'a str>,
+    flags: u8,
 }
 
 impl<'a> ModuleInfo<'a> {
@@ -87,6 +93,34 @@ impl<'a> ModuleInfo<'a> {
     pub fn len(&self) -> u64 {
         (self.end_addr - self.start_addr) + 1
     }
+
+    /// Returns true if the module has read permission.
+    ///
+    /// # Returns
+    ///
+    /// A `bool` representing the permission.
+    pub fn is_read(&self) -> bool { self.flags & MOD_FLAG_READ != 0 }
+
+    /// Returns true if the module has write permission.
+    ///
+    /// # Returns
+    ///
+    /// A `bool` representing the permission.
+    pub fn is_write(&self) -> bool { self.flags & MOD_FLAG_WRITE != 0 }
+
+    /// Returns true if the module has execute permission.
+    ///
+    /// # Returns
+    ///
+    /// A `bool` representing the permission.
+    pub fn is_exec(&self) -> bool { self.flags & MOD_FLAG_EXEC != 0 }
+
+    /// Returns true if the module has private (copy-on-write) permission.
+    ///
+    /// # Returns
+    ///
+    /// A `bool` representing the permission.
+    pub fn is_private(&self) -> bool { self.flags & MOD_FLAG_PRIVATE != 0 }
 
     /// Constructs a `ModuleInfo` instance from a line of text.
     ///
@@ -119,14 +153,20 @@ impl<'a> ModuleInfo<'a> {
                     }
                 },
                 1 => {
-                    if let Some(exec) = part.chars().nth(2) {
-                        /* Not executable */
-                        if exec != 'x' {
-                            return None;
-                        }
-                    } else {
-                        /* Odd format */
-                        return None;
+                    if part.contains('r') {
+                        module.flags |= MOD_FLAG_READ;
+                    }
+
+                    if part.contains('w') {
+                        module.flags |= MOD_FLAG_WRITE;
+                    }
+
+                    if part.contains('x') {
+                        module.flags |= MOD_FLAG_EXEC;
+                    }
+
+                    if part.contains('p') {
+                        module.flags |= MOD_FLAG_PRIVATE;
                     }
                 },
                 2 => {
