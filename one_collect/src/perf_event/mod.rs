@@ -1194,7 +1194,7 @@ impl PerfSession {
         let id_bytes = 0u64.to_ne_bytes();
 
         procfs::iter_modules(move |pid, module| {
-            if module.path.is_none() {
+            if !module.is_exec() || module.path.is_none() {
                 return;
             }
 
