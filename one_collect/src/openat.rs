@@ -163,7 +163,11 @@ impl OpenAt {
                     break;
                 }
 
+                #[cfg(target_arch = "x86_64")]
                 let name = &(*entry).d_name as *const i8;
+                #[cfg(target_arch = "aarch64")]
+                let name = &(*entry).d_name as *const u8;
+
                 let len = libc::strlen(name);
 
                 let name = std::str::from_utf8_unchecked(
