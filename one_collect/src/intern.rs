@@ -133,7 +133,7 @@ impl<T: Copy + std::cmp::Eq + std::hash::Hash> InternedSlices<T> {
     pub fn from_id(
         &self,
         id: usize) -> Option<&[T]> {
-        if id <= self.spans.len() {
+        if id < self.spans.len() {
             let span = &self.spans[id];
             return Some(&self.slices[span.start..span.end]);
         }
