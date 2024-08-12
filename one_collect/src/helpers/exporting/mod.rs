@@ -15,7 +15,7 @@ use crate::perf_event::abi::PERF_RECORD_MISC_SWITCH_OUT;
 
 use ruwind::ModuleAccessor;
 
-const KERNEL_START:u64 = 0x800000000000;
+const KERNEL_START:u64 = 0xFFFF800000000000;
 const KERNEL_END:u64 = 0xFFFFFFFFFFFFFFFF;
 
 pub type ExportDevNode = ruwind::ModuleKey;

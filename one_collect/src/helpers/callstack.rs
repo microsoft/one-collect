@@ -383,12 +383,18 @@ impl CallstackHelper {
         clone
     }
 
+    #[cfg(target_arch = "x86_64")]
     pub fn with_dwarf_unwinding(&mut self) -> Self {
         let mut clone = self.clone_mut();
 
         clone.unwinder = Some(Box::new(default_unwinder()));
 
         clone
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    pub fn with_dwarf_unwinding(&mut self) -> Self {
+        self.clone_mut()
     }
 
     pub fn with_stack_size(
