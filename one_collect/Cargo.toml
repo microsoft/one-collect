@@ -12,6 +12,10 @@ ruwind = { path = "../ruwind" }
 twox-hash = "1.6.3"
 libc = "0.2.153"
 
+# 3.5.0 cannot build
+protobuf = "3.4.*"
+flate2 = "1.0.31"
+
 [dev-dependencies]
 criterion = "0.3"
 

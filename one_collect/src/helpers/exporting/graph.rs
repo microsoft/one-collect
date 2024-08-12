@@ -86,6 +86,8 @@ impl ExportGraph {
 
     pub fn strings(&self) -> &InternedStrings { &self.strings }
 
+    pub fn strings_mut(&mut self) -> &mut InternedStrings { &mut self.strings }
+
     pub fn nodes(&self) -> &[Node] { &self.nodes }
 
     pub fn resolvables(&self) -> &[Resolvable] { &self.resolvables }
