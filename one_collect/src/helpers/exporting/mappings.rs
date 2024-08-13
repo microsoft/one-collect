@@ -122,6 +122,7 @@ impl ExportMapping {
         strings: &mut InternedStrings) {
         unique_ips.sort();
         sym_reader.reset();
+        sym_reader.next();
 
         let mut next_ip = 0;
 
