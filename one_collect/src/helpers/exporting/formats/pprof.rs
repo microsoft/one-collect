@@ -149,7 +149,7 @@ fn write_mappings(
         write_mapping(
             buffer,
             output,
-            id + 1,
+            id + 1, /* Mappings must be non-zero */
             0,
             0xFFFF800000000000,
             0,
@@ -203,7 +203,7 @@ fn write_locations(
 
             /* Write out a method/function or not */
             let function_id = match target.has_method() {
-                true => { Some(target.resolvable()) },
+                true => { Some(id) },
                 false => { None },
             };
 
@@ -212,7 +212,7 @@ fn write_locations(
                 buffer,
                 output,
                 id,
-                target.resolvable(),
+                target.resolvable() + 1, /* Mappings must be non-zero */
                 target.address(),
                 function_id)?;
         }
@@ -261,7 +261,7 @@ fn write_functions(
                 write_function(
                     buffer,
                     output,
-                    target.resolvable(),
+                    id,
                     target.method())?;
             }
         }
