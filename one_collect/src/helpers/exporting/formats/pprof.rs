@@ -149,7 +149,7 @@ fn write_mappings(
         write_mapping(
             buffer,
             output,
-            id + 1,
+            id + 1, /* Mappings must be non-zero */
             0,
             0xFFFF800000000000,
             0,
@@ -212,7 +212,7 @@ fn write_locations(
                 buffer,
                 output,
                 id,
-                target.resolvable(),
+                target.resolvable() + 1, /* Mappings must be non-zero */
                 target.address(),
                 function_id)?;
         }
