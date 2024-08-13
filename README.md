@@ -54,8 +54,8 @@ If you want to contribute a file format to the known set (Awesome!) then please 
 If the file format works on a per-process (or per-comm name) please add a trait that extends the ExportGraph struct.
 The trait method should have the name of the format with to_ before it. For example, if the name was perf_view, you
 would add a new trait that has a method name "to_perf_view()". Please see [perf_view](one_collect/src/helpers/exporting/formats/perf_view.rs)
-as an example. If the file format works with many processes, also extend the ExportMachine struct with the same
-method name. If something isn't clear, feel free to open an issue and ask.
+and [pprof](one_collect/src/helpers/exporting/formats/pprof.rs) as examples of this. If the file format works with many processes,
+also extend the ExportMachine struct with the same method name. If something isn't clear, feel free to open an issue and ask.
 
 ## Contributing
 
