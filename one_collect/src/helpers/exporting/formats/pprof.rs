@@ -203,7 +203,7 @@ fn write_locations(
 
             /* Write out a method/function or not */
             let function_id = match target.has_method() {
-                true => { Some(target.resolvable()) },
+                true => { Some(id) },
                 false => { None },
             };
 
@@ -261,7 +261,7 @@ fn write_functions(
                 write_function(
                     buffer,
                     output,
-                    target.resolvable(),
+                    id,
                     target.method())?;
             }
         }
