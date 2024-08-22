@@ -73,7 +73,7 @@ fn get_symbols32(
         reader.seek(SeekFrom::Start(pos))?;
         get_symbol32(reader, &mut sym)?;
 
-        if !sym.is_function() || sym.st_value == 0 {
+        if !sym.is_function() || sym.st_value == 0 || sym.st_size == 0 {
             continue;
         }
 
@@ -112,7 +112,7 @@ fn get_symbols64(
         reader.seek(SeekFrom::Start(pos))?;
         get_symbol64(reader, &mut sym)?;
 
-        if !sym.is_function() || sym.st_value == 0 {
+        if !sym.is_function() || sym.st_value == 0 || sym.st_size == 0 {
             continue;
         }
 
