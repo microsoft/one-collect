@@ -1,4 +1,5 @@
-use std::io::{Error, Read, Seek, SeekFrom};
+use std::fs::File;
+use std::io::{BufReader, Error, Read, Seek, SeekFrom};
 use std::mem::{zeroed, size_of};
 use std::slice;
 
@@ -37,6 +38,59 @@ impl SectionMetadata {
         /* Only compare up to name len */
         let buf = &buf[..name.len()];
         Ok(buf == name.as_bytes())
+    }
+}
+
+pub struct ElfSymbolIterator<'a> {
+    foo: &'a str,
+
+    reader: BufReader<File>,
+    sections: Vec<SectionMetadata>,
+
+    section_index: u32,
+    section_offsets: Vec<u64>,
+    section_metadata_count: u64,
+    section_str_offset: u64
+}
+
+impl<'a> ElfSymbolIterator<'a> {
+    pub fn new(file: File) -> Self {
+        Self {
+            foo: "",
+            reader: BufReader::new(file),
+            sections: Vec::new(),
+            section_index: 0,
+            section_offsets: Vec::new(),
+            section_metadata_count: 0,
+            section_str_offset: 0u64,
+        }
+    }
+
+    fn initialize(sym_reader: &mut ElfSymbolIterator) {
+        get_section_metadata(&mut sym_reader.reader, None, 0x2, &mut sym_reader.sections)
+            .unwrap_or(());
+        get_section_metadata(&mut sym_reader.reader, None, 0xb, &mut sym_reader.sections)
+            .unwrap_or(());
+
+        //get_symbols(&mut sym_reader.reader, &sections, |symbol| {
+        //    <Vec<Symbol<'_>> as AsMut<Vec<Symbol>>>::as_mut(&mut sym_reader.symbols).push(*(symbol.clone()));
+        //}).unwrap_or(());
+    }
+
+    pub fn reset(&mut self) {
+
+    }
+}
+
+impl<'a> Iterator for ElfSymbolIterator<'a> {
+    type Item = Symbol<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        Some(Symbol {
+            start: 0,
+            end: 1,
+            name: "foo"
+        })
     }
 }
 
