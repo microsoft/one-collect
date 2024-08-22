@@ -1,5 +1,6 @@
 use std::fs::File;
 use std::io::{BufReader, Error, Read, Seek, SeekFrom};
+use std::marker::PhantomData;
 use std::mem::{zeroed, size_of};
 use std::slice;
 
@@ -42,54 +43,79 @@ impl SectionMetadata {
 }
 
 pub struct ElfSymbolIterator<'a> {
-    foo: &'a str,
-
+    phantom: PhantomData<&'a ()>,
     reader: BufReader<File>,
+    va_start: u64,
     sections: Vec<SectionMetadata>,
-
-    section_index: u32,
+    section_index: u64,
     section_offsets: Vec<u64>,
-    section_metadata_count: u64,
-    section_str_offset: u64
+    section_str_offset: u64,
+
 }
 
 impl<'a> ElfSymbolIterator<'a> {
     pub fn new(file: File) -> Self {
         Self {
-            foo: "",
+            phantom: std::marker::PhantomData,
             reader: BufReader::new(file),
+            va_start: 0,
             sections: Vec::new(),
             section_index: 0,
             section_offsets: Vec::new(),
-            section_metadata_count: 0,
             section_str_offset: 0u64,
         }
     }
 
-    fn initialize(sym_reader: &mut ElfSymbolIterator) {
-        get_section_metadata(&mut sym_reader.reader, None, 0x2, &mut sym_reader.sections)
-            .unwrap_or(());
-        get_section_metadata(&mut sym_reader.reader, None, 0xb, &mut sym_reader.sections)
-            .unwrap_or(());
-
-        //get_symbols(&mut sym_reader.reader, &sections, |symbol| {
-        //    <Vec<Symbol<'_>> as AsMut<Vec<Symbol>>>::as_mut(&mut sym_reader.symbols).push(*(symbol.clone()));
-        //}).unwrap_or(());
+    pub fn reset(&mut self) {
+        self.sections.clear();
+        self.section_index = 0;
+        self.section_offsets.clear();
+        self.section_str_offset = 0;
+        
+        match self.initialize() {
+            Ok(_) => (),
+            Err(_) => {
+                self.sections.clear();
+                self.section_index = 0;
+                self.section_offsets.clear();
+                self.section_str_offset = 0;
+            }
+        }
     }
 
-    pub fn reset(&mut self) {
+    fn initialize(&mut self) -> Result<(), Error> {
+        // Seek to the beginning of the file in-case this is not the first call to initialize.
+        self.reader.seek(SeekFrom::Start(0)).unwrap_or_default();
 
+        // Read the section metadata and store it.
+        get_section_metadata(&mut self.reader, None, 0x2, &mut self.sections)
+            .unwrap_or_default();
+        get_section_metadata(&mut self.reader, None, 0xb, &mut self.sections)
+            .unwrap_or_default();
+
+        self.va_start = get_va_start(&mut self.reader)?;
+        get_section_offsets(&mut self.reader, None, &mut self.section_offsets)?;
+
+        Ok(())
     }
 }
 
 impl<'a> Iterator for ElfSymbolIterator<'a> {
     type Item = Symbol<'a>;
 
-    fn next(&mut self) -> Option<Self::Item> {
+    fn next(& mut self) -> Option<Self::Item> {
+        if self.section_index >= self.sections.len() as u64 {
+            return None;
+        }
+
+        // Figure out if we're out of sections or if we need to jump to the next section.
+        // Otherwise parse the next record.
+
+        
         Some(Symbol {
             start: 0,
             end: 1,
-            name: "foo"
+            name: ""
         })
     }
 }
