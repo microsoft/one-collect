@@ -1,5 +1,5 @@
 use std::{fs::File, io::{BufRead, BufReader, Seek, SeekFrom}};
-use ruwind::elf::{ElfSymbolIterator, Symbol};
+use ruwind::elf::{ElfSymbol, ElfSymbolIterator};
 
 #[derive(Clone)]
 pub struct ExportSymbol {
@@ -193,7 +193,7 @@ impl ExportSymbolReader for KernelSymbolReader {
 
 pub struct ElfSymbolReader<'a> {
     iterator: ElfSymbolIterator<'a>,
-    current_sym: Option<Symbol<'a>>
+    current_sym: Option<ElfSymbol>
 }
 
 impl<'a> ElfSymbolReader<'a> {
@@ -219,7 +219,7 @@ impl<'a> ExportSymbolReader for ElfSymbolReader<'a> {
     fn start(&self) -> u64 {
         let mut start = 0u64;
         if let Some(sym) = &self.current_sym {
-            start = sym.start;
+            start = sym.start();
         }
         start
     }
@@ -227,7 +227,7 @@ impl<'a> ExportSymbolReader for ElfSymbolReader<'a> {
     fn end(&self) -> u64 {
         let mut end = 0u64;
         if let Some(sym) = &self.current_sym {
-            end = sym.end;
+            end = sym.end();
         }
         end
     }
@@ -235,7 +235,7 @@ impl<'a> ExportSymbolReader for ElfSymbolReader<'a> {
     fn name(&self) -> &str {
         let mut name = "";
         if let Some(sym) = &self.current_sym {
-            name = sym.name;
+            name = sym.name();
         }
         name
     }
@@ -447,7 +447,7 @@ mod tests {
 
     #[test]
     fn elf_symbol_reader() {
-        //let expected_count = 2435;
+        let expected_count = 17104;
         let sym_file_path = "/home/brianrob/work/sdk-8.0/shared/Microsoft.NETCore.App/8.0.8/libcoreclr.so.dbg";
         if let Ok(file) = File::open(sym_file_path) {
             let mut reader = ElfSymbolReader::new(file);
@@ -460,11 +460,11 @@ mod tests {
                 }
 
                 actual_count+=1;
-                assert!(reader.start() < reader.end(), "Start must be less than end - start: {}, end: {}", reader.start(), reader.end());
+                assert!(reader.start() <= reader.end(), "Start must be less than or equal to end - start: {}, end: {}", reader.start(), reader.end());
                 assert!(reader.name().len() > 0);
             }
 
-            //assert_eq!(actual_count, expected_count);
+            assert_eq!(actual_count, expected_count);
         }
         else {
             assert!(false, "Unable to open file {}", sym_file_path);
