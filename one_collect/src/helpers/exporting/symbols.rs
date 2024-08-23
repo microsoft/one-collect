@@ -447,9 +447,13 @@ mod tests {
 
     #[test]
     fn elf_symbol_reader() {
-        let expected_count = 17104;
-        let sym_file_path = "/home/brianrob/work/sdk-8.0/shared/Microsoft.NETCore.App/8.0.8/libcoreclr.so.dbg";
-        if let Ok(file) = File::open(sym_file_path) {
+        #[cfg(target_arch = "x86_64")]
+        let path = "/usr/lib/x86_64-linux-gnu/libc.so.6";
+
+        #[cfg(target_arch = "aarch64")]
+        let path = "/usr/lib/aarch64-linux-gnu/libc.so.6";
+
+        if let Ok(file) = File::open(path) {
             let mut reader = ElfSymbolReader::new(file);
             reader.reset();
 
@@ -464,10 +468,10 @@ mod tests {
                 assert!(reader.name().len() > 0);
             }
 
-            assert_eq!(actual_count, expected_count);
+            assert!(actual_count > 0);
         }
         else {
-            assert!(false, "Unable to open file {}", sym_file_path);
+            assert!(false, "Unable to open file {}", path);
         }
     }
 }
