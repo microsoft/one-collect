@@ -1,4 +1,6 @@
 pub mod callstack;
-pub mod uprobe;
-pub mod exporting;
 pub mod dotnet;
+pub mod exporting;
+
+#[cfg(target_os = "linux")]
+pub mod uprobe;

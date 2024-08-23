@@ -345,10 +345,11 @@ mod tests {
     #[test]
     fn it_works() {
         let callstacks = CallstackHelper::new();
+        let settings = ExportSettings::new(callstacks);
 
         /* Ignore process FS to avoid permissions, etc */
-        let settings = ExportSettings::new(callstacks)
-            .without_process_fs();
+        #[cfg(target_os = "linux")]
+        let settings = settings.without_process_fs();
 
         let mut exporter = ExportMachine::new(settings);
 

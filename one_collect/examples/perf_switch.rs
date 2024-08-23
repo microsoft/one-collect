@@ -1,16 +1,18 @@
-use one_collect::perf_event::{
-    self,
-    RingBufBuilder,
-    RingBufSessionBuilder
-};
-
-use one_collect::state::ProcessTrackingOptions;
 use one_collect::Writable;
 
 use std::io::{Write, BufWriter};
 use std::fs::File;
 
+#[cfg(target_os = "linux")]
 fn main() {
+    use one_collect::state::ProcessTrackingOptions;
+
+    use one_collect::perf_event::{
+        self,
+        RingBufBuilder,
+        RingBufSessionBuilder
+    };
+
     let file = File::create("output.json").expect("Output.json could not be opened");
     let mut output = BufWriter::new(file);
 
@@ -114,4 +116,9 @@ fn main() {
     });
 
     println!("Done");
+}
+
+#[cfg(target_os = "windows")]
+fn main() {
+    println!("Coming soon");
 }

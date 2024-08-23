@@ -25,6 +25,7 @@ impl ModuleKey {
     pub fn ino(&self) -> u64 { self.ino }
 }
 
+#[cfg(target_os = "linux")]
 impl From<&std::fs::Metadata> for ModuleKey {
     fn from(meta: &std::fs::Metadata) -> Self {
         use std::os::linux::fs::MetadataExt;

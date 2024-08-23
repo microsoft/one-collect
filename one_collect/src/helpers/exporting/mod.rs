@@ -1,19 +1,18 @@
 use std::collections::{HashMap, HashSet};
-use std::collections::hash_map::{Values, ValuesMut, Entry};
-use std::collections::hash_map::Entry::{Vacant, Occupied};
-use std::path::{Path, PathBuf};
-use std::fs::File;
+use std::collections::hash_map::{Values, ValuesMut};
+use std::path::PathBuf;
 
-use crate::{ReadOnly, Writable};
-use crate::openat::DupFd;
-use crate::event::{Event, EventFormat, DataFieldRef};
-use crate::perf_event::{AncillaryData, PerfSession};
+use crate::Writable;
+use crate::event::{Event, EventData};
 use crate::intern::{InternedStrings, InternedCallstacks};
-use crate::helpers::callstack::{CallstackHelp, CallstackHelper, CallstackReader};
-use crate::perf_event::{RingBufSessionBuilder, RingBufBuilder};
-use crate::perf_event::abi::PERF_RECORD_MISC_SWITCH_OUT;
 
-use ruwind::ModuleAccessor;
+use crate::helpers::callstack::CallstackHelper;
+
+#[cfg_attr(target_os = "linux", path = "os/linux.rs")]
+#[cfg_attr(target_os = "windows", path = "os/windows.rs")]
+pub mod os;
+
+pub type ExportSampler = os::ExportSampler;
 
 const KERNEL_START:u64 = 0xFFFF800000000000;
 const KERNEL_END:u64 = 0xFFFFFFFFFFFFFFFF;
@@ -41,146 +40,54 @@ pub use mappings::{
     ExportMapping,
 };
 
-use self::symbols::PerfMapSymbolReader;
-
 #[derive(Default)]
 struct ExportCSwitch {
     start_time: u64,
     sample: Option<ExportProcessSample>,
 }
 
-struct ExportDevNodeLookup {
-    fds: HashMap<ExportDevNode, DupFd>,
-}
-
-impl ExportDevNodeLookup {
-    pub fn new() -> Self {
-        Self {
-            fds: HashMap::new(),
-        }
-    }
-
-    fn contains(
-        &self,
-        key: &ExportDevNode) -> bool {
-        self.fds.contains_key(key)
-    }
-
-    fn entry(
-        &mut self,
-        key: ExportDevNode) -> Entry<'_, ExportDevNode, DupFd> {
-        self.fds.entry(key)
-    }
-
-    pub fn open(
-        &self,
-        node: &ExportDevNode) -> Option<File> {
-        match self.fds.get(node) {
-            Some(fd) => { Some(fd.open()) },
-            None => { None },
-        }
-    }
-}
-
-impl ModuleAccessor for ExportDevNodeLookup {
-    fn open(
-        &self,
-        key: &ExportDevNode) -> Option<File> {
-        self.open(key)
-    }
-}
-
-struct ExportSampler {
-    exporter: Writable<ExportMachine>,
-    ancillary: ReadOnly<AncillaryData>,
-    reader: CallstackReader,
-    time_field: DataFieldRef,
-    pid_field: DataFieldRef,
-    tid_field: DataFieldRef,
-    frames: Vec<u64>,
-}
-
 impl ExportSampler {
-    fn new(
-        exporter: &Writable<ExportMachine>,
-        reader: &CallstackReader,
-        session: &PerfSession) -> Self {
-        Self {
-            exporter: exporter.clone(),
-            ancillary: session.ancillary_data(),
-            reader: reader.clone(),
-            time_field: session.time_data_ref(),
-            pid_field: session.pid_field_ref(),
-            tid_field: session.tid_data_ref(),
-            frames: Vec::new(),
-        }
-    }
-
-    fn time(
-        &self,
-        full_data: &[u8]) -> anyhow::Result<u64> {
-        self.time_field.get_u64(full_data)
-    }
-
-    fn pid(
-        &self,
-        full_data: &[u8]) -> anyhow::Result<u32> {
-        self.pid_field.get_u32(full_data)
-    }
-
-    fn tid(
-        &self,
-        full_data: &[u8]) -> anyhow::Result<u32> {
-        self.tid_field.get_u32(full_data)
-    }
-
-    fn cpu(&self) -> u16 {
-        self.ancillary.borrow().cpu() as u16
-    }
-
-    fn make_sample(
+    pub(crate) fn make_sample(
         &mut self,
-        full_data: &[u8],
+        data: &EventData,
         value: u64,
         kind: u16) -> anyhow::Result<ExportProcessSample> {
         self.frames.clear();
 
-        self.reader.read_frames(
-            full_data,
-            &mut self.frames);
+        /* OS Specific callstack hook */
+        self.callstack(data)?;
 
         Ok(self.exporter.borrow_mut().make_sample(
-            self.time(full_data)?,
+            self.time(data)?,
             value,
-            self.tid(full_data)?,
+            self.tid(data)?,
             self.cpu(),
             kind,
             &self.frames))
     }
 
-    fn add_custom_sample(
+    pub(crate) fn add_custom_sample(
         &mut self,
         pid: u32,
         sample: ExportProcessSample) -> anyhow::Result<()> {
         self.exporter.borrow_mut().add_custom_sample(pid, sample)
     }
 
-    fn add_sample(
+    pub(crate) fn add_sample(
         &mut self,
-        full_data: &[u8],
+        data: &EventData,
         value: u64,
         kind: u16) -> anyhow::Result<()> {
         self.frames.clear();
 
-        self.reader.read_frames(
-            full_data,
-            &mut self.frames);
+        /* OS Specific callstack hook */
+        self.callstack(data)?;
 
         self.exporter.borrow_mut().add_sample(
-            self.time(full_data)?,
+            self.time(data)?,
             value,
-            self.pid(full_data)?,
-            self.tid(full_data)?,
+            self.pid(data)?,
+            self.tid(data)?,
             self.cpu(),
             kind,
             &self.frames)
@@ -189,14 +96,14 @@ impl ExportSampler {
 
 pub struct ExportBuiltContext<'a> {
     exporter: &'a mut ExportMachine,
-    session: &'a mut PerfSession,
+    session: &'a mut os::Session,
     sample_kind: Option<u16>,
 }
 
 impl<'a> ExportBuiltContext<'a> {
     fn new(
         exporter: &'a mut ExportMachine,
-        session: &'a mut PerfSession) -> Self {
+        session: &'a mut os::Session) -> Self {
         Self {
             exporter,
             session,
@@ -208,7 +115,7 @@ impl<'a> ExportBuiltContext<'a> {
 
     pub fn exporter_mut(&mut self) -> &mut ExportMachine { self.exporter }
 
-    pub fn session_mut(&mut self) -> &mut PerfSession { self.session }
+    pub fn session_mut(&mut self) -> &mut os::Session { self.session }
 
     pub fn set_sample_kind(
         &mut self,
@@ -222,45 +129,35 @@ impl<'a> ExportBuiltContext<'a> {
 pub struct ExportTraceContext<'a> {
     sampler: &'a mut ExportSampler,
     sample_kind: u16,
-    full_data: &'a [u8],
-    event_data: &'a [u8],
-    format: &'a EventFormat,
+    data: &'a EventData<'a>,
 }
 
 impl<'a> ExportTraceContext<'a> {
     fn new(
         sampler: &'a mut ExportSampler,
         sample_kind: u16,
-        full_data: &'a [u8],
-        event_data: &'a [u8],
-        format: &'a EventFormat) -> Self {
+        data: &'a EventData) -> Self {
         Self {
             sampler,
             sample_kind,
-            full_data,
-            event_data,
-            format,
+            data,
         }
     }
 
-    pub fn full_data(&self) -> &'a [u8] { self.full_data }
-
-    pub fn event_data(&self) -> &'a [u8] { self.event_data }
-
-    pub fn format(&self) -> &'a EventFormat { self.format }
+    pub fn data(&self) -> &'a EventData { self.data }
 
     pub fn cpu(&self) -> u16 { self.sampler.cpu() }
 
     pub fn time(&self) -> anyhow::Result<u64> {
-        self.sampler.time(self.full_data)
+        self.sampler.time(self.data)
     }
 
     pub fn pid(&self) -> anyhow::Result<u32> {
-        self.sampler.pid(self.full_data)
+        self.sampler.pid(self.data)
     }
 
     pub fn tid(&self) -> anyhow::Result<u32> {
-        self.sampler.tid(self.full_data)
+        self.sampler.tid(self.data)
     }
 
     pub fn add_sample_with_kind(
@@ -268,7 +165,7 @@ impl<'a> ExportTraceContext<'a> {
         value: u64,
         kind: u16) -> anyhow::Result<()> {
         self.sampler.add_sample(
-            self.full_data,
+            self.data,
             value,
             kind)
     }
@@ -278,7 +175,7 @@ impl<'a> ExportTraceContext<'a> {
         value: u64,
         kind: u16) -> anyhow::Result<ExportProcessSample> {
         self.sampler.make_sample(
-            self.full_data,
+            self.data,
             value,
             kind)
     }
@@ -336,9 +233,9 @@ pub struct ExportSettings {
     callstack_buckets: usize,
     cpu_profiling: bool,
     cpu_freq: u64,
-    process_fs: bool,
     cswitches: bool,
     callstack_helper: Option<CallstackHelper>,
+    os: os::OSExportSettings,
     events: Option<Vec<ExportEventCallback>>,
 }
 
@@ -351,9 +248,9 @@ impl ExportSettings {
             callstack_buckets: 512,
             cpu_profiling: true,
             cpu_freq: 1000,
-            process_fs: true,
             cswitches: true,
             callstack_helper: Some(callstack_helper.with_external_lookup()),
+            os: os::OSExportSettings::new(),
             events: None,
         }
     }
@@ -414,19 +311,13 @@ impl ExportSettings {
         clone.cpu_profiling = false;
         clone
     }
-
-    pub fn without_process_fs(self) -> Self {
-        let mut clone = self;
-        clone.process_fs = false;
-        clone
-    }
 }
 
 pub struct ExportMachine {
     settings: ExportSettings,
     strings: InternedStrings,
     callstacks: InternedCallstacks,
-    dev_nodes: ExportDevNodeLookup,
+    os: os::OSExportMachine,
     procs: HashMap<u32, ExportProcess>,
     cswitches: HashMap<u32, ExportCSwitch>,
     path_buf: Writable<PathBuf>,
@@ -447,7 +338,7 @@ impl ExportMachine {
             settings,
             strings,
             callstacks,
-            dev_nodes: ExportDevNodeLookup::new(),
+            os: os::OSExportMachine::new(),
             procs: HashMap::new(),
             cswitches: HashMap::new(),
             path_buf: Writable::new(PathBuf::new()),
@@ -567,44 +458,6 @@ impl ExportMachine {
         self.add_kernel_mappings_with(&mut kernel_symbols);
     }
 
-    pub fn resolve_perf_map_symbols(
-        &mut self) {
-        let mut frames = Vec::new();
-        let mut addrs = HashSet::new();
-
-        let mut path_buf = PathBuf::new();
-        path_buf.push("tmp");
-
-        for proc in self.procs.values_mut() {
-            if !proc.has_anon_mappings() {
-                continue;
-            }
-
-            let ns_pid = proc.ns_pid();
-
-            if ns_pid.is_none() {
-                continue;
-            }
-
-            path_buf.push(format!("perf-{}.map", ns_pid.unwrap()));
-            let file = proc.open_file(&path_buf);
-            path_buf.pop();
-
-            if file.is_err() {
-                continue;
-            }
-
-            let mut sym_reader = PerfMapSymbolReader::new(file.unwrap());
-
-            proc.add_matching_anon_symbols(
-                &mut addrs,
-                &mut frames,
-                &mut sym_reader,
-                &self.callstacks,
-                &mut self.strings);
-        }
-    }
-
     fn process_mut(
         &mut self,
         pid: u32) -> &mut ExportProcess {
@@ -638,17 +491,12 @@ impl ExportMachine {
             let node = ExportDevNode::from_parts(maj, min, ino);
 
             mapping.set_node(node);
-
-            if !self.dev_nodes.contains(&node) {
-                if let Some(process) = self.find_process(pid) {
-                    if let Ok(file) = process.open_file(Path::new(filename)) {
-                        if let Vacant(entry) = self.dev_nodes.entry(node) {
-                            entry.insert(DupFd::new(file));
-                        }
-                    }
-                }
-            }
         }
+
+        self.os_add_mmap_exec(
+            pid,
+            &mut mapping,
+            filename)?;
 
         self.map_index += 1;
 
@@ -661,30 +509,15 @@ impl ExportMachine {
         &mut self,
         pid: u32,
         comm: &str) -> anyhow::Result<()> {
-        let path_buf = self.path_buf.clone();
         let comm_id = self.intern(comm);
-        let fs = self.settings.process_fs;
 
         let proc = self.process_mut(pid);
 
         proc.set_comm_id(comm_id);
-        proc.add_ns_pid(&mut path_buf.borrow_mut());
 
-        if fs {
-            proc.add_root_fs(&mut path_buf.borrow_mut())?;
-        }
-
-        Ok(())
-    }
-
-    fn fork_exec(
-        &mut self,
-        pid: u32,
-        ppid: u32) -> anyhow::Result<()> {
-        let fork = self.process_mut(ppid).fork(pid);
-        self.procs.insert(pid, fork);
-
-        Ok(())
+        self.os_add_comm_exec(
+            pid,
+            comm)
     }
 
     pub fn make_sample(
@@ -744,335 +577,6 @@ impl ExportMachine {
 
         Ok(())
     }
-
-    pub fn hook_to_session(
-        mut self,
-        session: &mut PerfSession) -> anyhow::Result<Writable<ExportMachine>> {
-        let cpu_profiling = self.settings.cpu_profiling;
-        let cswitches = self.settings.cswitches;
-        let events = self.settings.events.take();
-
-        let callstack_reader = match self.settings.callstack_helper.take() {
-            Some(callstack_helper) => { callstack_helper.to_reader() },
-            None => { anyhow::bail!("No callstack reader specified."); }
-        };
-
-        let machine = Writable::new(self);
-
-        let callstack_machine = machine.clone();
-
-        let callstack_reader = callstack_reader.with_unwind(
-            move |request| {
-                let machine = callstack_machine.borrow_mut();
-
-                if let Some(process) = machine.find_process(request.pid()) {
-                    request.unwind_process(
-                        process,
-                        &machine.dev_nodes);
-                }
-            });
-
-        if let Some(events) = events {
-            let shared_sampler = Writable::new(
-                ExportSampler::new(
-                    &machine,
-                    &callstack_reader,
-                    session));
-
-            for mut callback in events {
-                if callback.event.is_none() {
-                    continue;
-                }
-
-                let mut event = callback.event.take().unwrap();
-                let mut event_machine = machine.borrow_mut();
-
-                let mut builder = ExportBuiltContext::new(
-                    &mut event_machine,
-                    session);
-
-                /* Invoke built callback for setup, etc */
-                (callback.built)(&mut builder)?;
-
-                let sample_kind = match builder.take_sample_kind() {
-                    /* If the builder has a sample kind pre-defined, use that */
-                    Some(kind) => { kind },
-                    /* Otherwise, use the event name */
-                    None => { event_machine.sample_kind(event.name()) }
-                };
-
-                /* Re-use sampler for all events */
-                let event_sampler = shared_sampler.clone();
-
-                /* Trampoline between event callback and exporter callback */
-                event.add_callback(move |data| {
-                    (callback.trace)(
-                        &mut ExportTraceContext::new(
-                            &mut event_sampler.borrow_mut(),
-                            sample_kind,
-                            data.full_data(),
-                            data.event_data(),
-                            data.format()))
-                });
-
-                /* Add event to session */
-                session.add_event(event)?;
-            }
-        }
-
-        if cpu_profiling {
-            let ancillary = session.ancillary_data();
-            let time_field = session.time_data_ref();
-            let pid_field = session.pid_field_ref();
-            let tid_field = session.tid_data_ref();
-            let reader = callstack_reader.clone();
-
-            /* Get sample kind for CPU */
-            let kind = machine.borrow_mut().sample_kind("cpu");
-
-            /* Hook cpu profile event */
-            let event = session.cpu_profile_event();
-            let event_machine = machine.clone();
-            let mut frames: Vec<u64> = Vec::new();
-
-            event.add_callback(move |data| {
-                let full_data = data.full_data();
-
-                let ancillary = ancillary.borrow();
-
-                let cpu = ancillary.cpu() as u16;
-                let time = time_field.get_u64(full_data)?;
-                let pid = pid_field.get_u32(full_data)?;
-                let tid = tid_field.get_u32(full_data)?;
-
-                frames.clear();
-
-                reader.read_frames(
-                    full_data,
-                    &mut frames);
-
-                event_machine.borrow_mut().add_sample(
-                    time,
-                    1,
-                    pid,
-                    tid,
-                    cpu,
-                    kind,
-                    &frames)
-            });
-        }
-
-        if cswitches {
-            let ancillary = session.ancillary_data();
-            let time_field = session.time_data_ref();
-            let pid_field = session.pid_field_ref();
-            let tid_field = session.tid_data_ref();
-            let reader = callstack_reader.clone();
-
-            /* Get sample kind for cswitch */
-            let kind = machine.borrow_mut().sample_kind("cswitch");
-
-            /* Hook cswitch profile event */
-            let event = session.cswitch_profile_event();
-            let event_machine = machine.clone();
-            let mut frames: Vec<u64> = Vec::new();
-
-            event.add_callback(move |data| {
-                let full_data = data.full_data();
-
-                let ancillary = ancillary.borrow();
-
-                let cpu = ancillary.cpu() as u16;
-                let time = time_field.get_u64(full_data)?;
-                let pid = pid_field.get_u32(full_data)?;
-                let tid = tid_field.get_u32(full_data)?;
-
-                /* Ignore scheduler switches */
-                if pid == 0 || tid == 0 {
-                    return Ok(());
-                }
-
-                frames.clear();
-
-                reader.read_frames(
-                    full_data,
-                    &mut frames);
-
-                let mut machine = event_machine.borrow_mut();
-
-                let sample = machine.make_sample(
-                    time,
-                    0,
-                    tid,
-                    cpu,
-                    kind,
-                    &frames);
-
-                /* Stash away the sample until switch-in */
-                machine.cswitches.entry(tid).or_default().sample = Some(sample);
-
-                Ok(())
-            });
-
-            let misc_field = session.misc_data_ref();
-            let time_field = session.time_data_ref();
-            let pid_field = session.pid_field_ref();
-            let tid_field = session.tid_data_ref();
-
-            /* Hook cswitch swap event */
-            let event = session.cswitch_event();
-            let event_machine = machine.clone();
-
-            event.add_callback(move |data| {
-                let full_data = data.full_data();
-
-                let misc = misc_field.get_u16(full_data)?;
-                let time = time_field.get_u64(full_data)?;
-                let pid = pid_field.get_u32(full_data)?;
-                let tid = tid_field.get_u32(full_data)?;
-
-                /* Ignore scheduler switches */
-                if pid == 0 || tid == 0 {
-                    return Ok(());
-                }
-
-                let mut machine = event_machine.borrow_mut();
-
-                match machine.cswitches.entry(tid) {
-                    Occupied(mut entry) => {
-                        let entry = entry.get_mut();
-
-                        if misc & PERF_RECORD_MISC_SWITCH_OUT == 0 {
-                            /* Switch in */
-
-                            /* Sanity check time duration */
-                            if entry.start_time == 0 {
-                                /* Unexpected, clear and don't record. */
-                                let _ = entry.sample.take();
-                                return Ok(());
-                            }
-
-                            let start_time = entry.start_time;
-                            let duration = time - start_time;
-
-                            /* Reset time as a precaution */
-                            entry.start_time = 0;
-
-                            /* Record sample if we got callchain data */
-                            if let Some(mut sample) = entry.sample.take() {
-                                /*
-                                 * Record cswitch sample for duration of wait
-                                 * We have to modify these values since the
-                                 * callchain can be delayed from the actual
-                                 * cswitch time, and we don't know the full
-                                 * delay period (value) until now.
-                                 */
-                                *sample.time_mut() = start_time;
-                                *sample.value_mut() = duration;
-
-                                machine.process_mut(pid).add_sample(sample);
-                            }
-                        } else {
-                            /* Switch out */
-
-                            /* Keep track of switch out time */
-                            entry.start_time = time;
-                        }
-                    },
-                    _ => { }
-                }
-
-                Ok(())
-            });
-        }
-
-        /* Hook mmap records */
-        let event = session.mmap_event();
-        let event_machine = machine.clone();
-        let fmt = event.format();
-        let pid = fmt.get_field_ref_unchecked("pid");
-        let addr = fmt.get_field_ref_unchecked("addr");
-        let len = fmt.get_field_ref_unchecked("len");
-        let pgoffset = fmt.get_field_ref_unchecked("pgoffset");
-        let maj = fmt.get_field_ref_unchecked("maj");
-        let min = fmt.get_field_ref_unchecked("min");
-        let ino = fmt.get_field_ref_unchecked("ino");
-        let prot = fmt.get_field_ref_unchecked("prot");
-        let filename = fmt.get_field_ref_unchecked("filename[]");
-
-        const PROT_EXEC: u32 = 4;
-        event.add_callback(move |data| {
-            let fmt = data.format();
-            let data = data.event_data();
-
-            let prot = fmt.get_u32(prot, data)?;
-
-            /* Skip non-executable mmaps */
-            if prot & PROT_EXEC != PROT_EXEC {
-                return Ok(());
-            }
-
-            event_machine.borrow_mut().add_mmap_exec(
-                fmt.get_u32(pid, data)?,
-                fmt.get_u64(addr, data)?,
-                fmt.get_u64(len, data)?,
-                fmt.get_u64(pgoffset, data)?,
-                fmt.get_u32(maj, data)?,
-                fmt.get_u32(min, data)?,
-                fmt.get_u64(ino, data)?,
-                fmt.get_str(filename, data)?)
-        });
-
-        /* Hook comm records */
-        let event = session.comm_event();
-        let event_machine = machine.clone();
-        let fmt = event.format();
-        let pid = fmt.get_field_ref_unchecked("pid");
-        let tid = fmt.get_field_ref_unchecked("tid");
-        let comm = fmt.get_field_ref_unchecked("comm[]");
-
-        event.add_callback(move |data| {
-            let fmt = data.format();
-            let data = data.event_data();
-
-            let pid = fmt.get_u32(pid, data)?;
-            let tid = fmt.get_u32(tid, data)?;
-
-            if pid != tid {
-                return Ok(())
-            }
-
-            event_machine.borrow_mut().add_comm_exec(
-                pid,
-                fmt.get_str(comm, data)?)
-        });
-
-        /* Hook fork records */
-        let event = session.fork_event();
-        let event_machine = machine.clone();
-        let fmt = event.format();
-        let pid = fmt.get_field_ref_unchecked("pid");
-        let ppid = fmt.get_field_ref_unchecked("ppid");
-        let tid = fmt.get_field_ref_unchecked("tid");
-
-        event.add_callback(move |data| {
-            let fmt = data.format();
-            let data = data.event_data();
-
-            let pid = fmt.get_u32(pid, data)?;
-            let tid = fmt.get_u32(tid, data)?;
-
-            if pid != tid {
-                return Ok(());
-            }
-
-            event_machine.borrow_mut().fork_exec(
-                pid,
-                fmt.get_u32(ppid, data)?)
-        });
-
-        Ok(machine)
-    }
 }
 
 pub trait ExportBuilderHelp {
@@ -1081,226 +585,8 @@ pub trait ExportBuilderHelp {
         settings: &ExportSettings) -> Self;
 }
 
-impl ExportBuilderHelp for RingBufSessionBuilder {
-    fn with_exporter_events(
-        self,
-        settings: &ExportSettings) -> Self {
-        let mut builder = self;
-
-        let mut kernel = RingBufBuilder::for_kernel()
-            .with_mmap_records()
-            .with_comm_records()
-            .with_task_records();
-
-        if settings.cpu_profiling {
-            let profiling = RingBufBuilder::for_profiling(settings.cpu_freq);
-
-            builder = builder.with_profiling_events(profiling);
-        }
-
-        if settings.cswitches {
-            let cswitches = RingBufBuilder::for_cswitches();
-
-            builder = builder.with_cswitch_events(cswitches);
-            kernel = kernel.with_cswitch_records();
-        }
-
-        if settings.events.is_some() {
-            let tracepoint = RingBufBuilder::for_tracepoint();
-
-            builder = builder.with_tracepoint_events(tracepoint);
-        }
-
-        builder = builder.with_kernel_events(kernel);
-
-        match &settings.callstack_helper {
-            Some(callstack_helper) => {
-                builder.with_callstack_help(callstack_helper)
-            },
-            None => { builder },
-        }
-
-    }
-}
-
 pub trait ExportSessionHelp {
     fn build_exporter(
         &mut self,
         settings: ExportSettings) -> anyhow::Result<Writable<ExportMachine>>;
-}
-
-impl ExportSessionHelp for PerfSession {
-    fn build_exporter(
-        &mut self,
-        settings: ExportSettings) -> anyhow::Result<Writable<ExportMachine>> {
-        let exporter = ExportMachine::new(settings);
-
-        exporter.hook_to_session(self)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::Path;
-    use std::os::linux::fs::MetadataExt;
-
-    use crate::tracefs::TraceFS;
-    use crate::helpers::callstack::CallstackHelper;
-
-    #[test]
-    #[ignore]
-    fn it_works() {
-        let helper = CallstackHelper::new()
-            .with_dwarf_unwinding();
-
-        let mut settings = ExportSettings::new(helper);
-
-        /* Hookup page_fault as a new event sample */
-        let tracefs = TraceFS::open().unwrap();
-        let user_fault = tracefs.find_event("exceptions", "page_fault_user").unwrap();
-        let kernel_fault = tracefs.find_event("exceptions", "page_fault_kernel").unwrap();
-
-        settings = settings.with_event(
-            user_fault,
-            move |builder| {
-                /* Set default sample kind */
-                builder.set_sample_kind("page_fault_user");
-                Ok(())
-            },
-            move |tracer| {
-                /* Create default sample */
-                tracer.add_sample(1)
-            });
-
-        settings = settings.with_event(
-            kernel_fault,
-            move |builder| {
-                /* Set default sample kind */
-                builder.set_sample_kind("page_fault_kernel");
-                Ok(())
-            },
-            move |tracer| {
-                /* Create default sample */
-                tracer.add_sample(1)
-            });
-
-        let mut builder = RingBufSessionBuilder::new()
-            .with_page_count(256)
-            .with_exporter_events(&settings);
-
-        let mut session = builder.build().unwrap();
-
-        let exporter = session.build_exporter(settings).unwrap();
-
-        let duration = std::time::Duration::from_secs(1);
-
-        session.lost_event().add_callback(|_| {
-            println!("WARN: Lost event data");
-
-            Ok(())
-        });
-
-        session.lost_samples_event().add_callback(|_| {
-            println!("WARN: Lost samples data");
-
-            Ok(())
-        });
-
-        session.capture_environment();
-        session.enable().unwrap();
-        session.parse_for_duration(duration).unwrap();
-        session.disable().unwrap();
-
-        let mut exporter = exporter.borrow_mut();
-
-        /* Pull in more data, if wanted */
-        exporter.add_kernel_mappings();
-
-        /* Dump state */
-        let strings = exporter.strings();
-
-        println!("File roots:");
-        for process in exporter.processes() {
-            let mut comm = "Unknown";
-
-            if let Some(comm_id) = process.comm_id() {
-                if let Ok(value) = strings.from_id(comm_id) {
-                    comm = value;
-                }
-            }
-
-            let file = process.open_file(Path::new("."));
-
-            match file {
-                Ok(file) => {
-                    match file.metadata() {
-                        Ok(meta) => {
-                            println!("{}: ino: {}, dev: {}", comm, meta.st_ino(), meta.st_dev());
-                        },
-                        Err(error) => {
-                            println!("Error({}): {:?}", comm, error);
-                        }
-                    }
-                },
-                Err(error) => {
-                    println!("Error({}): {:?}", comm, error);
-                }
-            }
-        }
-
-        let kinds = exporter.sample_kinds();
-
-        for process in exporter.processes() {
-            let mut comm = "Unknown";
-
-            if let Some(comm_id) = process.comm_id() {
-                if let Ok(value) = strings.from_id(comm_id) {
-                    comm = value;
-                }
-            }
-
-            println!(
-                "{}: {} ({} Samples)",
-                process.pid(),
-                comm,
-                process.samples().len());
-
-            for sample in process.samples() {
-                println!(
-                    "{}: {:x} ({}) TID={},Kind={},Value={}",
-                    sample.time(),
-                    sample.ip(),
-                    sample.callstack_id(),
-                    sample.tid(),
-                    kinds[sample.kind() as usize],
-                    sample.value());
-            }
-
-            if process.samples().len() > 0 {
-                println!();
-            }
-        }
-    }
-
-    #[test]
-    #[ignore]
-    fn kernel_symbols() {
-        let mut reader = KernelSymbolReader::new();
-        let mut count = 0;
-
-        reader.reset();
-
-        while reader.next() {
-            println!(
-                "{:x} - {:x}: {}",
-                reader.start(),
-                reader.end(),
-                reader.name());
-
-            count += 1;
-        }
-
-        assert!(count > 0);
-    }
 }

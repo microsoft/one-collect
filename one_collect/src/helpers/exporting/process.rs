@@ -3,7 +3,10 @@ use std::path::{Path, PathBuf};
 
 use crate::PathBufInteger;
 use crate::intern::InternedCallstacks;
+
+#[cfg(target_os = "linux")]
 use crate::openat::OpenAt;
+#[cfg(target_os = "linux")]
 use crate::procfs;
 
 use ruwind::{CodeSection, Unwindable};
@@ -62,8 +65,10 @@ impl ExportProcessSample {
 
 pub struct ExportProcess {
     pid: u32,
+    #[cfg(target_os = "linux")]
     ns_pid: Option<u32>,
     comm_id: Option<usize>,
+    #[cfg(target_os = "linux")]
     root_fs: Option<OpenAt>,
     samples: Vec<ExportProcessSample>,
     mappings: Vec<ExportMapping>,
@@ -82,8 +87,10 @@ impl ExportProcess {
     pub fn new(pid: u32) -> Self {
         Self {
             pid,
+            #[cfg(target_os = "linux")]
             ns_pid: None,
             comm_id: None,
+            #[cfg(target_os = "linux")]
             root_fs: None,
             samples: Vec::new(),
             mappings: Vec::new(),
@@ -113,12 +120,14 @@ impl ExportProcess {
         None
     }
 
+    #[cfg(target_os = "linux")]
     pub fn add_ns_pid(
         &mut self,
         path_buf: &mut PathBuf) {
         self.ns_pid = procfs::ns_pid(path_buf, self.pid);
     }
 
+    #[cfg(target_os = "linux")]
     pub fn add_root_fs(
         &mut self,
         path_buf: &mut PathBuf) -> anyhow::Result<()> {
@@ -135,6 +144,7 @@ impl ExportProcess {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
     pub fn open_file(
         &self,
         path: &Path) -> anyhow::Result<File> {
@@ -173,6 +183,7 @@ impl ExportProcess {
 
     pub fn pid(&self) -> u32 { self.pid }
 
+    #[cfg(target_os = "linux")]
     pub fn ns_pid(&self) -> Option<u32> { self.ns_pid }
 
     pub fn comm_id(&self) -> Option<usize> { self.comm_id }
@@ -295,6 +306,7 @@ impl ExportProcess {
         }
     }
 
+    #[cfg(target_os = "linux")]
     pub fn fork(
         &self,
         pid: u32) -> Self { 

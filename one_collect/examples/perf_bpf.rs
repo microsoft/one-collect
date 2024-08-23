@@ -1,7 +1,13 @@
-use one_collect::event::Event;
-use one_collect::perf_event::*;
-
+#[cfg(target_os = "windows")]
 fn main() {
+    println!("perf_events is Linux only");
+}
+
+#[cfg(target_os = "linux")]
+fn main() {
+    use one_collect::event::Event;
+    use one_collect::perf_event::*;
+
     let args: Vec<_> = std::env::args().collect();
 
     if args.len() == 1 {

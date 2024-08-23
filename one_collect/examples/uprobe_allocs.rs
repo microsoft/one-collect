@@ -1,14 +1,20 @@
-use one_collect::perf_event::{
-    RingBufBuilder,
-    RingBufSessionBuilder
-};
+#[cfg(target_os = "windows")]
+fn main() {
+    println!("uprobes are Linux only");
+}
 
-use one_collect::helpers::uprobe::*;
-use one_collect::event::Event;
-use one_collect::tracefs::*;
-use one_collect::Writable;
-
+#[cfg(target_os = "linux")]
 fn main() -> Result<(), anyhow::Error> {
+    use one_collect::perf_event::{
+        RingBufBuilder,
+        RingBufSessionBuilder
+    };
+
+    use one_collect::helpers::uprobe::*;
+    use one_collect::event::Event;
+    use one_collect::tracefs::*;
+    use one_collect::Writable;
+
     let args: Vec<_> = std::env::args().collect();
 
     if args.len() != 2 {

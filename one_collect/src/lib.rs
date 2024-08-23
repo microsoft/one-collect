@@ -1,17 +1,23 @@
 pub mod event;
 pub mod sharing;
-pub mod tracefs;
-pub mod procfs;
-pub mod perf_event;
-pub mod session;
-pub mod state;
 pub mod helpers;
 pub mod intern;
+pub mod state;
+
+#[cfg(target_os = "linux")]
+pub mod session;
+#[cfg(target_os = "linux")]
+pub mod tracefs;
+#[cfg(target_os = "linux")]
+pub mod procfs;
+#[cfg(target_os = "linux")]
+pub mod perf_event;
+#[cfg(target_os = "linux")]
 pub mod openat;
 
 pub use sharing::{Writable, ReadOnly};
 
-mod pathbuf_ext;
+pub mod pathbuf_ext;
 use pathbuf_ext::{PathBufInteger};
 
 pub type IOResult<T> = std::io::Result<T>;

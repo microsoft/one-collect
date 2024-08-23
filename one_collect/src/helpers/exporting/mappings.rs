@@ -97,6 +97,8 @@ impl ExportMapping {
 
     pub fn anon(&self) -> bool { self.anon }
 
+    pub fn node(&self) -> &Option<ExportDevNode> { &self.node }
+
     pub fn id(&self) -> usize { self.id }
 
     pub fn symbols(&self) -> &Vec<ExportSymbol> { &self.symbols }

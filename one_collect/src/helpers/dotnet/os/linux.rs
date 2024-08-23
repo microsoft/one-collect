@@ -7,6 +7,7 @@ use std::sync::mpsc::{self, Sender, Receiver};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
+use super::*;
 use crate::perf_event::*;
 use crate::openat::OpenAt;
 use crate::Writable;
@@ -265,12 +266,6 @@ impl DotNetHelper {
             }
         }
     }
-}
-
-pub trait DotNetHelp {
-    fn with_dotnet_help(
-        &mut self,
-        helper: &mut DotNetHelper) -> Self;
 }
 
 impl DotNetHelp for RingBufSessionBuilder {
