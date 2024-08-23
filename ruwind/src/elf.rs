@@ -3,25 +3,8 @@ use std::io::{BufReader, Error, Read, Seek, SeekFrom};
 use std::marker::PhantomData;
 use std::mem::{zeroed, size_of};
 use std::slice;
-use std::str::FromStr;
 
 pub const SHT_PROGBITS: ElfWord = 1;
-
-pub struct Symbol<'a> {
-    pub start: u64,
-    pub end: u64,
-    pub name: &'a str,
-}
-
-impl<'a> Symbol<'a> {
-    pub fn new() -> Self {
-        Symbol {
-            start: 0,
-            end: 0,
-            name: ""
-        }
-    }
-}
 
 pub struct ElfSymbol {
     start: u64,
@@ -129,25 +112,22 @@ impl<'a> ElfSymbolIterator<'a> {
     }
 
     pub fn reset(&mut self) {
-        self.sections.clear();
-        self.section_index = 0;
-        self.section_offsets.clear();
-        self.section_str_offset = 0;
-        self.entry_count = 0;
-        self.entry_index = 0;
-        self.reset = true;
+        let clear = |iterator: &mut ElfSymbolIterator| {
+            iterator.sections.clear();
+            iterator.section_index = 0;
+            iterator.section_offsets.clear();
+            iterator.section_str_offset = 0;
+            iterator.entry_count = 0;
+            iterator.entry_index = 0;
+            iterator.reset = true;
+        };
         
-        match self.initialize() {
-            Ok(_) => (),
-            Err(_) => {
-                self.sections.clear();
-                self.section_index = 0;
-                self.section_offsets.clear();
-                self.section_str_offset = 0;
-                self.entry_count = 0;
-                self.entry_index = 0;
-                self.reset = true;
-            }
+        // Clear prior to the call to initialize.
+        clear(self);
+
+        // Initialize and re-clear if initialization fails.
+        if self.initialize().is_err() {
+            clear(self);
         }
     }
 
@@ -255,34 +235,23 @@ fn get_symbols32(
     count: u64,
     va_start: u64,
     str_offset: u64,
-    mut callback: impl FnMut(&Symbol)) -> Result<(), Error> {
-    let mut sym = ElfSymbol32::default();
+    mut callback: impl FnMut(&ElfSymbol)) -> Result<(), Error> {
     let mut buffer = [0; 1024];
-
+    let mut symbol = ElfSymbol::new();
+    
     for i in 0..count {
-        let pos = metadata.offset + (i * metadata.entry_size);
-        reader.seek(SeekFrom::Start(pos))?;
-        read_symbol32(reader, &mut sym)?;
+        if get_symbol32(
+            reader,
+            metadata,
+            i,
+            va_start,
+            str_offset,
+            &mut buffer,
+            &mut symbol).is_err() {
+                continue;
+            }
 
-        if !sym.is_function() || sym.st_value == 0 || sym.st_size == 0 {
-            continue;
-        }
-
-        let start = sym.st_value as u64 - va_start;
-        let end = start + (sym.st_size as u64 - 1);
-        let str_pos = sym.st_name as u64 + str_offset;
-
-        reader.seek(SeekFrom::Start(str_pos))?;
-        let bytes = reader.read(&mut buffer[..])?;
-        let name = get_str(&mut buffer[0..bytes]);
-
-        let sym = Symbol {
-            start,
-            end,
-            name,
-        };
-
-        callback(&sym);
+        callback(&symbol);
     }
 
     Ok(())
@@ -324,34 +293,23 @@ fn get_symbols64(
     count: u64,
     va_start: u64,
     str_offset: u64,
-    mut callback: impl FnMut(&Symbol)) -> Result<(), Error> {
-    let mut sym = ElfSymbol64::default();
+    mut callback: impl FnMut(&ElfSymbol)) -> Result<(), Error> {
     let mut buffer = [0; 1024];
+    let mut symbol = ElfSymbol::new();
 
     for i in 0..count {
-        let pos = metadata.offset + (i * metadata.entry_size);
-        reader.seek(SeekFrom::Start(pos))?;
-        read_symbol64(reader, &mut sym)?;
+        if get_symbol64(
+            reader,
+            metadata,
+            i,
+            va_start,
+            str_offset,
+            &mut buffer,
+            &mut symbol).is_err() {
+                continue;
+            }
 
-        if !sym.is_function() || sym.st_value == 0 || sym.st_size == 0 {
-            continue;
-        }
-
-        let start = sym.st_value - va_start;
-        let end = start + (sym.st_size - 1);
-        let str_pos = sym.st_name as u64 + str_offset;
-
-        reader.seek(SeekFrom::Start(str_pos))?;
-        let bytes = reader.read(&mut buffer[..])?;
-        let name = get_str(&mut buffer[0..bytes]);
-
-        let sym = Symbol {
-            start,
-            end,
-            name,
-        };
-
-        callback(&sym);
+        callback(&symbol);
     }
 
     Ok(())
@@ -467,7 +425,7 @@ fn get_va_start(
 pub fn get_symbols(
     reader: &mut (impl Read + Seek),
     metadata: &Vec<SectionMetadata>,
-    mut callback: impl FnMut(&Symbol)) -> Result<(), Error> {
+    mut callback: impl FnMut(&ElfSymbol)) -> Result<(), Error> {
     let va_start = get_va_start(reader)?;
     let mut offsets: Vec<u64> = Vec::new();
 
