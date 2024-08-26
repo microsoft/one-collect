@@ -3,6 +3,8 @@ use std::io::{BufReader, Error, Read, Seek, SeekFrom};
 use std::marker::PhantomData;
 use std::mem::{zeroed, size_of};
 use std::slice;
+use cpp_demangle::{DemangleOptions, Symbol};
+use rustc_demangle::demangle;
 
 pub const SHT_PROGBITS: ElfWord = 1;
 
@@ -21,17 +23,6 @@ impl ElfSymbol {
         }
     }
 
-    pub fn set(
-        &mut self,
-        start: u64,
-        end: u64,
-        name: &str) {
-        self.start = start;
-        self.end = end;
-        self.name.clear();
-        self.name.push_str(name);
-    }
-
     pub fn start(&self) -> u64 {
         self.start
     }
@@ -43,8 +34,6 @@ impl ElfSymbol {
     pub fn name(&self) -> &str {
         self.name.as_str()
     }
-
-
 }
 
 pub struct SectionMetadata {
@@ -274,15 +263,15 @@ fn get_symbol32<'a>(
         return Err(Error::new(std::io::ErrorKind::InvalidData, "Invalid symbol"));
     }
 
-    let start = sym.st_value as u64 - va_start;
-    let end = start + (sym.st_size as u64 - 1);
+    symbol.start = sym.st_value as u64 - va_start;
+    symbol.end = symbol.start + (sym.st_size as u64 - 1);
     let str_pos = sym.st_name as u64 + str_offset;
 
     reader.seek(SeekFrom::Start(str_pos))?;
     let bytes = reader.read(&mut str_buf[..])?;
     let name = get_str(&mut str_buf[0..bytes]);
 
-    symbol.set(start, end, name);
+    demangle_symbol(name, symbol);
 
     Ok(())
 }
@@ -332,17 +321,44 @@ fn get_symbol64<'a>(
         return Err(Error::new(std::io::ErrorKind::InvalidData, "Invalid symbol"));
     }
 
-    let start = sym.st_value as u64 - va_start;
-    let end = start + (sym.st_size as u64 - 1);
+    symbol.start = sym.st_value as u64 - va_start;
+    symbol.end = symbol.start + (sym.st_size as u64 - 1);
     let str_pos = sym.st_name as u64 + str_offset;
 
     reader.seek(SeekFrom::Start(str_pos))?;
     let bytes = reader.read(&mut str_buf[..])?;
     let name = get_str(&mut str_buf[0..bytes]);
 
-    symbol.set(start, end, name);
+    demangle_symbol(name, symbol);
 
     Ok(())
+}
+
+fn demangle_symbol(
+    mangled_name: &str,
+    sym: &mut ElfSymbol) {
+    let mut result = None;
+
+    if mangled_name.len() > 2 && &mangled_name[0..2] == "_Z" {
+        // C++ mangled name.  Demangle using cpp_demangle crate.
+        if let Ok(symbol) = Symbol::new(mangled_name) {
+            let options = DemangleOptions::new();
+            if let Ok(demangled_name) = symbol.demangle(&options) {
+                result = Some(demangled_name);
+            }
+        }
+    }
+    else if mangled_name.len() > 2  && &mangled_name[0..2] == "_R" {
+        // Rust mangled name.  Demangle using rustc-demangle crate.
+        let demangler = demangle(mangled_name);
+        result = Some(demangler.to_string());
+    }
+
+    if result.is_none() {
+        result = Some(mangled_name.to_string());
+    }
+
+    sym.name = result.unwrap();
 }
 
 fn get_va_start32(
