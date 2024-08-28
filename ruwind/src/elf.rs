@@ -15,7 +15,7 @@ pub struct ElfSymbol {
 }
 
 impl ElfSymbol {
-    pub fn new() -> Self {
+    fn new() -> Self {
         ElfSymbol {
             start: 0,
             end: 0,
@@ -321,8 +321,8 @@ fn get_symbol64<'a>(
         return Err(Error::new(std::io::ErrorKind::InvalidData, "Invalid symbol"));
     }
 
-    symbol.start = sym.st_value as u64 - va_start;
-    symbol.end = symbol.start + (sym.st_size as u64 - 1);
+    symbol.start = sym.st_value - va_start;
+    symbol.end = symbol.start + (sym.st_size - 1);
     let str_pos = sym.st_name as u64 + str_offset;
 
     reader.seek(SeekFrom::Start(str_pos))?;
