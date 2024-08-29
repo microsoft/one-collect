@@ -1021,8 +1021,8 @@ mod tests {
         let mut found = false;
 
         get_symbols(&mut file, &sections, |symbol| {
-            if symbol.name == "malloc" {
-                println!("{} - {}: {}", symbol.start, symbol.end, symbol.name);
+            if symbol.name() == "malloc" {
+                println!("{} - {}: {}", symbol.start, symbol.end, symbol.name());
                 found = true;
             }
         }).unwrap();
