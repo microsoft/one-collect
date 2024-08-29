@@ -284,12 +284,14 @@ impl From<EventFieldRef> for usize {
 pub enum LocationType {
     /// Represents a static location that holds binary data.
     Static,
-    /// Represents a static location that holds a string.
+    /// Represents a static location that holds a UTF8 string.
     StaticString,
     /// Represents a dynamic location, with the position being relative to another field.
     DynRelative,
     /// Represents a dynamic location, with the position being an absolute index into the data.
     DynAbsolute,
+    /// Represents a static location that holds a UTF16 string.
+    StaticUTF16String,
 }
 
 /// `EventField` represents a field in an event.
@@ -459,13 +461,29 @@ impl EventFormat {
                 &slice[0..len]
             },
 
+            LocationType::StaticUTF16String => {
+                let slice = &data[field.offset..];
+                let chunks = slice.chunks_exact(2);
+                let mut len = 0usize;
+
+                for chunk in chunks {
+                    if chunk[0] == 0 && chunk[1] == 0 {
+                        break;
+                    }
+
+                    len += 2;
+                }
+
+                &slice[0..len]
+            },
+
             LocationType::DynRelative => {
                 todo!("Need to support relative location");
             },
 
             LocationType::DynAbsolute => {
                 todo!("Need to support absolute location");
-            }
+            },
         }
     }
 

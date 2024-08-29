@@ -8,6 +8,8 @@ use super::*;
 use crate::sharing::*;
 use crate::event::*;
 
+mod events;
+
 #[repr(C)]
 #[derive(Default, Eq, PartialEq, Copy, Clone)]
 pub struct Guid {
@@ -50,6 +52,7 @@ pub struct AncillaryData {
 
 struct ProviderEvents {
     guid: Guid,
+    capture_state: bool,
     level: u8,
     keyword: u64,
     events: HashMap<usize, Vec<Event>, BuildHasherDefault<XxHash64>>,
@@ -60,10 +63,27 @@ impl ProviderEvents {
         provider: Guid) -> Self {
         Self {
             guid: provider,
+            capture_state: false,
             level: 0,
             keyword: 0,
             events: HashMap::default(),
         }
+    }
+
+    fn needs_callstacks(&self) -> bool {
+        for events in self.events.values() {
+            for event in events {
+                if !event.has_no_callstack_flag() {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    fn require_capture_state(&mut self) {
+        self.capture_state = true;
     }
 
     fn get_events(
@@ -72,16 +92,31 @@ impl ProviderEvents {
         self.events.get(&id)
     }
 
-    fn add_event(
+    fn get_events_mut(
+        &mut self,
+        id: usize) -> &mut Vec<Event> {
+        self.events.entry(id).or_insert_with(Vec::new)
+    }
+
+    fn ensure_level_keyword(
         &mut self,
         level: u8,
-        keyword: u64,
-        event: Event) {
+        keyword: u64) {
         if level > self.level {
             self.level = level;
         }
 
         self.keyword |= keyword;
+    }
+
+    fn add_event(
+        &mut self,
+        level: u8,
+        keyword: u64,
+        event: Event) {
+        self.ensure_level_keyword(
+            level,
+            keyword);
 
         match self.events.entry(event.id()) {
             Vacant(entry) => {
@@ -96,13 +131,157 @@ impl ProviderEvents {
 
 pub struct EtwSession {
     providers: HashMap<Guid, ProviderEvents, BuildHasherDefault<XxHash64>>,
+
+    /* Ancillary data */
+    ancillary: Writable<AncillaryData>,
 }
+
+const SystemProcessProvider: Guid = Guid::from_u128(0x151f55dc_467d_471f_83b5_5f889d46ff66);
+const SYSTEM_PROCESS_KW_GENERAL: u64 = 1u64;
+const SYSTEM_PROCESS_KW_LOADER: u64 = 4096u64;
 
 impl EtwSession {
     pub fn new() -> Self {
         Self {
             providers: HashMap::default(),
+
+            /* Ancillary data */
+            ancillary: Writable::new(AncillaryData::default()),
         }
+    }
+
+    fn get_provider_mut(
+        &mut self,
+        provider: Guid) -> &mut ProviderEvents {
+        self.providers
+            .entry(provider)
+            .or_insert_with(|| ProviderEvents::new(provider))
+    }
+
+    fn event_entry_mut(
+        &mut self,
+        provider: Guid,
+        level: u8,
+        keyword: u64,
+        id: usize,
+        default: impl FnOnce() -> Event) -> &mut Event {
+        let provider = self.get_provider_mut(provider);
+
+        provider.ensure_level_keyword(
+            level,
+            keyword);
+
+        let events = provider.get_events_mut(id);
+
+        if events.is_empty() {
+            events.push(default());
+        }
+
+        &mut events[0]
+    }
+
+    pub fn comm_start_event(&mut self) -> &mut Event {
+        let id = 1;
+
+        self.event_entry_mut(
+            SystemProcessProvider,
+            0,
+            SYSTEM_PROCESS_KW_GENERAL,
+            id,
+            || events::comm(id, "Process::Start"))
+    }
+
+    pub fn comm_end_event(&mut self) -> &mut Event {
+        let id = 2;
+
+        self.event_entry_mut(
+            SystemProcessProvider,
+            0,
+            SYSTEM_PROCESS_KW_GENERAL,
+            id,
+            || events::comm(id, "Process::End"))
+    }
+
+    pub fn comm_start_capture_event(&mut self) -> &mut Event {
+        let id = 3;
+
+        self.get_provider_mut(SystemProcessProvider)
+            .require_capture_state();
+
+        self.event_entry_mut(
+            SystemProcessProvider,
+            0,
+            SYSTEM_PROCESS_KW_GENERAL,
+            id,
+            || events::comm(id, "Process::DCStart"))
+    }
+
+    pub fn comm_end_capture_event(&mut self) -> &mut Event {
+        let id = 4;
+
+        self.get_provider_mut(SystemProcessProvider)
+            .require_capture_state();
+
+        self.event_entry_mut(
+            SystemProcessProvider,
+            0,
+            SYSTEM_PROCESS_KW_GENERAL,
+            id,
+            || events::comm(id, "Process::DCEnd"))
+    }
+
+    pub fn mmap_load_event(&mut self) -> &mut Event {
+        let id = 10;
+
+        self.event_entry_mut(
+            SystemProcessProvider,
+            0,
+            SYSTEM_PROCESS_KW_LOADER,
+            id,
+            || events::mmap(id, "ImageLoad::Load"))
+    }
+
+    pub fn mmap_unload_event(&mut self) -> &mut Event {
+        let id = 2;
+
+        self.event_entry_mut(
+            SystemProcessProvider,
+            0,
+            SYSTEM_PROCESS_KW_LOADER,
+            id,
+            || events::mmap(id, "ImageLoad::Unload"))
+    }
+
+    pub fn mmap_load_capture_start_event(&mut self) -> &mut Event {
+        let id = 3;
+
+        self.get_provider_mut(SystemProcessProvider)
+            .require_capture_state();
+
+        self.event_entry_mut(
+            SystemProcessProvider,
+            0,
+            SYSTEM_PROCESS_KW_LOADER,
+            id,
+            || events::mmap(id, "ImageLoad::DCStart"))
+    }
+
+    pub fn mmap_load_capture_end_event(&mut self) -> &mut Event {
+        let id = 4;
+
+        self.get_provider_mut(SystemProcessProvider)
+            .require_capture_state();
+
+        self.event_entry_mut(
+            SystemProcessProvider,
+            0,
+            SYSTEM_PROCESS_KW_LOADER,
+            id,
+            || events::mmap(id, "ImageLoad::DCEnd"))
+    }
+
+    pub fn ancillary_data(&self) -> ReadOnly<AncillaryData> {
+        self.ancillary.read_only()
     }
 
     pub fn add_event(
@@ -110,7 +289,7 @@ impl EtwSession {
         provider: Guid,
         level: u8,
         keyword: u64,
-        event: Event) -> anyhow::Result<()> {
+        event: Event) {
         match self.providers.entry(provider) {
             Vacant(entry) => {
                 let mut events = ProviderEvents::new(*entry.key());
@@ -129,14 +308,30 @@ impl EtwSession {
                     event);
             }
         }
+    }
+
+    pub fn capture_environment(&mut self) {
+        /* Placeholder */
+    }
+
+    fn build_session_handle(
+        &mut self,
+        _name: &str) -> anyhow::Result<()> {
+
+        for provider in self.providers.values() {
+            println!("Provider: Callstack={}", provider.needs_callstacks());
+        }
 
         Ok(())
     }
 
     pub fn parse_for_duration(
         &mut self,
-        duration: std::time::Duration) -> anyhow::Result<()> {
-        todo!()
+        name: &str,
+        _duration: std::time::Duration) -> anyhow::Result<()> {
+        self.build_session_handle(name)?;
+
+        Ok(())
     }
 }
 
@@ -177,7 +372,49 @@ mod tests {
         assert!(events.get_events(3).is_none());
     }
 
+    #[ignore]
     #[test]
     fn session() {
+        let mut session = EtwSession::new();
+
+        session.comm_start_capture_event().add_callback(
+            move |_data| {
+                println!("comm_start_capture_event");
+                Ok(())
+            });
+
+        session.mmap_load_capture_start_event().add_callback(
+            move |_data| {
+                println!("mmap_load_captue_start_event");
+                Ok(())
+            });
+
+        session.comm_start_event().add_callback(
+            move |_data| {
+                println!("comm_start_event");
+                Ok(())
+            });
+
+        session.mmap_load_event().add_callback(
+            move |_data| {
+                println!("mmap_load_event");
+                Ok(())
+            });
+
+        session.comm_end_event().add_callback(
+            move |_data| {
+                println!("comm_end_event");
+                Ok(())
+            });
+
+        session.mmap_unload_event().add_callback(
+            move |_data| {
+                println!("mmap_unload_event");
+                Ok(())
+            });
+
+        session.parse_for_duration(
+            "one_collect::unit_test",
+            std::time::Duration::from_secs(5)).unwrap();
     }
 }
