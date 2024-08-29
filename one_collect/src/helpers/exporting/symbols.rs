@@ -193,14 +193,16 @@ impl ExportSymbolReader for KernelSymbolReader {
 
 pub struct ElfSymbolReader<'a> {
     iterator: ElfSymbolIterator<'a>,
-    current_sym: Option<ElfSymbol>
+    current_sym: ElfSymbol,
+    current_sym_valid: bool,
 }
 
 impl<'a> ElfSymbolReader<'a> {
     pub fn new(file: File) -> Self {
         Self {
             iterator: ElfSymbolIterator::new(file),
-            current_sym: None
+            current_sym: ElfSymbol::new(),
+            current_sym_valid: false,
         }
     }
 }
@@ -208,34 +210,34 @@ impl<'a> ElfSymbolReader<'a> {
 impl<'a> ExportSymbolReader for ElfSymbolReader<'a> {
     fn reset(&mut self) {
         self.iterator.reset();
-        self.current_sym = None;
+        self.current_sym_valid = false;
     }
 
     fn next(&mut self) -> bool {
-        self.current_sym = self.iterator.next();
-        self.current_sym.is_some()
+        self.current_sym_valid = self.iterator.next(&mut self.current_sym);
+        self.current_sym_valid
     }
 
     fn start(&self) -> u64 {
         let mut start = 0u64;
-        if let Some(sym) = &self.current_sym {
-            start = sym.start();
+        if self.current_sym_valid {
+            start = self.current_sym.start();
         }
         start
     }
 
     fn end(&self) -> u64 {
         let mut end = 0u64;
-        if let Some(sym) = &self.current_sym {
-            end = sym.end();
+        if self.current_sym_valid {
+            end = self.current_sym.end();
         }
         end
     }
 
     fn name(&self) -> &str {
         let mut name = "";
-        if let Some(sym) = &self.current_sym {
-            name = sym.name();
+        if self.current_sym_valid {
+            name = self.current_sym.name();
         }
         name
     }

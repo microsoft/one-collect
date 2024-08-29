@@ -11,15 +11,17 @@ pub const SHT_PROGBITS: ElfWord = 1;
 pub struct ElfSymbol {
     start: u64,
     end: u64,
-    name: String,
+    name_buf: [u8; 1024],
+    name_len: usize,
 }
 
 impl ElfSymbol {
-    fn new() -> Self {
+    pub fn new() -> Self {
         ElfSymbol {
             start: 0,
             end: 0,
-            name: String::new()
+            name_buf: [0; 1024],
+            name_len: 0,
         }
     }
 
@@ -32,7 +34,11 @@ impl ElfSymbol {
     }
 
     pub fn name(&self) -> &str {
-        self.name.as_str()
+        get_str(&self.name_buf[0..self.name_len])
+    }
+
+    pub fn demangle(&self) -> String {
+        demangle_symbol(self.name())
     }
 }
 
@@ -79,7 +85,6 @@ pub struct ElfSymbolIterator<'a> {
     entry_count: u64,
     entry_index: u64,
 
-    name_buffer: [u8; 1024],
     reset: bool,
 }
 
@@ -95,7 +100,6 @@ impl<'a> ElfSymbolIterator<'a> {
             section_str_offset: 0,
             entry_count: 0,
             entry_index: 0,
-            name_buffer: [0; 1024],
             reset: true,
         }
     }
@@ -135,14 +139,12 @@ impl<'a> ElfSymbolIterator<'a> {
 
         Ok(())
     }
-}
 
-impl<'a> Iterator for ElfSymbolIterator<'a> {
-    type Item = ElfSymbol;
-
-    fn next(&mut self) -> Option<Self::Item> {
+    pub fn next(
+        &mut self,
+        symbol: &mut ElfSymbol) -> bool {
         if self.section_index >= self.sections.len() {
-            return None;
+            return false;
         }
 
         let mut section = &self.sections[self.section_index];
@@ -160,7 +162,7 @@ impl<'a> Iterator for ElfSymbolIterator<'a> {
                 }
 
                 if self.section_index >= self.sections.len() {
-                    return None;
+                    return false;
                 }
 
                 section = &self.sections[self.section_index];
@@ -181,30 +183,28 @@ impl<'a> Iterator for ElfSymbolIterator<'a> {
             }
 
             // If we get here, we have at least one entry in the current section.
-            let mut symbol = ElfSymbol::new();
             let result = get_symbol(
                 &mut self.reader,
                 section,
                 self.entry_index,
                 self.va_start,
                 self.section_str_offset,
-                &mut self.name_buffer,
-                &mut symbol);
+                symbol);
 
             self.entry_index+=1;
 
             if result.is_ok() {
-                return Some(symbol);
+                return true;
             }
         }
     }
 }
 
 fn get_str(
-    buffer: &mut [u8]) -> &str {
+    buffer: &[u8]) -> &str {
     let mut i = 0;
 
-    for b in &mut *buffer {
+    for b in buffer {
         if *b == 0 {
             break;
         }
@@ -225,7 +225,6 @@ fn get_symbols32(
     va_start: u64,
     str_offset: u64,
     mut callback: impl FnMut(&ElfSymbol)) -> Result<(), Error> {
-    let mut buffer = [0; 1024];
     let mut symbol = ElfSymbol::new();
     
     for i in 0..count {
@@ -235,7 +234,6 @@ fn get_symbols32(
             i,
             va_start,
             str_offset,
-            &mut buffer,
             &mut symbol).is_err() {
                 continue;
             }
@@ -246,14 +244,13 @@ fn get_symbols32(
     Ok(())
 }
 
-fn get_symbol32<'a>(
+fn get_symbol32(
     reader: &mut (impl Read + Seek),
     metadata: &SectionMetadata,
     sym_index: u64,
     va_start: u64,
     str_offset: u64,
-    str_buf: &'a mut [u8; 1024],
-    symbol: &'a mut ElfSymbol) -> Result<(), Error> {
+    symbol: &mut ElfSymbol) -> Result<(), Error> {
     let mut sym = ElfSymbol32::default();
     let pos = metadata.offset + (sym_index * metadata.entry_size);
     reader.seek(SeekFrom::Start(pos))?;
@@ -268,10 +265,7 @@ fn get_symbol32<'a>(
     let str_pos = sym.st_name as u64 + str_offset;
 
     reader.seek(SeekFrom::Start(str_pos))?;
-    let bytes = reader.read(&mut str_buf[..])?;
-    let name = get_str(&mut str_buf[0..bytes]);
-
-    demangle_symbol(name, symbol);
+    symbol.name_len = reader.read(&mut symbol.name_buf[..])?;
 
     Ok(())
 }
@@ -283,7 +277,6 @@ fn get_symbols64(
     va_start: u64,
     str_offset: u64,
     mut callback: impl FnMut(&ElfSymbol)) -> Result<(), Error> {
-    let mut buffer = [0; 1024];
     let mut symbol = ElfSymbol::new();
 
     for i in 0..count {
@@ -293,7 +286,6 @@ fn get_symbols64(
             i,
             va_start,
             str_offset,
-            &mut buffer,
             &mut symbol).is_err() {
                 continue;
             }
@@ -304,14 +296,13 @@ fn get_symbols64(
     Ok(())
 }
 
-fn get_symbol64<'a>(
+fn get_symbol64(
     reader: &mut (impl Read + Seek),
     metadata: &SectionMetadata,
     sym_index: u64,
     va_start: u64,
     str_offset: u64,
-    str_buf: &'a mut [u8; 1024],
-    symbol: &'a mut ElfSymbol) -> Result<(), Error> {
+    symbol: &mut ElfSymbol) -> Result<(), Error> {
     let mut sym = ElfSymbol64::default();
     let pos = metadata.offset + (sym_index * metadata.entry_size);
     reader.seek(SeekFrom::Start(pos))?;
@@ -326,17 +317,14 @@ fn get_symbol64<'a>(
     let str_pos = sym.st_name as u64 + str_offset;
 
     reader.seek(SeekFrom::Start(str_pos))?;
-    let bytes = reader.read(&mut str_buf[..])?;
-    let name = get_str(&mut str_buf[0..bytes]);
-
-    demangle_symbol(name, symbol);
+    symbol.name_len = reader.read(&mut symbol.name_buf)?;
 
     Ok(())
 }
 
+
 fn demangle_symbol(
-    mangled_name: &str,
-    sym: &mut ElfSymbol) {
+    mangled_name: &str) -> String {
     let mut result = None;
 
     if mangled_name.len() > 2 && &mangled_name[0..2] == "_Z" {
@@ -358,8 +346,9 @@ fn demangle_symbol(
         result = Some(mangled_name.to_string());
     }
 
-    sym.name = result.unwrap();
+    result.unwrap()
 }
+
 
 fn get_va_start32(
     reader: &mut (impl Read + Seek)) -> Result<u64, Error> {
@@ -471,20 +460,19 @@ pub fn get_symbols(
     Ok(())
 }
 
-pub fn get_symbol<'a>(
+pub fn get_symbol(
     reader: &mut (impl Read + Seek),
     metadata: &SectionMetadata,
     sym_index: u64,
     va_start: u64,
     str_offset: u64,
-    str_buf: &'a mut [u8; 1024],
-    symbol: &'a mut ElfSymbol) -> Result<(), Error> {
+    symbol: &mut ElfSymbol) -> Result<(), Error> {
     match metadata.class {
         ELFCLASS32 => {
-            return get_symbol32(reader, metadata, sym_index, va_start, str_offset, str_buf, symbol);
+            return get_symbol32(reader, metadata, sym_index, va_start, str_offset, symbol);
         },
         ELFCLASS64 => {
-            return get_symbol64(reader, metadata, sym_index, va_start, str_offset, str_buf, symbol);
+            return get_symbol64(reader, metadata, sym_index, va_start, str_offset, symbol);
         }
         _ => {
             /* Unknown, no symbols */
