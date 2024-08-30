@@ -43,8 +43,8 @@ pub fn enum_uprobes(
     elf::get_symbols(&mut file, &sections, move |symbol| {
         let probe = UProbe::new(
             "Func",
-            symbol.name,
-            symbol.start);
+            symbol.name(),
+            symbol.start());
 
         callback(&probe);
     })?;
