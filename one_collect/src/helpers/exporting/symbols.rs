@@ -1,4 +1,5 @@
 use std::{fs::File, io::{BufRead, BufReader, Seek, SeekFrom}};
+use ruwind::elf::{ElfSymbol, ElfSymbolIterator};
 
 #[derive(Clone)]
 pub struct ExportSymbol {
@@ -187,6 +188,58 @@ impl ExportSymbolReader for KernelSymbolReader {
 
     fn name(&self) -> &str {
         &self.current_name
+    }
+}
+
+pub struct ElfSymbolReader<'a> {
+    iterator: ElfSymbolIterator<'a>,
+    current_sym: ElfSymbol,
+    current_sym_valid: bool,
+}
+
+impl<'a> ElfSymbolReader<'a> {
+    pub fn new(file: File) -> Self {
+        Self {
+            iterator: ElfSymbolIterator::new(file),
+            current_sym: ElfSymbol::new(),
+            current_sym_valid: false,
+        }
+    }
+}
+
+impl<'a> ExportSymbolReader for ElfSymbolReader<'a> {
+    fn reset(&mut self) {
+        self.iterator.reset();
+        self.current_sym_valid = false;
+    }
+
+    fn next(&mut self) -> bool {
+        self.current_sym_valid = self.iterator.next(&mut self.current_sym);
+        self.current_sym_valid
+    }
+
+    fn start(&self) -> u64 {
+        let mut start = 0u64;
+        if self.current_sym_valid {
+            start = self.current_sym.start();
+        }
+        start
+    }
+
+    fn end(&self) -> u64 {
+        let mut end = 0u64;
+        if self.current_sym_valid {
+            end = self.current_sym.end();
+        }
+        end
+    }
+
+    fn name(&self) -> &str {
+        let mut name = "";
+        if self.current_sym_valid {
+            name = self.current_sym.name();
+        }
+        name
     }
 }
 
@@ -391,6 +444,36 @@ mod tests {
         }
         else {
             assert!(false, "Unable to open file {}", perf_map_path.display());
+        }
+    }
+
+    #[test]
+    fn elf_symbol_reader() {
+        #[cfg(target_arch = "x86_64")]
+        let path = "/usr/lib/x86_64-linux-gnu/libc.so.6";
+
+        #[cfg(target_arch = "aarch64")]
+        let path = "/usr/lib/aarch64-linux-gnu/libc.so.6";
+
+        if let Ok(file) = File::open(path) {
+            let mut reader = ElfSymbolReader::new(file);
+            reader.reset();
+
+            let mut actual_count = 0;
+            loop {
+                if !reader.next() {
+                    break;
+                }
+
+                actual_count+=1;
+                assert!(reader.start() <= reader.end(), "Start must be less than or equal to end - start: {}, end: {}", reader.start(), reader.end());
+                assert!(reader.name().len() > 0);
+            }
+
+            assert!(actual_count > 0);
+        }
+        else {
+            assert!(false, "Unable to open file {}", path);
         }
     }
 }
