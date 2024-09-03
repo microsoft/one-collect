@@ -37,6 +37,8 @@ pub trait ExportSymbolReader {
     fn end(&self) -> u64;
 
     fn name(&self) -> &str;
+
+    fn demangle(&mut self) -> Option<String>;
 }
 
 pub struct KernelSymbolReader {
@@ -189,6 +191,10 @@ impl ExportSymbolReader for KernelSymbolReader {
     fn name(&self) -> &str {
         &self.current_name
     }
+
+    fn demangle(&mut self) -> Option<String> {
+        None
+    }
 }
 
 pub struct ElfSymbolReader<'a> {
@@ -240,6 +246,14 @@ impl<'a> ExportSymbolReader for ElfSymbolReader<'a> {
             name = self.current_sym.name();
         }
         name
+    }
+
+    fn demangle(&mut self) -> Option<String> {
+        let mut demangled_name = None;
+        if self.current_sym_valid {
+            demangled_name = self.current_sym.demangle();
+        }
+        demangled_name
     }
 }
 
@@ -359,6 +373,10 @@ impl ExportSymbolReader for PerfMapSymbolReader {
 
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn demangle(&mut self) -> Option<String> {
+        None
     }
 }
 
