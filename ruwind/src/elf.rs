@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 use std::mem::{zeroed, size_of};
 use std::slice;
 use cpp_demangle::{DemangleOptions, Symbol};
-use rustc_demangle::demangle;
+use rustc_demangle::{demangle, try_demangle};
 
 pub const SHT_PROGBITS: ElfWord = 1;
 
@@ -37,7 +37,7 @@ impl ElfSymbol {
         get_str(&self.name_buf[0..self.name_len])
     }
 
-    pub fn demangle(&self) -> String {
+    pub fn demangle(&self) -> Option<String> {
         demangle_symbol(self.name())
     }
 }
@@ -324,7 +324,7 @@ fn get_symbol64(
 
 
 fn demangle_symbol(
-    mangled_name: &str) -> String {
+    mangled_name: &str) -> Option<String> {
     let mut result = None;
 
     if mangled_name.len() > 2 && &mangled_name[0..2] == "_Z" {
@@ -338,15 +338,18 @@ fn demangle_symbol(
     }
     else if mangled_name.len() > 2  && &mangled_name[0..2] == "_R" {
         // Rust mangled name.  Demangle using rustc-demangle crate.
-        let demangler = demangle(mangled_name);
-        result = Some(demangler.to_string());
+        match try_demangle(mangled_name) {
+            Ok(demangler) => {
+                // Remove the hash from the demangled symbol.
+                result = Some(format!("{:#}", demangler));
+            }
+            Err(_) => {
+                result = None;
+            }
+        }
     }
 
-    if result.is_none() {
-        result = Some(mangled_name.to_string());
-    }
-
-    result.unwrap()
+    result
 }
 
 
@@ -1028,5 +1031,44 @@ mod tests {
         }).unwrap();
 
         assert!(found);
+    }
+
+    #[test]
+    fn demangle() {
+        // C++
+        assert_eq!(
+            "WriteToBuffer(unsigned char const*, unsigned long, char*&, unsigned long&, unsigned long&, bool&)",
+            demangle_symbol("_Z13WriteToBufferPKhmRPcRmS3_Rb").unwrap());
+        assert_eq!(
+            "SetInternalSystemDirectory()",
+            demangle_symbol("_Z26SetInternalSystemDirectoryv").unwrap());
+        assert_eq!(
+            "FileLoadLock::Create(PEFileListLock*, PEAssembly*, DomainAssembly*)",
+            demangle_symbol("_ZN12FileLoadLock6CreateEP14PEFileListLockP10PEAssemblyP14DomainAssembly").unwrap());
+        assert_eq!(
+            "AppDomain::LoadDomainAssembly(DomainAssembly*, FileLoadLevel)",
+            demangle_symbol("_ZN9AppDomain18LoadDomainAssemblyEP14DomainAssembly13FileLoadLevel").unwrap());
+
+        // Rust
+        assert_eq!(
+            "<std::path::PathBuf>::new",
+            demangle_symbol("_RNvMsr_NtCs3ssYzQotkvD_3std4pathNtB5_7PathBuf3newCs15kBYyAo9fc_7mycrate").unwrap());
+        assert_eq!(
+            "<mycrate::Example as mycrate::Trait>::foo",
+            demangle_symbol("_RNvXCs15kBYyAo9fc_7mycrateNtB2_7ExampleNtB2_5Trait3foo").unwrap());
+
+        // Example failure cases.
+        assert_eq!(
+            None,
+            demangle_symbol("Foo"));
+        assert_eq!(
+            None,
+            demangle_symbol("_FunctionName"));
+        assert_eq!(
+            None,
+            demangle_symbol("_ZFoo"));
+        assert_eq!(
+            None,
+            demangle_symbol("_RFoo"));
     }
 }
