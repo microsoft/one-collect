@@ -5,6 +5,7 @@ use std::ops::DerefMut;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry::{self, Vacant};
 
+use super::*;
 use crate::PathBufInteger;
 use crate::perf_event::*;
 use crate::event::DataFieldRef;
@@ -12,6 +13,18 @@ use crate::Writable;
 
 use libc::*;
 use ruwind::*;
+
+pub struct CallstackReader {
+    state: Writable<MachineState>,
+}
+
+impl Clone for CallstackReader {
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state.clone()
+        }
+    }
+}
 
 struct ModuleLookup {
     fds: HashMap<ModuleKey, RawFd>,
@@ -245,10 +258,6 @@ impl<'a> UnwindRequest<'a> {
     }
 }
 
-pub struct CallstackReader {
-    state: Writable<MachineState>,
-}
-
 impl CallstackReader {
     pub fn with_unwind(
         self,
@@ -327,14 +336,6 @@ impl CallstackReader {
                 (state.unwind)(&mut request);
             }
         });
-    }
-}
-
-impl Clone for CallstackReader {
-    fn clone(&self) -> Self {
-        Self {
-            state: self.state.clone()
-        }
     }
 }
 
@@ -421,12 +422,6 @@ impl CallstackHelper {
             state: self.state,
         }
     }
-}
-
-pub trait CallstackHelp {
-    fn with_callstack_help(
-        &mut self,
-        helper: &CallstackHelper) -> Self;
 }
 
 impl CallstackHelp for RingBufSessionBuilder {

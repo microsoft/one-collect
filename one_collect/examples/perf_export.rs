@@ -1,24 +1,16 @@
-use one_collect::perf_event::*;
+use one_collect::Writable;
 
 use one_collect::helpers::exporting::*;
 use one_collect::helpers::exporting::graph::*;
 use one_collect::helpers::exporting::formats::perf_view::*;
 
-use one_collect::helpers::callstack::*;
+#[cfg(target_os = "linux")]
+fn os_exporter(
+    duration: std::time::Duration) -> Writable<ExportMachine> {
+    use one_collect::perf_event::*;
+    use one_collect::helpers::dotnet::*;
+    use one_collect::helpers::callstack::*;
 
-use one_collect::helpers::dotnet::*;
-
-fn main() {
-    let args: Vec<_> = std::env::args().collect();
-
-    if args.len() == 1 {
-        println!("Usage: {} <output_directory>", args[0]);
-        return;
-    }
-
-    let out_dir = &args[1];
-
-    let duration = std::time::Duration::from_secs(5);
     let need_permission = "Need permission (run via sudo?)";
 
     let helper = CallstackHelper::new()
@@ -59,17 +51,39 @@ fn main() {
     session.parse_for_duration(duration).unwrap();
     session.disable().expect(need_permission);
 
-    let mut exporter = exporter.borrow_mut();
-
     println!("Adding kernel mappings...");
     /* Pull in more data, if wanted */
-    exporter.add_kernel_mappings();
+    exporter.borrow_mut().add_kernel_mappings();
 
     println!("Resolving perfmap symbols...");
-    exporter.resolve_perf_map_symbols();
+    exporter.borrow_mut().resolve_perf_map_symbols();
 
     dotnet.disable_perf_maps();
     dotnet.remove_perf_maps();
+
+    exporter
+}
+
+#[cfg(target_os = "windows")]
+fn os_exporter(
+    _duration: std::time::Duration) -> Writable<ExportMachine> {
+    todo!()
+}
+
+fn main() {
+    let args: Vec<_> = std::env::args().collect();
+
+    if args.len() == 1 {
+        println!("Usage: {} <output_directory>", args[0]);
+        return;
+    }
+
+    let out_dir = &args[1];
+
+    let duration = std::time::Duration::from_secs(5);
+
+    let exporter = os_exporter(duration);
+    let exporter = exporter.borrow();
 
     println!("Exporting...");
 

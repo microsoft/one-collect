@@ -1,3 +1,4 @@
+#[cfg(target_os = "linux")]
 use one_collect::perf_event::{
     self,
     PerfSession,
@@ -14,7 +15,10 @@ struct Utilization {
 
 impl Utilization {
     fn create() -> Self {
+        #[cfg(target_os = "linux")]
         let cpu_count = perf_event::cpu_count() as usize;
+        #[cfg(target_os = "windows")]
+        let cpu_count = 1;
 
         let mut per_cpu = Vec::new();
         per_cpu.resize(cpu_count, 0);
@@ -25,6 +29,7 @@ impl Utilization {
         }
     }
 
+    #[cfg(target_os = "linux")]
     pub fn new(session: &mut PerfSession) -> Writable<Self> {
         let util = Writable::new(Self::create());
 
@@ -122,6 +127,7 @@ impl Utilization {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn main() {
     let one_sec = std::time::Duration::from_secs(1);
     let need_permission = "Need permission (run via sudo?)";
@@ -151,4 +157,9 @@ fn main() {
         /* Parse captured data */
         session.parse_all().expect(need_permission);
     }
+}
+
+#[cfg(target_os = "windows")]
+fn main() {
+    println!("Coming soon");
 }

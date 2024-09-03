@@ -8,13 +8,14 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.75"
-ruwind = { path = "../ruwind" }
 twox-hash = "1.6.3"
-libc = "0.2.153"
-
 # 3.5.0 cannot build
 protobuf = "3.4.*"
 flate2 = "1.0.31"
+ruwind = { path = "../ruwind" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2.153"
 
 [dev-dependencies]
 criterion = "0.3"
