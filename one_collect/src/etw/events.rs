@@ -1,4 +1,4 @@
-use super::{EventField, Event, LocationType};
+use super::*;
 
 pub fn comm(
     id: usize,
@@ -6,6 +6,9 @@ pub fn comm(
     let mut event = Event::new(id, name.into());
     let mut offset: usize = 0;
     let mut len: usize;
+
+    *event.extension_mut().provider_mut() = REAL_SYSTEM_PROCESS_PROVIDER;
+
     let format = event.format_mut();
 
     len = 8;
@@ -66,6 +69,9 @@ pub fn mmap(
     let mut event = Event::new(id, name.into());
     let mut offset: usize = 0;
     let mut len: usize;
+
+    *event.extension_mut().provider_mut() = REAL_SYSTEM_IMAGE_PROVIDER;
+
     let format = event.format_mut();
 
     len = 8;
@@ -133,6 +139,9 @@ pub fn sample_profile(
     let mut event = Event::new(id, name.into());
     let mut offset: usize = 0;
     let mut len: usize;
+
+    *event.extension_mut().provider_mut() = REAL_SYSTEM_PROFILE_PROVIDER;
+
     let format = event.format_mut();
 
     len = 8;
@@ -163,6 +172,9 @@ pub fn dpc(
     let mut event = Event::new(id, name.into());
     let mut offset: usize = 0;
     let len: usize;
+
+    *event.extension_mut().provider_mut() = REAL_SYSTEM_INTERRUPT_PROVIDER;
+
     let format = event.format_mut();
 
     len = 8;

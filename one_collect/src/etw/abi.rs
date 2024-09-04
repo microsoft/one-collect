@@ -557,6 +557,28 @@ impl TraceEnable {
         data
     }
 
+    pub fn disable(
+        &self,
+        handle: u64) -> anyhow::Result<()> {
+        unsafe {
+            let result = EnableTraceEx2(
+                handle,
+                &self.provider,
+                EVENT_CONTROL_CODE_DISABLE_PROVIDER,
+                0,
+                0,
+                0,
+                0,
+                std::ptr::null());
+
+            if result != 0 {
+                anyhow::bail!("EnableTraceEx2 failed with {}", result);
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn enable(
         &self,
         handle: u64) -> anyhow::Result<()> {

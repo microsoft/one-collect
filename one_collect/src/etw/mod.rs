@@ -1,6 +1,5 @@
 use std::hash::{BuildHasherDefault, Hash, Hasher};
 use std::collections::HashMap;
-use std::collections::hash_map::Entry::{Vacant, Occupied};
 use std::thread::{self, JoinHandle};
 
 use twox_hash::XxHash64;
@@ -289,6 +288,12 @@ impl EtwSession {
             .or_insert_with(|| TraceEnable::new(provider))
     }
 
+    pub fn enable_provider_for(
+        &mut self,
+        event: &Event) -> &mut TraceEnable {
+        self.enable_provider(*event.extension().provider())
+    }
+
     fn provider_events_mut(
         &mut self,
         provider: Guid,
@@ -317,12 +322,39 @@ impl EtwSession {
         events.get_events_mut(id)
     }
 
-    pub fn enable_event(
+    pub fn add_event(
+        &mut self,
+        event: Event,
+        properties: Option<u32>) {
+        let provider = *event.extension().provider();
+        let level = event.extension().level();
+        let keyword = event.extension().keyword();
+
+        self.add_complex_event(
+            provider,
+            |provider| {
+                provider.ensure_level(level);
+                provider.ensure_keyword(keyword);
+
+                if let Some(properties) = properties {
+                    provider.ensure_property(properties);
+                }
+            },
+            event);
+    }
+
+    pub fn add_complex_event(
         &mut self,
         provider: Guid,
-        lookup_provider: Option<Guid>,
         ensure_provider: impl FnOnce(&mut TraceEnable),
         event: Event) {
+        let mut lookup_provider = None;
+        let actual_provider = *event.extension().provider();
+
+        if provider != actual_provider {
+            lookup_provider = Some(actual_provider);
+        }
+
         let events = self.provider_events_mut(
             provider,
             lookup_provider,
@@ -332,7 +364,7 @@ impl EtwSession {
         events.push(event);
     }
 
-    pub fn enable_singleton_event(
+    fn enable_singleton_event(
         &mut self,
         provider: Guid,
         lookup_provider: Option<Guid>,
@@ -638,6 +670,11 @@ impl EtwSession {
 
             /* Run until told to stop */
             until();
+
+            /* Disable providers */
+            for enable in enabled.values() {
+                let _ = enable.disable(handle);
+            }
 
             /* Run stopping hooks */
             if let Some(callbacks) = stopping_callbacks {
