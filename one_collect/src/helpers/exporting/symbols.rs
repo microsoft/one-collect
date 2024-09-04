@@ -466,6 +466,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn elf_symbol_reader() {
         #[cfg(target_arch = "x86_64")]
         let path = "/usr/lib/x86_64-linux-gnu/libc.so.6";

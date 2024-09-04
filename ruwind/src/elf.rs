@@ -1007,6 +1007,7 @@ mod tests {
     use std::fs::File;
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn symbols() {
         #[cfg(target_arch = "x86_64")]
         let path = "/usr/lib/x86_64-linux-gnu/libc.so.6";
