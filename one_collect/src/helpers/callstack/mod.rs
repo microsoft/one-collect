@@ -7,6 +7,6 @@ pub type CallstackHelper = os::CallstackHelper;
 
 pub trait CallstackHelp {
     fn with_callstack_help(
-        &mut self,
+        self,
         helper: &CallstackHelper) -> Self;
 }

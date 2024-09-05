@@ -426,7 +426,7 @@ impl CallstackHelper {
 
 impl CallstackHelp for RingBufSessionBuilder {
     fn with_callstack_help(
-        &mut self,
+        mut self,
         helper: &CallstackHelper) -> Self {
         let dwarf = helper.unwinder.is_some();
         let external_lookup = helper.external_lookup;

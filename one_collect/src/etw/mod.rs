@@ -1,17 +1,22 @@
 use std::hash::{BuildHasherDefault, Hash, Hasher};
 use std::collections::HashMap;
-use std::thread::{self, JoinHandle};
+use std::thread::{self};
 
 use twox_hash::XxHash64;
 
-use super::*;
 use crate::sharing::*;
 use crate::event::*;
 
+#[allow(dead_code)]
 mod abi;
 mod events;
 
-use abi::{TraceSession, TraceEnable, EVENT_RECORD};
+use abi::{
+    TraceSession,
+    TraceEnable,
+    EVENT_RECORD,
+    EVENT_HEADER_EXTENDED_DATA_ITEM
+};
 
 pub const PROPERTY_ENABLE_KEYWORD_0: u32 = abi::EVENT_ENABLE_PROPERTY_ENABLE_KEYWORD_0;
 pub const PROPERTY_ENABLE_SILOS: u32 = abi::EVENT_ENABLE_PROPERTY_ENABLE_SILOS;
@@ -123,6 +128,80 @@ impl AncillaryData {
                 unsafe { (*event).EventHeader.ActivityId }
             },
             None => { Guid::default() },
+        }
+    }
+
+    pub fn callstack(
+        &self,
+        frames: &mut Vec<u64>,
+        match_id: &mut u64) -> bool {
+        if let Some(ext) = self.find_ext(
+            abi::EVENT_HEADER_EXT_TYPE_STACK_TRACE64) {
+            unsafe {
+                let ext_size = (*ext).DataSize as usize;
+                if ext_size < 8 {
+                    return false;
+                }
+
+                let frame_count = (ext_size - 8) / 8;
+                let ext_frames = (*ext).DataPtr as *const u64;
+                *match_id = *ext_frames;
+
+                /* Skip MatchId */
+                let ext_frames = ext_frames.add(1);
+
+                for i in 0..frame_count {
+                    frames.push(*ext_frames.add(i));
+                }
+
+                return true;
+            }
+        } else if let Some(ext) = self.find_ext(
+            abi::EVENT_HEADER_EXT_TYPE_STACK_TRACE32) {
+            unsafe {
+                let ext_size = (*ext).DataSize as usize;
+                if ext_size < 8 {
+                    return false;
+                }
+
+                let frame_count = (ext_size - 8) / 4;
+                let ext_frames = (*ext).DataPtr as *const u64;
+                *match_id = *ext_frames;
+
+                /* Skip MatchId */
+                let ext_frames = ext_frames.add(1) as *const u32;
+
+                for i in 0..frame_count {
+                    frames.push(*ext_frames.add(i) as u64);
+                }
+
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn find_ext(
+        &self,
+        ext_type: u32) -> Option<*const EVENT_HEADER_EXTENDED_DATA_ITEM> {
+        match self.event {
+            Some(event) => {
+                unsafe {
+                    let ext = (*event).ExtendedData;
+
+                    for i in 0..(*event).ExtendedDataCount as usize {
+                        let item = ext.add(i);
+
+                        if (*item).ExtType == ext_type as u16 {
+                            return Some(item);
+                        }
+                    }
+
+                    None
+                }
+            },
+            None => { None},
         }
     }
 }
