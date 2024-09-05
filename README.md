@@ -14,7 +14,7 @@ is available for that event, any registered closure is run. The base pipelines e
 pipelines can be built on-top for when needed events fire. This is how the [exporting](one_collect/src/helpers/exporting)
 pipeline is composed.
 
-On X64, the framework supports callstack unwinding using live DWARF decoding. The unwinder also understands anonymous code
+On X64 Linux, the framework supports callstack unwinding using live DWARF decoding. The unwinder also understands anonymous code
 sections, such as those from C# and Java. It will unwind through them by scanning for X64 calling conventions. This allows
 our framework to unwind not only native ELF files, but also through JIT'd code without the need for per-language support.
 Custom unwinders, if required, can be built and utilized using the same pipeline hooks our pre-built DWARF unwinder does.
