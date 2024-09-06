@@ -15,7 +15,8 @@ use abi::{
     TraceSession,
     TraceEnable,
     EVENT_RECORD,
-    EVENT_HEADER_EXTENDED_DATA_ITEM
+    EVENT_HEADER_EXTENDED_DATA_ITEM,
+    CLASSIC_EVENT_ID,
 };
 
 pub const PROPERTY_ENABLE_KEYWORD_0: u32 = abi::EVENT_ENABLE_PROPERTY_ENABLE_KEYWORD_0;
@@ -40,6 +41,8 @@ pub const LEVEL_VERBOSE: u8 = abi::TRACE_LEVEL_VERBOSE;
 pub const DISABLE_PROVIDER: u32 = abi::EVENT_CONTROL_CODE_DISABLE_PROVIDER;
 pub const ENABLE_PROVIDER: u32 = abi::EVENT_CONTROL_CODE_ENABLE_PROVIDER;
 pub const CAPTURE_STATE: u32 = abi::EVENT_CONTROL_CODE_CAPTURE_STATE;
+
+const EMPTY_PROVIDER: Guid = Guid::from_u128(0u128);
 
 #[repr(C)]
 #[derive(Default, Eq, PartialEq, Copy, Clone)]
@@ -256,6 +259,7 @@ type SendClosure = Box<dyn Fn(&SessionCallbackContext) + Send + 'static>;
 pub struct EtwSession {
     enabled: HashMap<Guid, TraceEnable>,
     providers: ProviderLookup,
+    kernel_callstacks: Vec<CLASSIC_EVENT_ID>,
 
     /* Callbacks */
     event_error_callback: Option<Box<dyn Fn(&Event, &anyhow::Error)>>,
@@ -289,11 +293,20 @@ const REAL_SYSTEM_INTERRUPT_PROVIDER: Guid = Guid::from_u128(0xce1dbfb4_137e_4da
 
 const SYSTEM_INTERRUPT_KW_DPC: u64 = 4u64;
 
+const REAL_SYSTEM_CALLSTACK_PROVIDER: Guid = Guid::from_u128(0xdef2fe46_7bd6_4b80_bd94_f57fe20d0ce3);
+
+const SYSTEM_SCHEDULER_PROVIDER: Guid = Guid::from_u128(0x599a2a76_4d91_4910_9ac7_7d33f2e97a6c);
+const REAL_SYSTEM_THREAD_PROVIDER: Guid = Guid::from_u128(0x3d6fa8d1_fe05_11d0_9dda_00c04fd7ba7c);
+
+const SYSTEM_SCHEDULER_KW_DISPATCHER: u64 = 2u64;
+const SYSTEM_SCHEDULER_KW_CONTEXT_SWITCH: u64 = 512u64;
+
 impl EtwSession {
     pub fn new() -> Self {
         Self {
             enabled: HashMap::default(),
             providers: HashMap::default(),
+            kernel_callstacks: Vec::new(),
 
             /* Callbacks */
             event_error_callback: None,
@@ -379,7 +392,9 @@ impl EtwSession {
         lookup_provider: Option<Guid>,
         ensure_provider: impl FnOnce(&mut TraceEnable),
         id: usize) -> &mut Vec<Event> {
-        ensure_provider(self.enable_provider(provider));
+        if provider != EMPTY_PROVIDER {
+            ensure_provider(self.enable_provider(provider));
+        }
 
         let mut use_op_id = false;
 
@@ -441,6 +456,31 @@ impl EtwSession {
             event.id());
 
         events.push(event);
+    }
+
+    pub fn add_kernel_callstack(
+        &mut self,
+        provider: Guid,
+        id: usize) {
+        /* Avoid garbage */
+        if id > 255 {
+            return;
+        }
+
+        let id = id as u8;
+
+        /* Bail if already enabled */
+        for event in &self.kernel_callstacks {
+            if event.EventGuid == provider &&
+                event.Type == id {
+                return;
+            }
+        }
+
+        self.kernel_callstacks.push(
+            CLASSIC_EVENT_ID::new(
+                provider,
+                id as u8));
     }
 
     fn enable_singleton_event(
@@ -583,8 +623,18 @@ impl EtwSession {
             |id| events::mmap(id, "ImageLoad::DCEnd"))
     }
 
-    pub fn profile_cpu_event(&mut self) -> &mut Event {
+    pub fn profile_cpu_event(
+        &mut self,
+        properties: Option<u32>) -> &mut Event {
         self.requires_elevation();
+
+        if let Some(properties) = properties {
+            if properties & PROPERTY_STACK_TRACE != 0 {
+                self.add_kernel_callstack(
+                    REAL_SYSTEM_PROFILE_PROVIDER,
+                    46);
+            }
+        }
 
         self.enable_singleton_event(
             SYSTEM_PROFILE_PROVIDER,
@@ -595,6 +645,65 @@ impl EtwSession {
             },
             46,
             |id| events::sample_profile(id, "Profile::SampleProfile"))
+    }
+
+    pub fn ready_thread_event(
+        &mut self,
+        properties: Option<u32>) -> &mut Event {
+        self.requires_elevation();
+
+        if let Some(properties) = properties {
+            if properties & PROPERTY_STACK_TRACE != 0 {
+                self.add_kernel_callstack(
+                    REAL_SYSTEM_THREAD_PROVIDER,
+                    50);
+            }
+        }
+
+        self.enable_singleton_event(
+            SYSTEM_SCHEDULER_PROVIDER,
+            Some(REAL_SYSTEM_THREAD_PROVIDER),
+            |provider| {
+                provider.ensure_no_filtering();
+                provider.ensure_keyword(SYSTEM_SCHEDULER_KW_DISPATCHER);
+            },
+            50,
+            |id| events::ready_thread(id, "Thread::Ready"))
+    }
+
+    pub fn cswitch_event(
+        &mut self,
+        properties: Option<u32>) -> &mut Event {
+        self.requires_elevation();
+
+        if let Some(properties) = properties {
+            if properties & PROPERTY_STACK_TRACE != 0 {
+                self.add_kernel_callstack(
+                    REAL_SYSTEM_THREAD_PROVIDER,
+                    36);
+            }
+        }
+
+        self.enable_singleton_event(
+            SYSTEM_SCHEDULER_PROVIDER,
+            Some(REAL_SYSTEM_THREAD_PROVIDER),
+            |provider| {
+                provider.ensure_no_filtering();
+                provider.ensure_keyword(SYSTEM_SCHEDULER_KW_CONTEXT_SWITCH);
+            },
+            36,
+            |id| events::cswitch(id, "Thread::CSwitch"))
+    }
+
+    pub fn callstack_event(&mut self) -> &mut Event {
+        self.requires_elevation();
+
+        self.enable_singleton_event(
+            EMPTY_PROVIDER,
+            Some(REAL_SYSTEM_CALLSTACK_PROVIDER),
+            |_provider| { },
+            32,
+            |id| events::callstack(id, "Kernel::Callstack"))
     }
 
     pub fn dpc_event(&mut self) -> &mut Event {
@@ -695,6 +804,10 @@ impl EtwSession {
         }
 
         session.start()?;
+
+        if !self.kernel_callstacks.is_empty() {
+            session.enable_kernel_callstacks(&self.kernel_callstacks)?;
+        }
         
         let handle = session.handle();
 
@@ -840,6 +953,42 @@ mod tests {
     fn session() {
         let mut session = EtwSession::new();
 
+        let profile_count = Writable::new(0);
+        let count = profile_count.clone();
+
+        session.profile_cpu_event(Some(PROPERTY_STACK_TRACE)).add_callback(
+            move |_data| {
+                *count.borrow_mut() += 1;
+                Ok(())
+            });
+
+        let cswitch_count = Writable::new(0);
+        let count = cswitch_count.clone();
+
+        session.cswitch_event(None).add_callback(
+            move |_data| {
+                *count.borrow_mut() += 1;
+                Ok(())
+            });
+
+        let ready_count = Writable::new(0);
+        let count = ready_count.clone();
+
+        session.ready_thread_event(None).add_callback(
+            move |_data| {
+                *count.borrow_mut() += 1;
+                Ok(())
+            });
+
+        let callstack_count = Writable::new(0);
+        let count = callstack_count.clone();
+
+        session.callstack_event().add_callback(
+            move |_data| {
+                *count.borrow_mut() += 1;
+                Ok(())
+            });
+
         session.comm_start_capture_event().add_callback(
             move |_data| {
                 println!("comm_start_capture_event");
@@ -879,5 +1028,11 @@ mod tests {
         session.parse_for_duration(
             "one_collect_unit_test",
             std::time::Duration::from_secs(10)).unwrap();
+
+        println!("Counts:");
+        println!("Profile: {}", profile_count.borrow());
+        println!("CSwitch: {}", cswitch_count.borrow());
+        println!("ReadyThread: {}", ready_count.borrow());
+        println!("Callstack: {}", callstack_count.borrow());
     }
 }

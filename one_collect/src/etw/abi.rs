@@ -68,14 +68,14 @@ extern "system" {
     fn TraceQueryInformation(
         sessionhandle: u64,
         informationclass: i32,
-        traceinformation: *mut TRACE_PROFILE_INTERVAL,
+        traceinformation: *mut u8,
         informationlength: u32,
         returnlength: *mut u32) -> u32;
 
     fn TraceSetInformation(
         sessionhandle: u64,
         informationclass: i32,
-        traceinformation: *const TRACE_PROFILE_INTERVAL,
+        traceinformation: *const u8,
         informationlength: u32) -> u32;
 }
 
@@ -190,6 +190,26 @@ impl Default for WNODE_HEADER {
             Guid: Guid::from_u128(0x123),
             ClientContext: 1,
             Flags: WNODE_FLAG_TRACED_GUID,
+        }
+    }
+}
+
+#[repr(C)]
+#[allow(non_snake_case)]
+pub struct CLASSIC_EVENT_ID {
+    pub EventGuid: Guid,
+    pub Type: u8,
+    pub Reserved: [u8; 7],
+}
+
+impl CLASSIC_EVENT_ID {
+    pub fn new(
+        provider: Guid,
+        id: u8) -> Self {
+        Self {
+            EventGuid: provider,
+            Type: id,
+            Reserved: [0; 7],
         }
     }
 }
@@ -815,6 +835,26 @@ impl TraceSession {
         }
     }
 
+    pub fn enable_kernel_callstacks(
+        &self,
+        events: &Vec<CLASSIC_EVENT_ID>) -> anyhow::Result<()> {
+        unsafe {
+            let event_size = std::mem::size_of::<CLASSIC_EVENT_ID>() as u32;
+
+            let result = TraceSetInformation(
+                self.handle,
+                3, /* TraceStackTracingInfo */
+                events.as_ptr() as *const u8,
+                events.len() as u32 * event_size);
+
+            if result != 0 {
+                anyhow::bail!("TraceSetInformation failed with {}", result);
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn set_profile_interval(
         &self,
         milliseconds: u32) -> anyhow::Result<()> {
@@ -828,7 +868,7 @@ impl TraceSession {
             let result = TraceQueryInformation(
                 0,
                 5, /* TraceSampledProfileIntervalInfo */
-                &mut interval,
+                &mut interval as *mut TRACE_PROFILE_INTERVAL as *mut u8,
                 8,
                 &mut size);
 
@@ -845,7 +885,7 @@ impl TraceSession {
             let result = TraceSetInformation(
                 0,
                 5, /* TraceSampledProfileIntervalInfo */
-                &interval,
+                &interval as *const TRACE_PROFILE_INTERVAL as *const u8,
                 8);
 
             if result != 0 {

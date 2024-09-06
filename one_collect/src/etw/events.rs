@@ -191,3 +191,151 @@ pub fn dpc(
 
     event
 }
+
+pub fn callstack(
+    id: usize,
+    name: &str) -> Event {
+    let mut event = Event::new(id, name.into());
+    let mut offset: usize = 0;
+    let mut len: usize;
+
+    *event.extension_mut().provider_mut() = REAL_SYSTEM_CALLSTACK_PROVIDER;
+
+    let format = event.format_mut();
+
+    len = 8;
+    format.add_field(EventField::new(
+        "EventTimeStamp".into(), "u64".into(),
+        LocationType::Static, offset, len));
+    offset += len;
+
+    len = 4;
+    format.add_field(EventField::new(
+        "StackProcess".into(), "u32".into(),
+        LocationType::Static, offset, len));
+    offset += len;
+
+    format.add_field(EventField::new(
+        "StackThread".into(), "u32".into(),
+        LocationType::Static, offset, len));
+    offset += len;
+
+    len = 0;
+    format.add_field(EventField::new(
+        "StackFrames".into(), "u64".into(),
+        LocationType::Static, offset, len));
+
+    event.set_no_callstack_flag();
+
+    event
+}
+
+pub fn ready_thread(
+    id: usize,
+    name: &str) -> Event {
+    let mut event = Event::new(id, name.into());
+    let mut offset: usize = 0;
+    let mut len: usize;
+
+    *event.extension_mut().provider_mut() = REAL_SYSTEM_THREAD_PROVIDER;
+
+    let format = event.format_mut();
+
+    len = 4;
+    format.add_field(EventField::new(
+        "TThreadId".into(), "u32".into(),
+        LocationType::Static, offset, len));
+    offset += len;
+
+    len = 1;
+    format.add_field(EventField::new(
+        "AdjustReason".into(), "s8".into(),
+        LocationType::Static, offset, len));
+    offset += len;
+
+    format.add_field(EventField::new(
+        "AdjustIncrement".into(), "s8".into(),
+        LocationType::Static, offset, len));
+    offset += len;
+
+    format.add_field(EventField::new(
+        "Flag".into(), "s8".into(),
+        LocationType::Static, offset, len));
+
+    event.set_no_callstack_flag();
+
+    event
+}
+
+pub fn cswitch(
+    id: usize,
+    name: &str) -> Event {
+    let mut event = Event::new(id, name.into());
+    let mut offset: usize = 0;
+    let mut len: usize;
+
+    *event.extension_mut().provider_mut() = REAL_SYSTEM_THREAD_PROVIDER;
+
+    let format = event.format_mut();
+
+    len = 4;
+    format.add_field(EventField::new(
+        "NewThreadId".into(), "u32".into(),
+        LocationType::Static, offset, len));
+    offset += len;
+
+    format.add_field(EventField::new(
+        "OldThreadId".into(), "u32".into(),
+        LocationType::Static, offset, len));
+    offset += len;
+
+    len = 1;
+    format.add_field(EventField::new(
+        "NewThreadPriority".into(), "s8".into(),
+        LocationType::Static, offset, len));
+    offset += len;
+
+    format.add_field(EventField::new(
+        "OldThreadPriority".into(), "s8".into(),
+        LocationType::Static, offset, len));
+    offset += len;
+
+    format.add_field(EventField::new(
+        "PreviousCState".into(), "u8".into(),
+        LocationType::Static, offset, len));
+    offset += len;
+
+    format.add_field(EventField::new(
+        "SpareByte".into(), "s8".into(),
+        LocationType::Static, offset, len));
+    offset += len;
+
+    format.add_field(EventField::new(
+        "OldThreadWaitReason".into(), "s8".into(),
+        LocationType::Static, offset, len));
+    offset += len;
+
+    format.add_field(EventField::new(
+        "OldThreadWaitMode".into(), "s8".into(),
+        LocationType::Static, offset, len));
+    offset += len;
+
+    format.add_field(EventField::new(
+        "OldThreadState".into(), "s8".into(),
+        LocationType::Static, offset, len));
+    offset += len;
+
+    format.add_field(EventField::new(
+        "OldThreadWaitIdealProcessor".into(), "s8".into(),
+        LocationType::Static, offset, len));
+    offset += len;
+
+    len = 4;
+    format.add_field(EventField::new(
+        "NewThreadWaitTime".into(), "u32".into(),
+        LocationType::Static, offset, len));
+
+    event.set_no_callstack_flag();
+
+    event
+}
