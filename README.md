@@ -1,20 +1,20 @@
-# An extremely fast Rust based framework for collecting event and profiling data
+# An extremely fast Rust based framework for collecting event and profiling data on Linux and Windows
 
 This repository contains Rust crates that make collecting, analyzing, and exporting events and profiles easy and efficient.
 It is highly composable, which allows you to tweak all aspects of how events and profiles are collected and processed.
 
-The main source of events and profiling on Linux is the perf events facility. Individual events can be hooked and processed
-as they arrive, or entire sessions of events and profiling data can be managed for you. Regardless of the source of events
-and profiling, the data is sent through a pipeline with closure invocations as data arrives. This allows pre-built scenarios
-as well as custom in-proc scenarios to utilize the same pipelines. Data that has been collected can be exported to several
-pre-built as well as custom formats.
+The main source of events and profiling on Linux is the perf events facility. The main source of events on Windows is the
+ETW facility. Individual events can be hooked and processed as they arrive, or entire sessions of events and profiling data
+can be managed for you. Regardless of the source of events and profiling, the data is sent through a pipeline with closure
+invocations as data arrives. This allows pre-built scenarios as well as custom in-proc scenarios to utilize the same pipelines.
+Data that has been collected can be exported to several pre-built as well as custom formats.
 
 The pipeline(s) are built from [events](EVENTS.md) that contain the necessary format details to decode the data. When data
 is available for that event, any registered closure is run. The base pipelines expose their key events out, so that other
 pipelines can be built on-top for when needed events fire. This is how the [exporting](one_collect/src/helpers/exporting)
 pipeline is composed.
 
-On X64, the framework supports callstack unwinding using live DWARF decoding. The unwinder also understands anonymous code
+On X64 Linux, the framework supports callstack unwinding using live DWARF decoding. The unwinder also understands anonymous code
 sections, such as those from C# and Java. It will unwind through them by scanning for X64 calling conventions. This allows
 our framework to unwind not only native ELF files, but also through JIT'd code without the need for per-language support.
 Custom unwinders, if required, can be built and utilized using the same pipeline hooks our pre-built DWARF unwinder does.

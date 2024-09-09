@@ -1,6 +1,12 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
+#[cfg_attr(target_os = "linux", path = "os/linux.rs")]
+#[cfg_attr(target_os = "windows", path = "os/windows.rs")]
+pub mod os;
+
+pub type EventExtension = os::EventExtension;
+
 static EMPTY: &[u8] = &[];
 
 pub struct EventData<'a> {
@@ -686,6 +692,7 @@ pub struct Event {
     flags: u64,
     callbacks: Vec<BoxedCallback>,
     format: EventFormat,
+    extension: EventExtension,
 }
 
 impl Event {
@@ -704,6 +711,7 @@ impl Event {
             flags: 0,
             callbacks: Vec::new(),
             format: EventFormat::new(),
+            extension: EventExtension::default(),
         }
     }
 
@@ -737,6 +745,16 @@ impl Event {
     /// Returns a reference to the event format.
     pub fn format(&self) -> &EventFormat {
         &self.format
+    }
+
+    /// Returns a reference to the event OS extension.
+    pub fn extension(&self) -> &EventExtension {
+        &self.extension
+    }
+
+    /// Returns a mutable reference to the event OS extension.
+    pub fn extension_mut(&mut self) -> &mut EventExtension {
+        &mut self.extension
     }
 
     /// Adds a callback function to the event that runs each time the event is processed.

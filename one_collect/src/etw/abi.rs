@@ -68,14 +68,14 @@ extern "system" {
     fn TraceQueryInformation(
         sessionhandle: u64,
         informationclass: i32,
-        traceinformation: *mut TRACE_PROFILE_INTERVAL,
+        traceinformation: *mut u8,
         informationlength: u32,
         returnlength: *mut u32) -> u32;
 
     fn TraceSetInformation(
         sessionhandle: u64,
         informationclass: i32,
-        traceinformation: *const TRACE_PROFILE_INTERVAL,
+        traceinformation: *const u8,
         informationlength: u32) -> u32;
 }
 
@@ -106,6 +106,26 @@ pub const EVENT_ENABLE_PROPERTY_SID: u32 = 1u32;
 pub const EVENT_ENABLE_PROPERTY_SOURCE_CONTAINER_TRACKING: u32 = 2048u32;
 pub const EVENT_ENABLE_PROPERTY_STACK_TRACE: u32 = 4u32;
 pub const EVENT_ENABLE_PROPERTY_TS_ID: u32 = 2u32;
+
+pub const EVENT_HEADER_EXT_TYPE_CONTAINER_ID: u32 = 16u32;
+pub const EVENT_HEADER_EXT_TYPE_CONTROL_GUID: u32 = 14u32;
+pub const EVENT_HEADER_EXT_TYPE_EVENT_KEY: u32 = 10u32;
+pub const EVENT_HEADER_EXT_TYPE_EVENT_SCHEMA_TL: u32 = 11u32;
+pub const EVENT_HEADER_EXT_TYPE_INSTANCE_INFO: u32 = 4u32;
+pub const EVENT_HEADER_EXT_TYPE_MAX: u32 = 19u32;
+pub const EVENT_HEADER_EXT_TYPE_PEBS_INDEX: u32 = 7u32;
+pub const EVENT_HEADER_EXT_TYPE_PMC_COUNTERS: u32 = 8u32;
+pub const EVENT_HEADER_EXT_TYPE_PROCESS_START_KEY: u32 = 13u32;
+pub const EVENT_HEADER_EXT_TYPE_PROV_TRAITS: u32 = 12u32;
+pub const EVENT_HEADER_EXT_TYPE_PSM_KEY: u32 = 9u32;
+pub const EVENT_HEADER_EXT_TYPE_QPC_DELTA: u32 = 15u32;
+pub const EVENT_HEADER_EXT_TYPE_RELATED_ACTIVITYID: u32 = 1u32;
+pub const EVENT_HEADER_EXT_TYPE_SID: u32 = 2u32;
+pub const EVENT_HEADER_EXT_TYPE_STACK_KEY32: u32 = 17u32;
+pub const EVENT_HEADER_EXT_TYPE_STACK_KEY64: u32 = 18u32;
+pub const EVENT_HEADER_EXT_TYPE_STACK_TRACE32: u32 = 5u32;
+pub const EVENT_HEADER_EXT_TYPE_STACK_TRACE64: u32 = 6u32;
+pub const EVENT_HEADER_EXT_TYPE_TS_ID: u32 = 3u32;
 
 pub const TRACE_LEVEL_CRITICAL: u8 = 1;
 pub const TRACE_LEVEL_ERROR: u8 = 2;
@@ -170,6 +190,26 @@ impl Default for WNODE_HEADER {
             Guid: Guid::from_u128(0x123),
             ClientContext: 1,
             Flags: WNODE_FLAG_TRACED_GUID,
+        }
+    }
+}
+
+#[repr(C)]
+#[allow(non_snake_case)]
+pub struct CLASSIC_EVENT_ID {
+    pub EventGuid: Guid,
+    pub Type: u8,
+    pub Reserved: [u8; 7],
+}
+
+impl CLASSIC_EVENT_ID {
+    pub fn new(
+        provider: Guid,
+        id: u8) -> Self {
+        Self {
+            EventGuid: provider,
+            Type: id,
+            Reserved: [0; 7],
         }
     }
 }
@@ -557,6 +597,28 @@ impl TraceEnable {
         data
     }
 
+    pub fn disable(
+        &self,
+        handle: u64) -> anyhow::Result<()> {
+        unsafe {
+            let result = EnableTraceEx2(
+                handle,
+                &self.provider,
+                EVENT_CONTROL_CODE_DISABLE_PROVIDER,
+                0,
+                0,
+                0,
+                0,
+                std::ptr::null());
+
+            if result != 0 {
+                anyhow::bail!("EnableTraceEx2 failed with {}", result);
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn enable(
         &self,
         handle: u64) -> anyhow::Result<()> {
@@ -773,6 +835,26 @@ impl TraceSession {
         }
     }
 
+    pub fn enable_kernel_callstacks(
+        &self,
+        events: &Vec<CLASSIC_EVENT_ID>) -> anyhow::Result<()> {
+        unsafe {
+            let event_size = std::mem::size_of::<CLASSIC_EVENT_ID>() as u32;
+
+            let result = TraceSetInformation(
+                self.handle,
+                3, /* TraceStackTracingInfo */
+                events.as_ptr() as *const u8,
+                events.len() as u32 * event_size);
+
+            if result != 0 {
+                anyhow::bail!("TraceSetInformation failed with {}", result);
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn set_profile_interval(
         &self,
         milliseconds: u32) -> anyhow::Result<()> {
@@ -786,7 +868,7 @@ impl TraceSession {
             let result = TraceQueryInformation(
                 0,
                 5, /* TraceSampledProfileIntervalInfo */
-                &mut interval,
+                &mut interval as *mut TRACE_PROFILE_INTERVAL as *mut u8,
                 8,
                 &mut size);
 
@@ -803,7 +885,7 @@ impl TraceSession {
             let result = TraceSetInformation(
                 0,
                 5, /* TraceSampledProfileIntervalInfo */
-                &interval,
+                &interval as *const TRACE_PROFILE_INTERVAL as *const u8,
                 8);
 
             if result != 0 {
