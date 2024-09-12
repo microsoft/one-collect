@@ -33,11 +33,15 @@ impl DupFd {
     /// has its own separate file descriptor that can be used independently of others.
     ///
     /// # Returns
-    /// * `File`: The new `File` that was opened.
-    pub fn open(&self) -> File {
+    /// * `Option<File>`: The new `File` that was opened or None if call to dup failed.
+    pub fn open(&self) -> Option<File> {
         unsafe {
             let cloned_fd = libc::dup(self.fd);
-            File::from_raw_fd(cloned_fd)
+            if cloned_fd != -1 {
+                return Some(File::from_raw_fd(cloned_fd));
+            }
+
+            None
         }
     }
 }

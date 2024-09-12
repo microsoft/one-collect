@@ -137,9 +137,9 @@ impl ExportProcess {
         path_buf.push("root");
         path_buf.push(".");
 
-        let root = File::open(path_buf)?;
-
-        self.root_fs = Some(OpenAt::new(root));
+        if let Ok(root) = File::open(path_buf) {
+            self.root_fs = Some(OpenAt::new(root));
+        }
 
         Ok(())
     }
