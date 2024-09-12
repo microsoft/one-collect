@@ -138,7 +138,7 @@ impl ExportDevNodeLookup {
         &self,
         node: &ExportDevNode) -> Option<File> {
         match self.fds.get(node) {
-            Some(fd) => { Some(fd.open()) },
+            Some(fd) => { fd.open() },
             None => { None },
         }
     }
