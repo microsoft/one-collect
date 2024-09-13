@@ -1,4 +1,6 @@
+use std::borrow::BorrowMut;
 use std::fs::File;
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use crate::PathBufInteger;
@@ -9,7 +11,9 @@ use crate::openat::OpenAt;
 #[cfg(target_os = "linux")]
 use crate::procfs;
 
+use ruwind::elf::{get_section_metadata, get_section_offsets, get_str, ElfSymbol};
 use ruwind::{CodeSection, Unwindable};
+use symbols::ElfSymbolReader;
 
 use super::*;
 
@@ -262,6 +266,120 @@ impl ExportProcess {
                 sym_reader,
                 strings);
         }
+    }
+
+    pub fn add_matching_elf_symbols(
+        &mut self,
+        addrs: &mut HashSet<u64>,
+        frames: &mut Vec<u64>,
+        callstacks: &InternedCallstacks,
+        strings: &mut InternedStrings) {
+        addrs.clear();
+        frames.clear();
+
+        if self.root_fs.is_none() {
+            return;
+        }
+
+        println!("Processing PID {}", self.pid);
+        for map_index in 0..self.mappings.len() {
+            let map = self.mappings.get(map_index).unwrap();
+            if map.anon() {
+                continue;
+            }
+
+            Self::get_unique_user_ips(
+                &self.samples,
+                addrs,
+                frames,
+                &callstacks,
+                Some(map));
+
+            if addrs.is_empty() {
+                continue;
+            }
+
+            for addr in addrs.iter() {
+                frames.push(*addr);
+            }
+
+            // Get the binary path.
+            let filename= strings.from_id(map.filename_id());
+            if filename.is_err() {
+                continue;
+            }
+
+            let name = filename.unwrap();
+            println!("\tImage: {}", &name);
+            let file_path = Path::new(name);
+            if let Ok(mut file) = self.open_file(file_path) {
+                // TODO: Get the path to the symbol file.
+                // If we can't open it, then it's time to bail.
+                // Use open_at and the root_fs to make sure that we do this properly for containers.
+                let _path = Self::find_symbol_file(map, &mut file, strings);
+                let mut reader = ElfSymbolReader::new(file);
+                let mut sym_reader = reader.borrow_mut();
+                let map_mut = self.mappings.get_mut(map_index).unwrap();
+                map_mut.add_matching_symbols(
+                    frames,
+                    sym_reader,
+                    strings);
+            }
+            else {
+                println!("Failed to open.");
+            }
+        }
+    }
+
+    fn find_symbol_file<'a>(
+        mapping: &ExportMapping,
+        file: &mut File,
+        strings: &'a InternedStrings) -> Option<&'a str> {
+
+        // DEBUGLINK
+        let mut path_buf: [u8; 1024] = [0; 1024];
+        if let Ok(Some(_)) = Self::read_debuglink_section(file, &mut path_buf) {
+            let debug_link_value = get_str(&path_buf);
+            println!("\t.gnu_debuglink: {}", debug_link_value);
+        }
+        // FEDORA
+        // UBUNTU
+        // FIXUP UBUNTU
+
+        None
+    }
+
+    fn read_debuglink_section<'a>(
+        file: &'a mut File,
+        value_buf: &'a mut [u8]) -> anyhow::Result<Option<()>> {
+        let mut sections = Vec::new();
+        let mut section_offsets = Vec::new();
+        let mut reader = BufReader::new(file);
+
+        get_section_metadata(&mut reader, None, 0x1, &mut sections)?;
+        get_section_offsets(&mut reader, None, &mut section_offsets)?;
+
+        for section in &sections {
+            let mut str_offset = 0u64;
+            if section.link < section_offsets.len() as u32 {
+                str_offset = section_offsets[section.link as usize];
+            }
+
+            let str_pos = section.name_offset + str_offset;
+            reader.seek(SeekFrom::Start(str_pos))?;
+
+            let mut section_name_buf: [u8; 1024] = [0; 1024];
+            if let Ok(bytes_read) = reader.read(&mut section_name_buf) {
+                let name = get_str(&section_name_buf[0..bytes_read]);
+                if name == ".gnu_debuglink" {
+                    reader.seek(SeekFrom::Start(section.offset))?;
+                    reader.read(&mut value_buf[0..section.size as usize])?;
+                    return Ok(Some(()))
+                }
+            }
+        }
+
+        Ok(None)
     }
 
     pub fn get_unique_user_ips(

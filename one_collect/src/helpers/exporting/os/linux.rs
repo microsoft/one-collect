@@ -191,6 +191,20 @@ impl ExportMachine {
         }
     }
 
+    pub fn resolve_elf_symbols(
+        &mut self) {
+        let mut frames = Vec::new();
+        let mut addrs = HashSet::new();
+
+        for proc in self.procs.values_mut() {
+            proc.add_matching_elf_symbols(
+                &mut addrs,
+                &mut frames,
+                &self.callstacks,
+                &mut self.strings);
+        }
+    }
+
     pub(crate) fn os_add_mmap_exec(
         &mut self,
         pid: u32,

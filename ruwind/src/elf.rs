@@ -200,7 +200,7 @@ impl<'a> ElfSymbolIterator<'a> {
     }
 }
 
-fn get_str(
+pub fn get_str(
     buffer: &[u8]) -> &str {
     let mut i = 0;
 
