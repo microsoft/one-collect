@@ -384,6 +384,17 @@ impl EventFormat {
         &self.fields
     }
 
+    /// Returns a reference to an `EventField` based on the reference.
+    ///
+    /// # Returns
+    ///
+    /// An `EventField` if the field exists, panics otherwise.
+    pub fn get_field_unchecked(
+        &self,
+        field: EventFieldRef) -> &EventField {
+        &self.fields[usize::from(field)]
+    }
+
     /// Returns a reference to an `EventField` in the `fields` vector based on its name, if it exists.
     /// This method does not perform any bounds checking.
     ///
@@ -393,7 +404,7 @@ impl EventFormat {
     ///
     /// # Returns
     ///
-    /// An `EventFieldRef` if a field with the given name exists, `None` otherwise.
+    /// An `EventFieldRef` if a field with the given name exists, panics otherwise.
     pub fn get_field_ref_unchecked(
         &self,
         name: &str) -> EventFieldRef {
