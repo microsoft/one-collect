@@ -44,15 +44,23 @@ pub fn comm(
         LocationType::Static, offset, len));
     offset += len;
 
+    len = 4;
+    format.add_field(EventField::new(
+        "Flags".into(), "u32".into(),
+        LocationType::Static, offset, len));
+    offset += len;
+
     /* Dynamically sized after this */
     len = 0;
     format.add_field(EventField::new(
         "UserSID".into(), "object".into(),
         LocationType::Static, offset, len));
 
+    /* Only first dynamic data will have offset */
+    let offset = 0;
     format.add_field(EventField::new(
         "ImageFileName".into(), "string".into(),
-        LocationType::StaticUTF16String, offset, len));
+        LocationType::StaticString, offset, len));
 
     format.add_field(EventField::new(
         "CommandLine".into(), "string".into(),

@@ -134,6 +134,15 @@ impl AncillaryData {
         }
     }
 
+    pub fn version(&self) -> u8 {
+        match self.event {
+            Some(event) => {
+                unsafe { (*event).EventHeader.EventDescriptor.Version }
+            },
+            None => { 0 },
+        }
+    }
+
     pub fn callstack(
         &self,
         frames: &mut Vec<u64>,
