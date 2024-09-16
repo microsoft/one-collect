@@ -53,7 +53,11 @@ fn os_exporter(
 
     println!("Adding kernel mappings...");
     /* Pull in more data, if wanted */
-    exporter.borrow_mut().add_kernel_mappings();
+    //exporter.borrow_mut().add_kernel_mappings();
+
+    println!("Resolving elf symbols...");
+    exporter.borrow_mut().load_elf_metadata();
+    exporter.borrow_mut().resolve_elf_symbols();
 
     println!("Resolving perfmap symbols...");
     exporter.borrow_mut().resolve_perf_map_symbols();

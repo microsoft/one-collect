@@ -3,6 +3,8 @@ use std::collections::hash_map::{Entry};
 use std::collections::hash_map::Entry::{Vacant, Occupied};
 use std::path::Path;
 use std::fs::File;
+use std::io::BufReader;
+use std::str::FromStr;
 
 use crate::{ReadOnly, Writable};
 use crate::event::DataFieldRef;
@@ -13,6 +15,7 @@ use crate::perf_event::{RingBufSessionBuilder, RingBufBuilder};
 use crate::perf_event::abi::PERF_RECORD_MISC_SWITCH_OUT;
 use crate::helpers::callstack::{CallstackHelp, CallstackReader};
 
+use ruwind::elf::{get_section_metadata, get_section_offsets, get_str, read_build_id, read_debug_link};
 use ruwind::ModuleAccessor;
 use self::symbols::PerfMapSymbolReader;
 
@@ -101,12 +104,14 @@ impl ExportSampler {
 
 pub(crate) struct OSExportMachine {
     dev_nodes: ExportDevNodeLookup,
+    binary_metadata: ElfBinaryMetadataLookup,
 }
 
 impl OSExportMachine {
     pub fn new() -> Self {
         Self {
             dev_nodes: ExportDevNodeLookup::new(),
+            binary_metadata: ElfBinaryMetadataLookup::new(),
         }
     }
 }
@@ -149,6 +154,50 @@ impl ModuleAccessor for ExportDevNodeLookup {
         &self,
         key: &ExportDevNode) -> Option<File> {
         self.open(key)
+    }
+}
+
+struct ElfBinaryMetadata {
+    build_id: Option<[u8; 36]>,
+    symbol_file_path: Option<String>,
+}
+
+impl ElfBinaryMetadata {
+    pub fn new() -> Self {
+        Self {
+            build_id: None,
+            symbol_file_path: None
+        }
+    }
+}
+
+struct ElfBinaryMetadataLookup {
+    metadata: HashMap<ExportDevNode, ElfBinaryMetadata>
+}
+
+impl ElfBinaryMetadataLookup {
+    pub fn new() -> Self {
+        Self {
+            metadata: HashMap::new()
+        }
+    }
+
+    fn contains(
+        &self,
+        key: &ExportDevNode) -> bool {
+        self.metadata.contains_key(key)
+    }
+
+    fn entry(
+        &mut self,
+        key: ExportDevNode) -> Entry<'_, ExportDevNode, ElfBinaryMetadata> {
+        self.metadata.entry(key)
+    }
+
+    fn get(
+        &self,
+        key: &ExportDevNode) -> Option<&ElfBinaryMetadata> {
+        self.metadata.get(key)
     }
 }
 
@@ -202,6 +251,63 @@ impl ExportMachine {
                 &mut frames,
                 &self.callstacks,
                 &mut self.strings);
+        }
+    }
+
+    pub fn load_elf_metadata(
+        &mut self) {
+
+        for proc in self.procs.values() {
+            for map in proc.mappings() {
+                if let Some(key) = map.node() {
+                    let elf_metadata = self.os.binary_metadata.entry(*key)
+                        .or_insert(ElfBinaryMetadata::new());
+
+                    if let Ok(filename) = self.strings.from_id(map.filename_id()) {
+                        if let Ok(file) = proc.open_file(Path::new(filename)) {
+                            let mut reader = BufReader::new(file);
+                            let mut sections = Vec::new();
+                            let mut section_offsets = Vec::new();
+                            
+                            if get_section_offsets(&mut reader, None, &mut section_offsets).is_err() {
+                                continue;
+                            }
+
+                            if get_section_metadata(&mut reader, None, 0x7, &mut sections).is_err() {
+                                continue;
+                            }
+
+                            let mut build_id: [u8; 36] = [0; 36];
+                            match read_build_id(&mut reader, &sections, &section_offsets, &mut build_id) {
+                                Ok(id) => {
+                                    if let Some(_) = id {
+                                        elf_metadata.build_id = Some(build_id);
+                                    }
+                                }
+                                Err(_) => {}
+                            }
+
+                            sections.clear();
+                            if get_section_metadata(&mut reader, None, 0x1, &mut sections).is_err() {
+                                continue;
+                            }
+
+                            let mut debug_link: [u8; 1024] = [0; 1024];
+                            match read_debug_link(&mut reader, &sections, &section_offsets, &mut debug_link) {
+                                Ok(link) => {
+                                    if let Some(_) = link {
+                                        let str_val = get_str(&debug_link);
+                                        if let Ok(string_val) = String::from_str(str_val) {
+                                            elf_metadata.symbol_file_path = Some(string_val);
+                                        }
+                                    }
+                                }
+                                Err(_) => {}
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -639,6 +745,7 @@ mod tests {
     use super::*;
     use std::path::Path;
     use std::os::linux::fs::MetadataExt;
+    use std::str::FromStr;
 
     use crate::tracefs::TraceFS;
     use crate::perf_event::RingBufSessionBuilder;
@@ -798,5 +905,29 @@ mod tests {
         }
 
         assert!(count > 0);
+    }
+
+    #[test]
+    fn binary_metadata_lookup() {
+        let mut metadata_lookup = ElfBinaryMetadataLookup::new();
+
+        let dev_node_1 = ExportDevNode::new(1,2);
+        assert!(!metadata_lookup.contains(&dev_node_1));
+        let entry = metadata_lookup.entry(dev_node_1)
+            .or_insert(ElfBinaryMetadata::new());
+
+        let symbol_file_path = "/path/to/symbol/file";
+        entry.symbol_file_path = Some(String::from_str(symbol_file_path).unwrap());
+
+        assert!(metadata_lookup.contains(&dev_node_1));
+        let result = metadata_lookup.get(&dev_node_1).unwrap();
+        match &result.symbol_file_path {
+            Some(path) => assert_eq!(path.as_str(), symbol_file_path),
+            None => assert!(false)
+        }
+
+        let dev_node_2 = ExportDevNode::new(2, 3);
+        assert!(!metadata_lookup.contains(&dev_node_2));
+        assert!(metadata_lookup.contains(&dev_node_1));
     }
 }

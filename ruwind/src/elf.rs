@@ -551,6 +551,67 @@ pub fn get_section_metadata(
     }
 }
 
+pub fn read_section_name<'a>(
+    reader: &mut (impl Read + Seek),
+    section: &SectionMetadata,
+    section_offsets: &Vec<u64>,
+    buf: &'a mut [u8]) -> Result<&'a str, Error> {
+    let mut str_offset = 0u64;
+    if section.link < section_offsets.len() as u32 {
+        str_offset = section_offsets[section.link as usize];
+    }
+
+    let str_pos = section.name_offset + str_offset;
+    reader.seek(SeekFrom::Start(str_pos))?;
+
+    let mut name = "";
+    if let Ok(bytes_read) = reader.read(buf) {
+        name = get_str(&buf[0..bytes_read]);
+    }
+
+    Ok(name)
+}
+
+pub fn read_build_id<'a>(
+    reader: &mut (impl Read + Seek),
+    sections: &Vec<SectionMetadata>,
+    section_offsets: &Vec<u64>,
+    buf: &'a mut [u8]) -> Result<Option<&'a [u8]>, Error> {
+    
+    for section in sections {
+        let mut name_buf: [u8; 1024] = [0; 1024];
+        if let Ok(name) = read_section_name(reader, section, section_offsets, &mut name_buf) {
+            if name == ".note.gnu.build-id" {
+                reader.seek(SeekFrom::Start(section.offset))?;
+                reader.read(&mut buf[0..section.size as usize])?;
+                return Ok(Some(buf));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+pub fn read_debug_link<'a>(
+    reader: &mut (impl Read + Seek),
+    sections: &Vec<SectionMetadata>,
+    section_offsets: &Vec<u64>,
+    buf: &'a mut [u8]) -> Result<Option<&'a [u8]>, Error> {
+    
+    for section in sections {
+        let mut name_buf: [u8; 1024] = [0; 1024];
+        if let Ok(name) = read_section_name(reader, section, section_offsets, &mut name_buf) {
+            if name == ".gnu_debuglink" {
+                reader.seek(SeekFrom::Start(section.offset))?;
+                reader.read(&mut buf[0..section.size as usize])?;
+                return Ok(Some(buf));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
 const EI_CLASS: usize = 4;
 
 const ELFCLASS32: u8 = 1;
