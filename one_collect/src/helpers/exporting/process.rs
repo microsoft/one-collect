@@ -65,7 +65,6 @@ impl ExportProcessSample {
 
 pub struct ExportProcess {
     pid: u32,
-    #[cfg(target_os = "linux")]
     ns_pid: Option<u32>,
     comm_id: Option<usize>,
     #[cfg(target_os = "linux")]
@@ -87,7 +86,6 @@ impl ExportProcess {
     pub fn new(pid: u32) -> Self {
         Self {
             pid,
-            #[cfg(target_os = "linux")]
             ns_pid: None,
             comm_id: None,
             #[cfg(target_os = "linux")]
@@ -125,6 +123,13 @@ impl ExportProcess {
         &mut self,
         path_buf: &mut PathBuf) {
         self.ns_pid = procfs::ns_pid(path_buf, self.pid);
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn add_ns_pid(
+        &mut self,
+        pid: u32) {
+        self.ns_pid = Some(pid);
     }
 
     #[cfg(target_os = "linux")]
@@ -183,7 +188,6 @@ impl ExportProcess {
 
     pub fn pid(&self) -> u32 { self.pid }
 
-    #[cfg(target_os = "linux")]
     pub fn ns_pid(&self) -> Option<u32> { self.ns_pid }
 
     pub fn comm_id(&self) -> Option<usize> { self.comm_id }

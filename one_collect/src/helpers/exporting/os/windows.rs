@@ -68,7 +68,20 @@ impl ExportSampler {
     pub(crate) fn pid(
         &self,
         _data: &EventData) -> anyhow::Result<u32> {
-        Ok(self.ancillary.borrow().pid())
+        let local_pid = self.ancillary.borrow().pid();
+
+        /*
+         * We need to convert from local to global PID.
+         * This allows us to seamlessly handle when the
+         * PID gets reused. We have global PIDs, that are
+         * unique. And then we have local PIDs that likely
+         * are not. The local PID is stored in the ns_pid
+         * property of the ExportProcess like on Linux.
+         */
+        Ok(self.exporter
+            .borrow_mut()
+            .os
+            .get_or_alloc_global_pid(local_pid))
     }
 
     pub(crate) fn tid(
@@ -95,13 +108,47 @@ impl ExportSampler {
 }
 
 pub(crate) struct OSExportMachine {
-    
+    pid_mapping: HashMap<u32, u32>,
+    pid_index: u32,
 }
 
 impl OSExportMachine {
     pub fn new() -> Self {
         Self {
+            pid_mapping: HashMap::new(),
+            pid_index: 0,
         }
+    }
+
+    pub fn get_or_alloc_global_pid(
+        &mut self,
+        local_pid: u32) -> u32 {
+        match self.get_global_pid(local_pid) {
+            Some(global_pid) => { global_pid },
+            None => { self.alloc_global_pid(local_pid) },
+        }
+    }
+
+    pub fn get_global_pid(
+        &self,
+        local_pid: u32) -> Option<u32> {
+        match self.pid_mapping.get(&local_pid) {
+            Some(pid) => { Some(*pid) },
+            None => { None },
+        }
+    }
+
+    pub fn alloc_global_pid(
+        &mut self,
+        local_pid: u32) -> u32 {
+        let global_pid = self.pid_index;
+
+        self.pid_index += 1;
+
+        *self.pid_mapping
+            .entry(local_pid)
+            .and_modify(|e| { *e = global_pid })
+            .or_insert(global_pid)
     }
 }
 
@@ -163,6 +210,9 @@ impl ExportMachine {
 
             let mut event_machine = event_machine.borrow_mut();
 
+            let local_pid = fmt.get_u32(pid, data)?;
+            let global_pid = event_machine.os.get_or_alloc_global_pid(local_pid);
+
             /*
              * Paths are logged in the global root namespace.
              * So we must use a path that can be used via
@@ -178,7 +228,7 @@ impl ExportMachine {
             let inode = event_machine.intern(&path_buf);
 
             event_machine.add_mmap_exec(
-                fmt.get_u32(pid, data)?,
+                global_pid,
                 fmt.get_u64(addr, data)?,
                 fmt.get_u64(len, data)?,
                 0, /* Pgoffset */
@@ -203,15 +253,30 @@ impl ExportMachine {
             let data = data.event_data();
             let sid = fmt.get_field_unchecked(sid);
 
-            let pid = fmt.get_u32(pid, data)?;
+            let mut event_machine = event_machine.borrow_mut();
+
+            let local_pid = fmt.get_u32(pid, data)?;
+            let global_pid = event_machine.os.alloc_global_pid(local_pid);
 
             let dynamic = &data[sid.offset..];
             let sid_length = Self::sid_length(dynamic)?;
             let dynamic = &dynamic[sid_length..];
 
-            event_machine.borrow_mut().add_comm_exec(
-                pid,
-                fmt.get_str(comm, dynamic)?)
+            /*
+             * Processes within the machine are stored using the
+             * global PID. This allows us to handle PID re-use
+             * cases easily. It also ensures we can handle container
+             * scenarios on Windows in the future. The Global PID
+             * namespace is 32-bit still, as on Linux.
+             */
+            event_machine.add_comm_exec(
+                global_pid,
+                fmt.get_str(comm, dynamic)?)?;
+
+            /* Store the local PID in the ns_pid as on Linux */
+            event_machine.process_mut(global_pid).add_ns_pid(local_pid);
+
+            Ok(())
         });
     }
 
@@ -334,7 +399,6 @@ mod tests {
     #[test]
     #[ignore]
     fn it_works() {
-
         let helper = CallstackHelper::new();
 
         let settings = ExportSettings::new(helper);
@@ -362,7 +426,7 @@ mod tests {
                 }
             }
 
-            println!("{} ({}):", process.pid(), comm);
+            println!("{:?} ({}, Root PID: {}):", process.ns_pid(), comm, process.pid());
 
             for mapping in process.mappings() {
                 let filename = match strings.from_id(mapping.filename_id()) {
@@ -377,5 +441,30 @@ mod tests {
                     filename);
             }
         }
+    }
+
+    #[test]
+    fn os_export_machine() {
+        let mut machine = OSExportMachine::new();
+        assert!(machine.get_global_pid(1).is_none());
+
+        /* Allocating PID should work */
+        let global_pid = machine.alloc_global_pid(1);
+        assert_eq!(global_pid, machine.get_global_pid(1).unwrap());
+        assert_eq!(global_pid, machine.get_or_alloc_global_pid(1));
+
+        /* Allocating inplace should be different */
+        let new_global_pid = machine.alloc_global_pid(1);
+        assert_ne!(global_pid, new_global_pid);
+        assert_eq!(new_global_pid, machine.get_global_pid(1).unwrap());
+        assert_eq!(new_global_pid, machine.get_or_alloc_global_pid(1));
+
+        let global_pid = new_global_pid;
+
+        /* Allocating another should be different */
+        let new_global_pid = machine.alloc_global_pid(2);
+        assert_ne!(global_pid, new_global_pid);
+        assert_eq!(new_global_pid, machine.get_global_pid(2).unwrap());
+        assert_eq!(new_global_pid, machine.get_or_alloc_global_pid(2));
     }
 }
