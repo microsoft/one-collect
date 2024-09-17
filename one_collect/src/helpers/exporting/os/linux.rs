@@ -15,7 +15,7 @@ use crate::perf_event::{RingBufSessionBuilder, RingBufBuilder};
 use crate::perf_event::abi::PERF_RECORD_MISC_SWITCH_OUT;
 use crate::helpers::callstack::{CallstackHelp, CallstackReader};
 
-use ruwind::elf::{get_section_metadata, get_section_offsets, get_str, read_build_id, read_debug_link};
+use ruwind::elf::{get_section_metadata, get_section_offsets, get_str, read_build_id, read_debug_link, SHT_NOTE, SHT_PROGBITS};
 use ruwind::ModuleAccessor;
 use self::symbols::PerfMapSymbolReader;
 
@@ -273,7 +273,7 @@ impl ExportMachine {
                                 continue;
                             }
 
-                            if get_section_metadata(&mut reader, None, 0x7, &mut sections).is_err() {
+                            if get_section_metadata(&mut reader, None, SHT_NOTE, &mut sections).is_err() {
                                 continue;
                             }
 
@@ -288,7 +288,7 @@ impl ExportMachine {
                             }
 
                             sections.clear();
-                            if get_section_metadata(&mut reader, None, 0x1, &mut sections).is_err() {
+                            if get_section_metadata(&mut reader, None, SHT_PROGBITS, &mut sections).is_err() {
                                 continue;
                             }
 

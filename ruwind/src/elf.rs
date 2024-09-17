@@ -7,6 +7,9 @@ use cpp_demangle::{DemangleOptions, Symbol};
 use rustc_demangle::{demangle, try_demangle};
 
 pub const SHT_PROGBITS: ElfWord = 1;
+pub const SHT_SYMTAB: ElfWord = 2;
+pub const SHT_NOTE: ElfWord = 7;
+pub const SHT_DYNSYM: ElfWord = 11;
 
 pub struct ElfSymbol {
     start: u64,
@@ -129,9 +132,9 @@ impl<'a> ElfSymbolIterator<'a> {
         self.reader.seek(SeekFrom::Start(0))?;
 
         // Read the section metadata and store it.
-        get_section_metadata(&mut self.reader, None, 0x2, &mut self.sections)
+        get_section_metadata(&mut self.reader, None, SHT_SYMTAB, &mut self.sections)
             .unwrap_or_default();
-        get_section_metadata(&mut self.reader, None, 0xb, &mut self.sections)
+        get_section_metadata(&mut self.reader, None, SHT_DYNSYM, &mut self.sections)
             .unwrap_or_default();
 
         self.va_start = get_va_start(&mut self.reader)?;
@@ -1080,8 +1083,8 @@ mod tests {
         let mut sections = Vec::new();
 
         /* Get Dyn and Function Symbols */
-        get_section_metadata(&mut file, None, 0x2, &mut sections).unwrap();
-        get_section_metadata(&mut file, None, 0xb, &mut sections).unwrap();
+        get_section_metadata(&mut file, None, SHT_SYMTAB, &mut sections).unwrap();
+        get_section_metadata(&mut file, None, SHT_DYNSYM, &mut sections).unwrap();
 
         let mut found = false;
 

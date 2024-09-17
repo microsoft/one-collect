@@ -11,7 +11,7 @@ use crate::openat::OpenAt;
 #[cfg(target_os = "linux")]
 use crate::procfs;
 
-use ruwind::elf::{get_section_metadata, get_section_offsets, get_str, ElfSymbol};
+use ruwind::elf::{get_section_metadata, get_section_offsets, get_str, ElfSymbol, SHT_PROGBITS};
 use ruwind::{CodeSection, Unwindable};
 use symbols::ElfSymbolReader;
 
@@ -356,7 +356,7 @@ impl ExportProcess {
         let mut section_offsets = Vec::new();
         let mut reader = BufReader::new(file);
 
-        get_section_metadata(&mut reader, None, 0x1, &mut sections)?;
+        get_section_metadata(&mut reader, None, SHT_PROGBITS, &mut sections)?;
         get_section_offsets(&mut reader, None, &mut section_offsets)?;
 
         for section in &sections {
