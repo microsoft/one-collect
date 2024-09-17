@@ -1,3 +1,5 @@
+use std::collections::hash_map::Entry::Occupied;
+
 use super::*;
 use crate::{ReadOnly, Writable};
 use crate::etw::*;
@@ -107,8 +109,42 @@ impl ExportSampler {
     }
 }
 
+struct CpuProfile {
+    cpu: u32,
+    ip: u64,
+}
+
+impl CpuProfile {
+    pub fn new(
+        cpu: u32,
+        ip: u64) -> Self {
+        Self {
+            cpu,
+            ip,
+        }
+    }
+}
+
+#[derive(Eq, Hash, PartialEq)]
+struct CpuProfileKey {
+    time: u64,
+    tid: u32,
+}
+
+impl CpuProfileKey {
+    pub fn new(
+        time: u64,
+        tid: u32) -> Self {
+        Self {
+            time,
+            tid,
+        }
+    }
+}
+
 pub(crate) struct OSExportMachine {
     pid_mapping: HashMap<u32, u32>,
+    cpu_samples: Option<HashMap<CpuProfileKey, CpuProfile>>,
     pid_index: u32,
 }
 
@@ -116,6 +152,7 @@ impl OSExportMachine {
     pub fn new() -> Self {
         Self {
             pid_mapping: HashMap::new(),
+            cpu_samples: Some(HashMap::new()),
             pid_index: 0,
         }
     }
@@ -141,14 +178,21 @@ impl OSExportMachine {
     pub fn alloc_global_pid(
         &mut self,
         local_pid: u32) -> u32 {
-        let global_pid = self.pid_index;
-
-        self.pid_index += 1;
+        let global_pid = self.new_global_pid();
 
         *self.pid_mapping
             .entry(local_pid)
             .and_modify(|e| { *e = global_pid })
             .or_insert(global_pid)
+    }
+
+    pub fn new_global_pid(
+        &mut self) -> u32 {
+        let global_pid = self.pid_index;
+
+        self.pid_index += 1;
+
+        global_pid
     }
 }
 
@@ -351,7 +395,130 @@ impl ExportMachine {
         }
 
         if cpu_profiling {
-            /* TODO */
+            let ancillary = session.ancillary_data();
+
+            /* Hookup sample CPU profile event */
+            let event = session.profile_cpu_event(Some(PROPERTY_STACK_TRACE));
+
+            let fmt = event.format();
+            let ip = fmt.get_field_ref_unchecked("InstructionPointer");
+            let tid = fmt.get_field_ref_unchecked("ThreadId");
+            let count = fmt.get_field_ref_unchecked("Count");
+
+            let event_machine = machine.clone();
+            let event_ancillary = ancillary.clone();
+
+            event.add_callback(move |data| {
+                let fmt = data.format();
+                let data = data.event_data();
+
+                let mut event_machine = event_machine.borrow_mut();
+                let ancillary = event_ancillary.borrow();
+
+                let ip = fmt.get_u64(ip, data)?;
+                let tid = fmt.get_u32(tid, data)?;
+                let count = fmt.get_u32(count, data)?;
+
+                if tid == 0 && count == 1 {
+                    /* Don't expect a callstack from idle thread */
+                    return Ok(());
+                }
+
+                let key = CpuProfileKey::new(
+                    ancillary.time(),
+                    tid);
+
+                let value = CpuProfile::new(
+                    ancillary.cpu(),
+                    ip);
+
+                /* Save the CPU profile for async frames */
+                if let Some(samples) = event_machine.os.cpu_samples.as_mut() {
+                    samples.insert(key, value);
+                }
+
+                Ok(())
+            });
+
+            let event_machine = machine.clone();
+            let event_ancillary = ancillary.clone();
+            let kind = machine.borrow_mut().sample_kind("cpu");
+
+            callstack_reader.add_async_frames_callback(
+                move |callstack| {
+                    let mut event_machine = event_machine.borrow_mut();
+
+                    /* Lookup matching sample */
+                    let key = CpuProfileKey::new(
+                        callstack.time(),
+                        callstack.tid());
+
+                    if let Some(samples) = event_machine.os.cpu_samples.as_mut() {
+                        if let Occupied(entry) = samples.entry(key) {
+                            /* Remove sample */
+                            let (key, value) = entry.remove_entry();
+
+                            let local_pid = callstack.pid();
+                            let global_pid = event_machine.os.get_or_alloc_global_pid(local_pid);
+
+                            /* Add sample to the process */
+                            let _ = event_machine.add_sample(
+                                key.time,
+                                1,
+                                global_pid,
+                                key.tid,
+                                value.cpu as u16,
+                                kind,
+                                callstack.frames());
+                        }
+                    }
+                });
+
+            let event_machine = machine.clone();
+
+            callstack_reader.add_flushed_callback(
+                move || {
+                    let mut event_machine = event_machine.borrow_mut();
+
+                    /* Take remaining samples */
+                    let samples = event_machine.os.cpu_samples.take();
+
+                    /*
+                     * Add remaining samples as single frame stacks. This
+                     * typically means the callstack was never able to be
+                     * read. This can be due to paging on X64 or internal
+                     * timeouts or errors within the kernel for async user
+                     * unwinding. Even on errors, we want an accurate
+                     * picture of the machine activity, so we still need
+                     * to add these, even if we don't have the full stack
+                     * or the process ID.
+                     */
+                    if let Some(mut samples) = samples {
+                        let mut frames: [u64; 1] = [0; 1];
+
+                        /* Put these in an Unknown process */
+                        let global_pid = event_machine.os.new_global_pid();
+
+                        let _ = event_machine.add_comm_exec(
+                            global_pid,
+                            "Unknown");
+
+                        for (key, value) in samples.drain() {
+                            /* Update single frame array */
+                            frames[0] = value.ip;
+
+                            /* Add sample to the process */
+                            let _ = event_machine.add_sample(
+                                key.time,
+                                1,
+                                global_pid,
+                                key.tid,
+                                value.cpu as u16,
+                                kind,
+                                &frames);
+                        }
+                    }
+                });
         }
 
         if cswitches {
@@ -395,15 +562,17 @@ impl ExportSessionHelp for EtwSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::helpers::callstack::CallstackHelp;
 
     #[test]
     #[ignore]
     fn it_works() {
         let helper = CallstackHelper::new();
 
-        let settings = ExportSettings::new(helper);
+        let mut session = EtwSession::new()
+            .with_callstack_help(&helper);
 
-        let mut session = EtwSession::new();
+        let settings = ExportSettings::new(helper);
 
         let exporter = session.build_exporter(settings).unwrap();
 
@@ -440,6 +609,19 @@ mod tests {
                     mapping.end(),
                     filename);
             }
+
+            for sample in process.samples() {
+                println!(
+                    "{}: CPU={}, TID={}, IP={}, STACK_ID={}, KIND={}",
+                    sample.time(),
+                    sample.cpu(),
+                    sample.tid(),
+                    sample.ip(),
+                    sample.callstack_id(),
+                    sample.kind());
+            }
+
+            println!();
         }
     }
 
