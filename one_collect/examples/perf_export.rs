@@ -66,8 +66,31 @@ fn os_exporter(
 
 #[cfg(target_os = "windows")]
 fn os_exporter(
-    _duration: std::time::Duration) -> Writable<ExportMachine> {
-    todo!()
+    duration: std::time::Duration) -> Writable<ExportMachine> {
+    use one_collect::etw::*;
+    use one_collect::helpers::callstack::*;
+
+    let helper = CallstackHelper::new();
+
+    let mut session = EtwSession::new()
+        .with_callstack_help(&helper);
+
+    let settings = ExportSettings::new(helper)
+        .without_cswitches();
+
+    let exporter = session.build_exporter(settings).unwrap();
+
+    println!("Capturing environment...");
+    session.capture_environment();
+
+    println!("Profiling...");
+    session.parse_for_duration("One-Collect Export Example", duration).unwrap();
+
+    println!("Adding kernel mappings...");
+    /* Pull in more data, if wanted */
+    exporter.borrow_mut().add_kernel_mappings();
+
+    exporter
 }
 
 fn main() {
@@ -115,7 +138,7 @@ fn main() {
                         continue;
                     }
 
-                    /* Save as Uknown PID */
+                    /* Save as Unknown PID */
                     let path = format!("{}/t.Unknown.{}.PerfView.xml", out_dir, pid);
 
                     graph.to_perf_view_xml(&path).expect("Export should work.");

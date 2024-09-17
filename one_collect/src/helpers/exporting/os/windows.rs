@@ -197,6 +197,61 @@ impl OSExportMachine {
 }
 
 impl ExportMachine {
+    pub(crate) fn os_add_kernel_mappings_with(
+        &mut self,
+        kernel_symbols: &mut impl ExportSymbolReader) {
+        let mut frames = Vec::new();
+        let mut addrs = HashSet::new();
+
+        /* Take mappings from Idle process */
+        let kernel_mappings: Vec<ExportMapping> = self
+            .process_mut(0)
+            .mappings_mut()
+            .drain(..)
+            .collect();
+
+        for proc in self.procs.values_mut() {
+            proc.get_unique_kernel_ips(
+                &mut addrs,
+                &mut frames,
+                &self.callstacks);
+
+            if addrs.is_empty() {
+                continue;
+            }
+
+            /* Copy unique addresses to a Vec */
+            frames.clear();
+
+            for addr in &addrs {
+                frames.push(*addr);
+            }
+
+            /* Find the correct mappings */
+            for mapping in &kernel_mappings {
+                for addr in &addrs {
+                    /* Mapping is used in process */
+                    if mapping.contains_ip(*addr) {
+                        /* Copy mapping for process */
+                        let mut mapping = mapping.clone();
+
+                        /* Resolve symbols */
+                        mapping.add_matching_symbols(
+                            &mut frames,
+                            kernel_symbols,
+                            &mut self.strings);
+
+                        /* Add resolved mapping to process */
+                        proc.add_mapping(mapping);
+
+                        /* Next mapping */
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     pub(crate) fn os_add_mmap_exec(
         &mut self,
         _pid: u32,
