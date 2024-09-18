@@ -12,6 +12,7 @@ use crate::procfs;
 use ruwind::{CodeSection, Unwindable};
 
 use super::*;
+use super::mappings::ExportMappingLookup;
 
 #[derive(Clone, Copy)]
 pub struct ExportProcessSample {
@@ -70,7 +71,7 @@ pub struct ExportProcess {
     #[cfg(target_os = "linux")]
     root_fs: Option<OpenAt>,
     samples: Vec<ExportProcessSample>,
-    mappings: Vec<ExportMapping>,
+    mappings: ExportMappingLookup,
     anon_maps: bool,
 }
 
@@ -91,7 +92,7 @@ impl ExportProcess {
             #[cfg(target_os = "linux")]
             root_fs: None,
             samples: Vec::new(),
-            mappings: Vec::new(),
+            mappings: ExportMappingLookup::default(),
             anon_maps: false,
         }
     }
@@ -99,23 +100,10 @@ impl ExportProcess {
     fn find_section(
         &self,
         ip: u64) -> Option<&dyn CodeSection> {
-        if self.mappings.is_empty() {
-            return None;
+        match self.find_mapping(ip, None) {
+            Some(mapping) => { Some(mapping) },
+            None => { None },
         }
-
-        let mut index = self.mappings.partition_point(
-            |map| map.start() <= ip );
-
-        index = index.saturating_sub(1);
-
-        let map = &self.mappings[index];
-
-        if map.start() <= ip &&
-           map.end() >= ip {
-            return Some(map);
-        }
-
-        None
     }
 
     #[cfg(target_os = "linux")]
@@ -163,6 +151,13 @@ impl ExportProcess {
         }
     }
 
+    pub fn find_mapping(
+        &self,
+        ip: u64,
+        time: Option<u64>) -> Option<&ExportMapping> {
+        self.mappings.find(ip, time)
+    }
+
     pub fn add_mapping(
         &mut self,
         mapping: ExportMapping) {
@@ -170,8 +165,7 @@ impl ExportProcess {
             self.anon_maps = true;
         }
 
-        self.mappings.push(mapping);
-        self.mappings.sort();
+        self.mappings.mappings_mut().push(mapping);
     }
 
     pub fn add_sample(
@@ -194,9 +188,9 @@ impl ExportProcess {
 
     pub fn samples(&self) -> &Vec<ExportProcessSample> { &self.samples }
 
-    pub fn mappings(&self) -> &Vec<ExportMapping> { &self.mappings }
+    pub fn mappings(&self) -> &Vec<ExportMapping> { self.mappings.mappings() }
 
-    pub fn mappings_mut(&mut self) -> &mut Vec<ExportMapping> { &mut self.mappings }
+    pub fn mappings_mut(&mut self) -> &mut Vec<ExportMapping> { self.mappings.mappings_mut() }
 
     pub fn has_anon_mappings(&self) -> bool { self.anon_maps }
 
@@ -241,7 +235,7 @@ impl ExportProcess {
         addrs.clear();
         frames.clear();
 
-        for map in &mut self.mappings {
+        for map in self.mappings.mappings_mut() {
             if !map.anon() {
                 continue;
             }
@@ -329,10 +323,11 @@ mod tests {
     use super::*;
 
     fn new_mapping(
+        time: u64,
         start: u64,
         end: u64,
         id: usize) -> ExportMapping {
-        let mut map = ExportMapping::new(0, start, end, 0, false, id);
+        let mut map = ExportMapping::new(time, 0, start, end, 0, false, id);
         map.set_node(ExportDevNode::from_parts(0, 0, id as u64));
         map
     }
@@ -340,9 +335,9 @@ mod tests {
     #[test]
     fn find_section() {
         let mut proc = ExportProcess::new(1);
-        proc.add_mapping(new_mapping(0, 1023, 1));
-        proc.add_mapping(new_mapping(1024, 2047, 2));
-        proc.add_mapping(new_mapping(2048, 3071, 3));
+        proc.add_mapping(new_mapping(0, 0, 1023, 1));
+        proc.add_mapping(new_mapping(0, 1024, 2047, 2));
+        proc.add_mapping(new_mapping(0, 2048, 3071, 3));
 
         /* Find should work properly */
         let found = proc.find_section(0);
@@ -377,5 +372,105 @@ mod tests {
 
         /* Outside all should find none */
         assert!(proc.find_section(3072).is_none());
+
+        /* Should always find latest mapping */
+        proc.add_mapping(new_mapping(200, 0, 1023, 4));
+
+        let found = proc.find_section(0);
+        assert!(found.is_some());
+        let found = found.unwrap();
+        assert_eq!(4, found.key().ino);
+
+        proc.add_mapping(new_mapping(100, 10, 1023, 5));
+
+        let found = proc.find_section(10);
+        assert!(found.is_some());
+        let found = found.unwrap();
+        assert_eq!(4, found.key().ino);
+
+        let found = proc.find_section(0);
+        assert!(found.is_some());
+        let found = found.unwrap();
+        assert_eq!(4, found.key().ino);
+
+        proc.add_mapping(new_mapping(300, 20, 1023, 6));
+
+        let found = proc.find_section(0);
+        assert!(found.is_some());
+        let found = found.unwrap();
+        assert_eq!(4, found.key().ino);
+
+        let found = proc.find_section(20);
+        assert!(found.is_some());
+        let found = found.unwrap();
+        assert_eq!(6, found.key().ino);
+    }
+
+    #[test]
+    fn find_mapping_for_time() {
+        let mut proc = ExportProcess::new(1);
+
+        proc.add_mapping(new_mapping(0, 0, 1023, 1));
+        proc.add_mapping(new_mapping(0, 1024, 2047, 2));
+        proc.add_mapping(new_mapping(0, 2048, 3071, 3));
+
+        /* Find should work properly */
+        let found = proc.find_mapping(0, Some(0));
+        assert!(found.is_some());
+        let found = found.unwrap();
+        assert_eq!(1, found.key().ino);
+
+        let found = proc.find_mapping(512, Some(0));
+        assert!(found.is_some());
+        let found = found.unwrap();
+        assert_eq!(1, found.key().ino);
+
+        let found = proc.find_mapping(1024, Some(0));
+        assert!(found.is_some());
+        let found = found.unwrap();
+        assert_eq!(2, found.key().ino);
+
+        let found = proc.find_mapping(2000, Some(0));
+        assert!(found.is_some());
+        let found = found.unwrap();
+        assert_eq!(2, found.key().ino);
+
+        let found = proc.find_mapping(2048, Some(0));
+        assert!(found.is_some());
+        let found = found.unwrap();
+        assert_eq!(3, found.key().ino);
+
+        let found = proc.find_mapping(3071, Some(0));
+        assert!(found.is_some());
+        let found = found.unwrap();
+        assert_eq!(3, found.key().ino);
+
+        /* Outside all should find none */
+        assert!(proc.find_mapping(3072, Some(0)).is_none());
+
+        /* Find at times before and after should work */
+        proc.add_mapping(new_mapping(200, 0, 1023, 5));
+        proc.add_mapping(new_mapping(100, 10, 1023, 4));
+        proc.add_mapping(new_mapping(300, 20, 1023, 6));
+
+        let found = proc.find_mapping(0, Some(0));
+        assert!(found.is_some());
+        let found = found.unwrap();
+        assert_eq!(1, found.key().ino);
+
+        let found = proc.find_mapping(10, Some(100));
+        assert!(found.is_some());
+        let found = found.unwrap();
+        assert_eq!(4, found.key().ino);
+
+        let found = proc.find_mapping(0, Some(200));
+        assert!(found.is_some());
+        let found = found.unwrap();
+        assert_eq!(5, found.key().ino);
+
+        let found = proc.find_mapping(20, Some(1024));
+        assert!(found.is_some());
+        let found = found.unwrap();
+        assert_eq!(6, found.key().ino);
     }
 }

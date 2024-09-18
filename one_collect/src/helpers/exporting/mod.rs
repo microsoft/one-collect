@@ -8,6 +8,8 @@ use crate::intern::{InternedStrings, InternedCallstacks};
 
 use crate::helpers::callstack::CallstackHelper;
 
+mod lookup;
+
 #[cfg_attr(target_os = "linux", path = "os/linux.rs")]
 #[cfg_attr(target_os = "windows", path = "os/windows.rs")]
 pub mod os;
@@ -431,6 +433,7 @@ impl ExportMachine {
 
     pub(crate) fn add_mmap_exec(
         &mut self,
+        time: u64,
         pid: u32,
         addr: u64,
         len: u64,
@@ -445,6 +448,7 @@ impl ExportMachine {
             filename.starts_with("//anon");
 
         let mut mapping = ExportMapping::new(
+            time,
             self.intern(filename),
             addr,
             addr + len - 1,

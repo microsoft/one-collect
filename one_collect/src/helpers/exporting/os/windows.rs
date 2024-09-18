@@ -293,6 +293,7 @@ impl ExportMachine {
     }
 
     fn hook_mmap_event(
+        ancillary: ReadOnly<AncillaryData>,
         event: &mut Event,
         event_machine: Writable<ExportMachine>) {
         let fmt = event.format();
@@ -327,6 +328,7 @@ impl ExportMachine {
             let inode = event_machine.intern(&path_buf);
 
             event_machine.add_mmap_exec(
+                ancillary.borrow().time(),
                 global_pid,
                 fmt.get_u64(addr, data)?,
                 fmt.get_u64(len, data)?,
@@ -581,11 +583,15 @@ impl ExportMachine {
         }
 
         /* Hook mmap records */
+        let ancillary = session.ancillary_data();
+
         Self::hook_mmap_event(
+            ancillary.clone(),
             session.mmap_load_event(),
             machine.clone());
 
         Self::hook_mmap_event(
+            ancillary.clone(),
             session.mmap_load_capture_start_event(),
             machine.clone());
 

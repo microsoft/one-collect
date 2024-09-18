@@ -208,6 +208,7 @@ impl ExportMachine {
             }
 
             let mut kernel = ExportMapping::new(
+                0,
                 self.strings.to_id("vmlinux"),
                 KERNEL_START,
                 KERNEL_END,
@@ -522,6 +523,7 @@ impl ExportMachine {
         }
 
         /* Hook mmap records */
+        let time_field = session.time_data_ref();
         let event = session.mmap_event();
         let event_machine = machine.clone();
         let fmt = event.format();
@@ -538,6 +540,7 @@ impl ExportMachine {
         const PROT_EXEC: u32 = 4;
         event.add_callback(move |data| {
             let fmt = data.format();
+            let full_data = data.full_data();
             let data = data.event_data();
 
             let prot = fmt.get_u32(prot, data)?;
@@ -548,6 +551,7 @@ impl ExportMachine {
             }
 
             event_machine.borrow_mut().add_mmap_exec(
+                time_field.get_u64(full_data)?,
                 fmt.get_u32(pid, data)?,
                 fmt.get_u64(addr, data)?,
                 fmt.get_u64(len, data)?,

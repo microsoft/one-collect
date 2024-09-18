@@ -406,6 +406,7 @@ mod tests {
 
         for i in 0..16 {
             exporter.add_mmap_exec(
+                0,
                 1,
                 i,
                 1,
