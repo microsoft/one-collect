@@ -211,6 +211,8 @@ impl ExportGraph {
                             Err(_) => { UNKNOWN },
                         };
 
+                        // This is not functioning properly for native code, and removes the module name.
+                        /* 
                         /* Check for method segments */
                         let mut parts = sym_name.rsplitn(2, "::");
 
@@ -219,6 +221,7 @@ impl ExportGraph {
                          * as the namespace and treat the last segment
                          * as the method.
                          */
+
                         if let Some(method_) = parts.next() {
                             if let Some(namespace_) = parts.next() {
                                 /* Use namespace as resolvable name */
@@ -228,6 +231,7 @@ impl ExportGraph {
                                 sym_name = method_;
                             }
                         }
+                        */
 
                         target.method_id = self.strings.to_id(sym_name);
                         break;
