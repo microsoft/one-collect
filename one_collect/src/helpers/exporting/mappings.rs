@@ -133,16 +133,19 @@ impl ExportMapping {
         }
 
         // Get the file name.
+        let mut module_name = None;
         let filename= strings.from_id(self.filename_id()).unwrap().to_string();
-        let module_name = match Path::new(filename.as_str()).file_name() {
-            Some(file_name) => {
-                match file_name.to_str() {
-                    Some(file_name) => file_name,
-                    None => filename.as_str()
-                }
-            },
-            None => filename.as_str()
-        };
+        if !self.anon() {
+            module_name = match Path::new(filename.as_str()).file_name() {
+                Some(file_name) => {
+                    match file_name.to_str() {
+                        Some(file_name) => Some(file_name),
+                        None => Some(filename.as_str())
+                    }
+                },
+                None => Some(filename.as_str())
+            };
+        }
         
         loop {
             if !sym_reader.next() {
@@ -175,7 +178,15 @@ impl ExportMapping {
                     Some(n) => n.as_str(),
                     None => sym_reader.name()
                 };
-                let name = format!("{}!{}", module_name, demangled_name);
+
+                let name = match module_name {
+                    Some(mod_name) => {
+                        format!("{}!{}", mod_name, demangled_name)
+                    }
+                    None => {
+                        demangled_name.to_string()
+                    }
+                };
 
                 // Add the symbol.
                 let symbol = ExportSymbol::new(
