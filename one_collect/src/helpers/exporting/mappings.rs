@@ -132,21 +132,6 @@ impl ExportMapping {
             offset = self.start();
         }
 
-        // Get the file name.
-        let mut module_name = None;
-        let filename= strings.from_id(self.filename_id()).unwrap().to_string();
-        if !self.anon() {
-            module_name = match Path::new(filename.as_str()).file_name() {
-                Some(file_name) => {
-                    match file_name.to_str() {
-                        Some(file_name) => Some(file_name),
-                        None => Some(filename.as_str())
-                    }
-                },
-                None => Some(filename.as_str())
-            };
-        }
-        
         loop {
             if !sym_reader.next() {
                 break;
@@ -179,18 +164,9 @@ impl ExportMapping {
                     None => sym_reader.name()
                 };
 
-                let name = match module_name {
-                    Some(mod_name) => {
-                        format!("{}!{}", mod_name, demangled_name)
-                    }
-                    None => {
-                        demangled_name.to_string()
-                    }
-                };
-
                 // Add the symbol.
                 let symbol = ExportSymbol::new(
-                    strings.to_id(name.as_str()),
+                    strings.to_id(demangled_name),
                     start_addr,
                     end_addr);
 
