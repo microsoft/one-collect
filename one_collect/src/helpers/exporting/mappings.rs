@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::path::Path;
 
 use ruwind::{CodeSection, ModuleKey};
 
@@ -130,6 +131,18 @@ impl ExportMapping {
         if !self.anon() && self.start() < KERNEL_START {
             offset = self.start();
         }
+
+        // Get the file name.
+        let filename= strings.from_id(self.filename_id()).unwrap().to_string();
+        let module_name = match Path::new(filename.as_str()).file_name() {
+            Some(file_name) => {
+                match file_name.to_str() {
+                    Some(file_name) => file_name,
+                    None => filename.as_str()
+                }
+            },
+            None => filename.as_str()
+        };
         
         loop {
             if !sym_reader.next() {
@@ -160,11 +173,16 @@ impl ExportMapping {
             println!("add_sym: {} name: {}", add_sym, sym_reader.name());
 
             if add_sym {
-                println!("Adding symbol {}", sym_reader.name());
+                let demangled_name = sym_reader.demangle();
+                let demangled_name = match &demangled_name {
+                    Some(n) => n.as_str(),
+                    None => sym_reader.name()
+                };
+                let name = format!("{}!{}", module_name, demangled_name);
 
                 // Add the symbol.
                 let symbol = ExportSymbol::new(
-                    strings.to_id(sym_reader.name()),
+                    strings.to_id(name.as_str()),
                     start_addr,
                     end_addr);
 
