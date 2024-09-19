@@ -278,12 +278,7 @@ impl ExportMachine {
 
                     if let Ok(filename) = self.strings.from_id(map.filename_id()) {
                         if let Ok(file) = proc.open_file(Path::new(filename)) {
-
-                            println!("Saving metadata for {}", filename);
-                            println!("Key: dev: {} ino: {}", key.dev(), key.ino());
-
                             let mut reader = BufReader::new(file);
-                      
                             let mut sections = Vec::new();
                             let mut section_offsets = Vec::new();
                             

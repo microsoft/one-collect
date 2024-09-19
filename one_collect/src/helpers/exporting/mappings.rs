@@ -162,15 +162,12 @@ impl ExportMapping {
                 },
                 Err(i) => {
                     let addr = *unique_ips.get(i).unwrap_or(&0u64);
-                    println!("addr: 0x{:x}  start_addr: 0x{:x} end_addr: 0x{:x} index: {} len: {}", addr, start_addr, end_addr, i, unique_ips.len());
                     if unique_ips.len() > i && addr < end_addr {
                         start_index = i;
                         add_sym = true;
                     }
                 }
             }
-
-            println!("add_sym: {} name: {}", add_sym, sym_reader.name());
 
             if add_sym {
                 let demangled_name = sym_reader.demangle();

@@ -305,7 +305,6 @@ impl ExportProcess {
             return;
         }
 
-        println!("Processing PID {}", self.pid);
         for map_index in 0..self.mappings.len() {
             let map = self.mappings.get(map_index).unwrap();
             if map.anon() {
@@ -335,21 +334,16 @@ impl ExportProcess {
             }
 
             let filename = filename.unwrap();
-            println!("\tImage: {}", &filename);
 
             // If there is no metadata, then we can't load symbols.
             // It's possible that metadata fields are empty, but if there is no metadata entry,
             // then we should not proceed.
             let dev_node = &map.node().unwrap();
-            println!("Key: dev: {} ino: {}", dev_node.dev(), dev_node.ino());
-            println!("{}", elf_metadata.contains(dev_node));
             if let Some(metadata) = elf_metadata.get(dev_node) {
-                println!("Got metadata");
                 let mut symbol_files = Vec::new();
                 self.find_symbol_files(filename, metadata, &mut symbol_files);
                 
                 for symbol_file in symbol_files {
-                    dbg!(&symbol_file.file);
                     let mut reader = ElfSymbolReader::new(symbol_file.file);
                     let map_mut = self.mappings.get_mut(map_index).unwrap();
                     let sym_reader = reader.borrow_mut();
@@ -505,9 +499,6 @@ impl ExportProcess {
                 }
             }
         }
-        else {
-            println!("No build id");
-        }
 
         // FEDORA
         // Example path: /usr/lib/debug/path/to/binary/binaryname.so.debug
@@ -573,9 +564,7 @@ impl ExportProcess {
         filename: &PathBuf) -> Option<ElfSymbolFileMatch> {
         let file_path = Path::new(filename);
         let mut matching_sym_file = None;
-        println!("Opening {}", file_path.display());
         if let Ok(mut reader) = self.open_file(file_path) {
-            println!("Opened successfully.");
             let mut sections = Vec::new();
             let mut section_offsets = Vec::new();
 
@@ -593,8 +582,6 @@ impl ExportProcess {
             }
 
             if let Ok(sym_build_id) = get_build_id(&mut reader, &mut build_id_buf) {
-
-                println!("Checking buildid");
                 // If the symbol file has a build id and the binary has a build_id, compare them.
                 // If one has a build id and the other does not, the symbol file does not match.
                 // If neither the binary or the symbol file have a build id, consider the candidate a match.
@@ -617,9 +604,6 @@ impl ExportProcess {
                     }
                 }
             }
-        }
-        else {
-            println!("File not opened.");
         }
 
         // If we found a match, look for symbols in the file.
