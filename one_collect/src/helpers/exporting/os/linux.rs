@@ -1,4 +1,5 @@
 use super::*;
+use std::borrow::Borrow;
 use std::collections::hash_map::{Entry};
 use std::collections::hash_map::Entry::{Vacant, Occupied};
 use std::path::Path;
@@ -157,21 +158,32 @@ impl ModuleAccessor for ExportDevNodeLookup {
     }
 }
 
-struct ElfBinaryMetadata {
-    build_id: Option<[u8; 36]>,
-    symbol_file_path: Option<String>,
+pub struct ElfBinaryMetadata {
+    build_id: Option<[u8; 20]>,
+    debug_link: Option<String>,
 }
 
 impl ElfBinaryMetadata {
     pub fn new() -> Self {
         Self {
             build_id: None,
-            symbol_file_path: None
+            debug_link: None
+        }
+    }
+
+    pub fn build_id(&self) -> Option<&[u8; 20]> {
+        self.build_id.as_ref()
+    }
+
+    pub fn debug_link(&self) -> Option<&str> {
+        match &self.debug_link {
+            Some(link) => Some(link.as_str()),
+            None => None,
         }
     }
 }
 
-struct ElfBinaryMetadataLookup {
+pub struct ElfBinaryMetadataLookup {
     metadata: HashMap<ExportDevNode, ElfBinaryMetadata>
 }
 
@@ -182,7 +194,7 @@ impl ElfBinaryMetadataLookup {
         }
     }
 
-    fn contains(
+    pub fn contains(
         &self,
         key: &ExportDevNode) -> bool {
         self.metadata.contains_key(key)
@@ -194,7 +206,7 @@ impl ElfBinaryMetadataLookup {
         self.metadata.entry(key)
     }
 
-    fn get(
+    pub fn get(
         &self,
         key: &ExportDevNode) -> Option<&ElfBinaryMetadata> {
         self.metadata.get(key)
@@ -247,6 +259,7 @@ impl ExportMachine {
 
         for proc in self.procs.values_mut() {
             proc.add_matching_elf_symbols(
+                &self.os.binary_metadata,
                 &mut addrs,
                 &mut frames,
                 &self.callstacks,
@@ -265,7 +278,12 @@ impl ExportMachine {
 
                     if let Ok(filename) = self.strings.from_id(map.filename_id()) {
                         if let Ok(file) = proc.open_file(Path::new(filename)) {
+
+                            println!("Saving metadata for {}", filename);
+                            println!("Key: dev: {} ino: {}", key.dev(), key.ino());
+
                             let mut reader = BufReader::new(file);
+                      
                             let mut sections = Vec::new();
                             let mut section_offsets = Vec::new();
                             
@@ -277,7 +295,7 @@ impl ExportMachine {
                                 continue;
                             }
 
-                            let mut build_id: [u8; 36] = [0; 36];
+                            let mut build_id: [u8; 20] = [0; 20];
                             match read_build_id(&mut reader, &sections, &section_offsets, &mut build_id) {
                                 Ok(id) => {
                                     if let Some(_) = id {
@@ -298,7 +316,7 @@ impl ExportMachine {
                                     if let Some(_) = link {
                                         let str_val = get_str(&debug_link);
                                         if let Ok(string_val) = String::from_str(str_val) {
-                                            elf_metadata.symbol_file_path = Some(string_val);
+                                            elf_metadata.debug_link = Some(string_val);
                                         }
                                     }
                                 }
@@ -917,11 +935,11 @@ mod tests {
             .or_insert(ElfBinaryMetadata::new());
 
         let symbol_file_path = "/path/to/symbol/file";
-        entry.symbol_file_path = Some(String::from_str(symbol_file_path).unwrap());
+        entry.debug_link = Some(String::from_str(symbol_file_path).unwrap());
 
         assert!(metadata_lookup.contains(&dev_node_1));
         let result = metadata_lookup.get(&dev_node_1).unwrap();
-        match &result.symbol_file_path {
+        match &result.debug_link {
             Some(path) => assert_eq!(path.as_str(), symbol_file_path),
             None => assert!(false)
         }

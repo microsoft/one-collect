@@ -124,39 +124,62 @@ impl ExportMapping {
         strings: &mut InternedStrings) {
         unique_ips.sort();
         sym_reader.reset();
-        sym_reader.next();
 
-        let mut next_ip = 0;
-
-        for ip in unique_ips {
-            let ip = *ip;
-
-            if ip <= next_ip {
-                /* Already added this method, skip */
-                continue;
+        // Anonymous and kernel symbols use a raw ip.
+        let mut offset = 0u64;
+        if !self.anon() && self.start() < KERNEL_START {
+            offset = self.start();
+        }
+        
+        loop {
+            if !sym_reader.next() {
+                break;
             }
 
-            loop {
-                if sym_reader.start() <= ip &&
-                    sym_reader.end() >= ip {
+            let mut add_sym = false;
+            let start_addr = sym_reader.start() + offset;
+            let end_addr = sym_reader.end() + offset;
 
-                    let name = sym_reader.name();
+            // Find the start address for the current symbol in unique_ips.
+            let mut start_index = 0;
+            match unique_ips.binary_search(&start_addr) {
+                Ok(i) => { 
+                    start_index = i;
+                    add_sym = true;
+                },
+                Err(i) => {
+                    let addr = *unique_ips.get(i).unwrap_or(&0u64);
+                    println!("addr: 0x{:x}  start_addr: 0x{:x} end_addr: 0x{:x} index: {} len: {}", addr, start_addr, end_addr, i, unique_ips.len());
+                    if unique_ips.len() > i && addr < end_addr {
+                        start_index = i;
+                        add_sym = true;
+                    }
+                }
+            }
 
-                    let symbol = ExportSymbol::new(
-                        strings.to_id(name),
-                        sym_reader.start(),
-                        sym_reader.end());
+            println!("add_sym: {} name: {}", add_sym, sym_reader.name());
 
-                    self.add_symbol(symbol);
+            if add_sym {
+                println!("Adding symbol {}", sym_reader.name());
 
-                    next_ip = sym_reader.end();
+                // Add the symbol.
+                let symbol = ExportSymbol::new(
+                    strings.to_id(sym_reader.name()),
+                    start_addr,
+                    end_addr);
 
-                    break;
+                self.add_symbol(symbol);
+
+                // Remove ips from unique_ips if the symbol we just added includes them.
+                let mut end_index = start_index;
+                for ip in &unique_ips[start_index..] {
+                    end_index += 1;
+                    if ip >= &end_addr {
+                        break;
+                    }
                 }
 
-                if !sym_reader.next() {
-                    break;
-                }
+                unique_ips.drain(start_index..end_index);
             }
         }
     }

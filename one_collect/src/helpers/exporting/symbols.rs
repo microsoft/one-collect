@@ -483,7 +483,6 @@ mod tests {
                 if !reader.next() {
                     break;
                 }
-
                 actual_count+=1;
                 assert!(reader.start() <= reader.end(), "Start must be less than or equal to end - start: {}, end: {}", reader.start(), reader.end());
                 assert!(reader.name().len() > 0);

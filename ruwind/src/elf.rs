@@ -575,24 +575,42 @@ pub fn read_section_name<'a>(
     Ok(name)
 }
 
+pub fn get_build_id<'a>(
+    reader: &mut (impl Read + Seek),
+    buf: &'a mut [u8; 20]) -> Result<Option<&'a [u8; 20]>, Error> {
+    let mut sections = Vec::new();
+    let mut section_offsets = Vec::new();
+
+    get_section_offsets(reader, None, &mut section_offsets)?;
+    get_section_metadata(reader, None, SHT_NOTE, &mut sections)?;
+
+    read_build_id(reader, &sections, &section_offsets, buf)
+}
+
 pub fn read_build_id<'a>(
     reader: &mut (impl Read + Seek),
     sections: &Vec<SectionMetadata>,
     section_offsets: &Vec<u64>,
-    buf: &'a mut [u8]) -> Result<Option<&'a [u8]>, Error> {
+    buf: &'a mut [u8; 20]) -> Result<Option<&'a [u8; 20]>, Error> {
     
     for section in sections {
         let mut name_buf: [u8; 1024] = [0; 1024];
         if let Ok(name) = read_section_name(reader, section, section_offsets, &mut name_buf) {
             if name == ".note.gnu.build-id" {
-                reader.seek(SeekFrom::Start(section.offset))?;
-                reader.read(&mut buf[0..section.size as usize])?;
+                reader.seek(SeekFrom::Start(section.offset+16))?;
+                reader.read(&mut buf[0..])?;
                 return Ok(Some(buf));
             }
         }
     }
 
     Ok(None)
+}
+
+pub fn build_id_equals(
+    left: &[u8; 20],
+    right: &[u8; 20]) -> bool {
+    left == right
 }
 
 pub fn read_debug_link<'a>(
@@ -1067,6 +1085,8 @@ fn get_section_metadata64(
 
 #[cfg(test)]
 mod tests {
+    use crate::elf;
+
     use super::*;
     use std::fs::File;
 
@@ -1135,5 +1155,35 @@ mod tests {
         assert_eq!(
             None,
             demangle_symbol("_RFoo"));
+    }
+
+    #[test]
+    fn build_id_equals() {
+        let build_id_1: [u8; 20] = [
+            0x30, 0x31, 0x32, 0x33,
+            0x34, 0x35, 0x36, 0x37,
+            0x38, 0x39, 0x61, 0x62,
+            0x63, 0x64, 0x65, 0x66,
+            0x67, 0x68, 0x69, 0x6A
+        ];
+
+        let build_id_2: [u8; 20] = [
+            0x30, 0x31, 0x32, 0x33,
+            0x34, 0x35, 0x36, 0x37,
+            0x38, 0x39, 0x61, 0x62,
+            0x63, 0x64, 0x65, 0x66,
+            0x67, 0x68, 0x69, 0x6A
+        ];
+
+        let build_id_3: [u8; 20] = [
+            0x30, 0x31, 0x32, 0x33,
+            0x34, 0x35, 0x36, 0x37,
+            0x38, 0x39, 0x61, 0x62,
+            0x63, 0x64, 0x66, 0x66,
+            0x67, 0x68, 0x69, 0x6A
+        ];
+
+        assert!(elf::build_id_equals(&build_id_1, &build_id_2));
+        assert!(!elf::build_id_equals(&build_id_1, &build_id_3));
     }
 }
