@@ -151,6 +151,7 @@ impl ExportSymbolReader for KernelSymbolReader {
         self.current_ip = 0;
         self.current_end = None;
         self.next_ip = None;
+        self.done = true;
 
         if let Some(reader) = &mut self.reader {
             if reader.seek(SeekFrom::Start(0)).is_ok() {

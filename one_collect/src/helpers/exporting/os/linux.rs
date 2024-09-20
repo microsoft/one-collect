@@ -191,6 +191,47 @@ impl ExportMachine {
         }
     }
 
+    pub(crate) fn os_add_kernel_mappings_with(
+        &mut self,
+        kernel_symbols: &mut impl ExportSymbolReader) {
+        let mut frames = Vec::new();
+        let mut addrs = HashSet::new();
+
+        for proc in self.procs.values_mut() {
+            proc.get_unique_kernel_ips(
+                &mut addrs,
+                &mut frames,
+                &self.callstacks);
+
+            if addrs.is_empty() {
+                continue;
+            }
+
+            let mut kernel = ExportMapping::new(
+                self.strings.to_id("vmlinux"),
+                KERNEL_START,
+                KERNEL_END,
+                0,
+                false,
+                self.map_index);
+
+            self.map_index += 1;
+
+            frames.clear();
+
+            for addr in &addrs {
+                frames.push(*addr);
+            }
+
+            kernel.add_matching_symbols(
+                &mut frames,
+                kernel_symbols,
+                &mut self.strings);
+
+            proc.add_mapping(kernel);
+        }
+    }
+
     pub(crate) fn os_add_mmap_exec(
         &mut self,
         pid: u32,

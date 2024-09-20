@@ -464,6 +464,10 @@ impl EventFormat {
             },
 
             LocationType::StaticString => {
+                if field.offset > data.len() {
+                    return EMPTY;
+                }
+
                 let slice = &data[field.offset..];
                 let mut len = 0usize;
                 
@@ -479,6 +483,10 @@ impl EventFormat {
             },
 
             LocationType::StaticUTF16String => {
+                if field.offset > data.len() {
+                    return EMPTY;
+                }
+
                 let slice = &data[field.offset..];
                 let chunks = slice.chunks_exact(2);
                 let mut len = 0usize;
