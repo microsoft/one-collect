@@ -268,8 +268,8 @@ impl ExportMachine {
     }
 
     fn sid_length(data: &[u8]) -> anyhow::Result<usize> {
-        const ptr_size: usize = std::mem::size_of::<usize>();
-        let mut sid_size: usize = ptr_size;
+        const PTR_SIZE: usize = std::mem::size_of::<usize>();
+        let mut sid_size: usize = PTR_SIZE;
 
         if data.len() < 8 {
             anyhow::bail!("Invalid SID length");
@@ -278,7 +278,7 @@ impl ExportMachine {
         let sid = u64::from_ne_bytes(data[..8].try_into()?);
 
         if sid != 0 {
-            let offset = ptr_size * 2;
+            let offset = PTR_SIZE * 2;
             let start = offset + 1;
 
             if data.len() < start {
@@ -341,7 +341,6 @@ impl ExportMachine {
     }
 
     fn hook_comm_event(
-        ancillary: ReadOnly<AncillaryData>,
         event: &mut Event,
         event_machine: Writable<ExportMachine>) {
         let fmt = event.format();
@@ -498,7 +497,6 @@ impl ExportMachine {
             });
 
             let event_machine = machine.clone();
-            let event_ancillary = ancillary.clone();
             let kind = machine.borrow_mut().sample_kind("cpu");
 
             callstack_reader.add_async_frames_callback(
@@ -583,26 +581,22 @@ impl ExportMachine {
         }
 
         /* Hook mmap records */
-        let ancillary = session.ancillary_data();
-
         Self::hook_mmap_event(
-            ancillary.clone(),
+            session.ancillary_data(),
             session.mmap_load_event(),
             machine.clone());
 
         Self::hook_mmap_event(
-            ancillary.clone(),
+            session.ancillary_data(),
             session.mmap_load_capture_start_event(),
             machine.clone());
 
         /* Hook comm records */
         Self::hook_comm_event(
-            session.ancillary_data(),
             session.comm_start_event(),
             machine.clone());
 
         Self::hook_comm_event(
-            session.ancillary_data(),
             session.comm_start_capture_event(),
             machine.clone());
 

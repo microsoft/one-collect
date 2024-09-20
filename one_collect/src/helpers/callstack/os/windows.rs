@@ -7,18 +7,12 @@ use crate::{Writable, ReadOnly};
 use crate::etw::*;
 
 struct PartialThreadCallstacks {
-    pid: u32,
-    tid: u32,
     partials: HashMap<u64, PartialCallstack>,
 }
 
 impl PartialThreadCallstacks {
-    fn new(
-        pid: u32,
-        tid: u32) -> Self {
+    fn new() -> Self {
         Self {
-            pid,
-            tid,
             partials: HashMap::default(),
         }
     }
@@ -163,7 +157,7 @@ impl PartialCallstackLookup {
 
         let stacks = self.stacks
             .entry(key)
-            .or_insert_with(|| PartialThreadCallstacks::new(pid, tid));
+            .or_insert_with(|| PartialThreadCallstacks::new());
 
         if let Some(frames) = stacks.add_frames(
             time,
@@ -224,7 +218,6 @@ impl CallstackReader {
 pub struct CallstackHelper {
     ancillary: Writable<ReadOnly<AncillaryData>>,
     lookup: Writable<PartialCallstackLookup>,
-    kernel_callstacks: bool,
 }
 
 impl CallstackHelper {
@@ -235,7 +228,6 @@ impl CallstackHelper {
         Self {
             ancillary: Writable::new(empty.read_only()),
             lookup: Writable::new(PartialCallstackLookup::default()),
-            kernel_callstacks: false,
         }
     }
 

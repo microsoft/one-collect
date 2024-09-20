@@ -242,9 +242,8 @@ pub struct ExportSettings {
 }
 
 impl ExportSettings {
-    pub fn new(callstack_helper: CallstackHelper) -> Self {
-        let mut callstack_helper = callstack_helper;
-
+    #[allow(unused_mut)]
+    pub fn new(mut callstack_helper: CallstackHelper) -> Self {
         Self {
             string_buckets: 64,
             callstack_buckets: 512,
