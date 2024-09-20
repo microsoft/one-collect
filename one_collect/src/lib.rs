@@ -21,7 +21,7 @@ pub mod etw;
 pub use sharing::{Writable, ReadOnly};
 
 pub mod pathbuf_ext;
-use pathbuf_ext::{PathBufInteger};
+pub use pathbuf_ext::{PathBufInteger};
 
 pub type IOResult<T> = std::io::Result<T>;
 pub type IOError = std::io::Error;
