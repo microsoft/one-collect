@@ -333,6 +333,11 @@ impl ExportProcess {
                 continue;
             }
 
+            // TODO: We need to open the .text section of the file and get the offset and end:
+            // offset = sh_addr - sh_offset.
+            // end = sh_offset + sh_size.
+            // Is the calculation then ip - offset?  Or is it ip - map.start() - offset?  Or something else?
+
             let filename = filename.unwrap();
 
             // If there is no metadata, then we can't load symbols.

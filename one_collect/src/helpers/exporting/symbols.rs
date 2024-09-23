@@ -469,7 +469,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn elf_symbol_reader() {
         #[cfg(target_arch = "x86_64")]
-        let path = "/usr/lib/x86_64-linux-gnu/libc.so.6";
+        let path = "/home/brianrob/work/sdk-8.0/shared/Microsoft.NETCore.App/8.0.8/libcoreclr.so.dbg";
 
         #[cfg(target_arch = "aarch64")]
         let path = "/usr/lib/aarch64-linux-gnu/libc.so.6";
@@ -483,6 +483,8 @@ mod tests {
                 if !reader.next() {
                     break;
                 }
+                println!("{},0x{:x},0x{:x},{}", reader.start(), reader.start(), reader.end(), reader.name());
+
                 actual_count+=1;
                 assert!(reader.start() <= reader.end(), "Start must be less than or equal to end - start: {}, end: {}", reader.start(), reader.end());
                 assert!(reader.name().len() > 0);

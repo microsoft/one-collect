@@ -127,9 +127,11 @@ impl ExportMapping {
         sym_reader.reset();
 
         // Anonymous and kernel symbols use a raw ip.
-        let mut offset = 0u64;
+        let mut start_offset = 0u64;
+        let mut pgoff = 0u64;
         if !self.anon() && self.start() < KERNEL_START {
-            offset = self.start();
+            start_offset = self.start();
+            pgoff = self.file_offset();
         }
 
         loop {
@@ -138,8 +140,8 @@ impl ExportMapping {
             }
 
             let mut add_sym = false;
-            let start_addr = sym_reader.start() + offset;
-            let end_addr = sym_reader.end() + offset;
+            let start_addr = sym_reader.start() + start_offset - pgoff;// sym_reader.start() + offset;
+            let end_addr = sym_reader.end() + start_offset - pgoff;// sym_reader.end() + offset;
 
             // Find the start address for the current symbol in unique_ips.
             let mut start_index = 0;

@@ -197,7 +197,6 @@ impl ExportGraph {
                     if ip > KERNEL_START {
                         target.address = ip;
                     } else {
-                        target.address = ip - mapping.start();
                         target.address += mapping.file_offset();
                     }
                 }
