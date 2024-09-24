@@ -3,6 +3,7 @@ use std::borrow::{Borrow, BorrowMut};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use crate::PathBufInteger;
 use crate::intern::InternedCallstacks;
@@ -14,7 +15,7 @@ use crate::openat::OpenAt;
 #[cfg(target_os = "linux")]
 use crate::procfs;
 
-use ruwind::elf::{build_id_equals, get_build_id, get_section_metadata, get_section_offsets, get_str, read_build_id, ElfSymbol, SHT_DYNSYM, SHT_NOTE, SHT_PROGBITS, SHT_SYMTAB};
+use ruwind::elf::{build_id_equals, get_build_id, get_section_metadata, get_section_offsets, get_str, get_va_start, read_build_id, ElfSymbol, SHT_DYNSYM, SHT_NOTE, SHT_PROGBITS, SHT_SYMTAB};
 use ruwind::{CodeSection, Unwindable};
 use symbols::ElfSymbolReader;
 
@@ -287,6 +288,7 @@ impl ExportProcess {
             map.add_matching_symbols(
                 frames,
                 sym_reader,
+                0u64,
                 strings);
         }
     }
@@ -333,11 +335,6 @@ impl ExportProcess {
                 continue;
             }
 
-            // TODO: We need to open the .text section of the file and get the offset and end:
-            // offset = sh_addr - sh_offset.
-            // end = sh_offset + sh_size.
-            // Is the calculation then ip - offset?  Or is it ip - map.start() - offset?  Or something else?
-
             let filename = filename.unwrap();
 
             // If there is no metadata, then we can't load symbols.
@@ -355,6 +352,7 @@ impl ExportProcess {
                     map_mut.add_matching_symbols(
                         frames,
                         sym_reader,
+                        metadata.text_offset().unwrap_or(0),
                         strings);
                 }
             }

@@ -145,10 +145,6 @@ fn main() {
 
                 for pid in pids {
                     let process = exporter.find_process(pid).expect("PID should be found.");
-
-                    if process.pid() != 1564312 {
-                        continue;
-                    }
                     
                     graph.add_samples(
                         &exporter,

@@ -55,7 +55,6 @@ impl PerfViewXmlFormat for ExportGraph {
         for (frame, id) in &frames {
             name.clear();
 
-            //name.push_str(format!("0x{:x}:", frame.address()).as_str());
             if frame.has_resolvable() {
                 let resolvable = &resolvables[frame.resolvable()];
                 let resolvable = strings.from_id(resolvable.name())?;

@@ -122,16 +122,15 @@ impl ExportMapping {
         &mut self,
         unique_ips: &mut Vec<u64>,
         sym_reader: &mut impl ExportSymbolReader,
+        text_offset: u64,
         strings: &mut InternedStrings) {
         unique_ips.sort();
         sym_reader.reset();
 
         // Anonymous and kernel symbols use a raw ip.
         let mut start_offset = 0u64;
-        let mut pgoff = 0u64;
         if !self.anon() && self.start() < KERNEL_START {
             start_offset = self.start();
-            pgoff = self.file_offset();
         }
 
         loop {
@@ -140,20 +139,19 @@ impl ExportMapping {
             }
 
             let mut add_sym = false;
-            let start_addr = sym_reader.start() + start_offset - pgoff;// sym_reader.start() + offset;
-            let end_addr = sym_reader.end() + start_offset - pgoff;// sym_reader.end() + offset;
+
+            // Convert from address relative address to ip.
+            let start_addr = sym_reader.start() + start_offset - text_offset;
+            let end_addr = sym_reader.end() + start_offset - text_offset;
 
             // Find the start address for the current symbol in unique_ips.
-            let mut start_index = 0;
             match unique_ips.binary_search(&start_addr) {
-                Ok(i) => { 
-                    start_index = i;
+                Ok(_) => { 
                     add_sym = true;
                 },
                 Err(i) => {
                     let addr = *unique_ips.get(i).unwrap_or(&0u64);
                     if unique_ips.len() > i && addr < end_addr {
-                        start_index = i;
                         add_sym = true;
                     }
                 }
@@ -173,17 +171,6 @@ impl ExportMapping {
                     end_addr);
 
                 self.add_symbol(symbol);
-
-                // Remove ips from unique_ips if the symbol we just added includes them.
-                let mut end_index = start_index;
-                for ip in &unique_ips[start_index..] {
-                    end_index += 1;
-                    if ip >= &end_addr {
-                        break;
-                    }
-                }
-
-                unique_ips.drain(start_index..end_index);
             }
         }
     }

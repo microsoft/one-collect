@@ -468,11 +468,34 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn elf_symbol_reader() {
+        use ruwind::elf::{get_section_metadata, get_section_offsets, get_str, get_va_start, read_section_name, SHT_PROGBITS};
+
         #[cfg(target_arch = "x86_64")]
         let path = "/home/brianrob/work/sdk-8.0/shared/Microsoft.NETCore.App/8.0.8/libcoreclr.so.dbg";
 
         #[cfg(target_arch = "aarch64")]
         let path = "/usr/lib/aarch64-linux-gnu/libc.so.6";
+
+        let mut bin = File::open("/home/brianrob/work/sdk-8.0/shared/Microsoft.NETCore.App/8.0.8/libcoreclr.so").unwrap();
+
+        let mut sections = Vec::new();
+        let mut section_offsets = Vec::new();
+        get_section_metadata(&mut bin, None, SHT_PROGBITS, &mut sections).unwrap();
+        get_section_offsets(&mut bin, None, &mut section_offsets).unwrap();
+
+        let mut buf: [u8; 1024] = [0; 1024];
+        for section in &sections {
+            let section_name = read_section_name(
+                &mut bin,
+                section,
+                &section_offsets,
+                &mut buf).unwrap();
+
+            if section_name == ".text" {
+                println!(".text start = 0x{:x}", section.offset);
+            }
+
+        }
 
         if let Ok(file) = File::open(path) {
             let mut reader = ElfSymbolReader::new(file);
@@ -483,7 +506,7 @@ mod tests {
                 if !reader.next() {
                     break;
                 }
-                println!("{},0x{:x},0x{:x},{}", reader.start(), reader.start(), reader.end(), reader.name());
+                //println!("{},0x{:x},0x{:x},{}", reader.start(), reader.start(), reader.end(), reader.name());
 
                 actual_count+=1;
                 assert!(reader.start() <= reader.end(), "Start must be less than or equal to end - start: {}, end: {}", reader.start(), reader.end());

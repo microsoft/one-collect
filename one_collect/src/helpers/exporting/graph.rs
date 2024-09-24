@@ -192,14 +192,8 @@ impl ExportGraph {
                     name = short_name;
                 }
 
-                /* Calc file address, unless anonymous */
-                if !mapping.anon() {
-                    if ip > KERNEL_START {
-                        target.address = ip;
-                    } else {
-                        target.address += mapping.file_offset();
-                    }
-                }
+                /* Set the ip */
+                target.address = ip;
 
                 /* Symbol lookup, if any */
                 for symbol in mapping.symbols() {

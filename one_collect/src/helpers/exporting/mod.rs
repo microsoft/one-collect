@@ -445,6 +445,7 @@ impl ExportMachine {
             kernel.add_matching_symbols(
                 &mut frames,
                 kernel_symbols,
+                0u64,
                 &mut self.strings);
 
             proc.add_mapping(kernel);

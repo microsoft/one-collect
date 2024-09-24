@@ -96,7 +96,7 @@ impl<'a> ElfSymbolIterator<'a> {
         Self {
             phantom: std::marker::PhantomData,
             reader: BufReader::new(file),
-            va_start: 0,
+            va_start: 0u64,
             sections: Vec::new(),
             section_index: 0,
             section_offsets: Vec::new(),
@@ -418,7 +418,7 @@ fn get_va_start64(
     Ok(0)
 }
 
-fn get_va_start(
+pub fn get_va_start(
     reader: &mut (impl Read + Seek)) -> Result<u64, Error> {
     reader.seek(SeekFrom::Start(0))?;
     let slice = get_ident(reader)?;
@@ -626,6 +626,22 @@ pub fn read_debug_link<'a>(
                 reader.seek(SeekFrom::Start(section.offset))?;
                 reader.read(&mut buf[0..section.size as usize])?;
                 return Ok(Some(buf));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+pub fn get_text_offset(
+    reader: &mut (impl Read + Seek),
+    sections: &Vec<SectionMetadata>,
+    section_offsets: &Vec<u64>) -> Result<Option<u64>, Error> {
+    let mut buf: [u8; 1024] = [0; 1024];
+    for section in sections {
+        if let Ok(name) = read_section_name(reader, section, section_offsets, &mut buf) {
+            if name == ".text" {
+                return Ok(Some(section.offset));
             }
         }
     }

@@ -16,7 +16,7 @@ use crate::perf_event::{RingBufSessionBuilder, RingBufBuilder};
 use crate::perf_event::abi::PERF_RECORD_MISC_SWITCH_OUT;
 use crate::helpers::callstack::{CallstackHelp, CallstackReader};
 
-use ruwind::elf::{get_section_metadata, get_section_offsets, get_str, read_build_id, read_debug_link, SHT_NOTE, SHT_PROGBITS};
+use ruwind::elf::{get_section_metadata, get_section_offsets, get_str, get_text_offset, read_build_id, read_debug_link, SHT_NOTE, SHT_PROGBITS};
 use ruwind::ModuleAccessor;
 use self::symbols::PerfMapSymbolReader;
 
@@ -161,13 +161,15 @@ impl ModuleAccessor for ExportDevNodeLookup {
 pub struct ElfBinaryMetadata {
     build_id: Option<[u8; 20]>,
     debug_link: Option<String>,
+    text_offset: Option<u64>,
 }
 
 impl ElfBinaryMetadata {
     pub fn new() -> Self {
         Self {
             build_id: None,
-            debug_link: None
+            debug_link: None,
+            text_offset: None
         }
     }
 
@@ -180,6 +182,10 @@ impl ElfBinaryMetadata {
             Some(link) => Some(link.as_str()),
             None => None,
         }
+    }
+
+    pub fn text_offset(&self) -> Option<u64> {
+        self.text_offset
     }
 }
 
@@ -315,6 +321,13 @@ impl ExportMachine {
                                         }
                                     }
                                 }
+                                Err(_) => {}
+                            }
+
+                            match get_text_offset(&mut reader, &sections, &section_offsets) {
+                                Ok(offset) => {
+                                    elf_metadata.text_offset = offset;
+                                },
                                 Err(_) => {}
                             }
                         }
