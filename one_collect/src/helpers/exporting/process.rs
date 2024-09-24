@@ -1,5 +1,4 @@
 use core::str;
-use std::borrow::BorrowMut;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
@@ -12,7 +11,7 @@ use crate::openat::OpenAt;
 #[cfg(target_os = "linux")]
 use crate::procfs;
 
-use ruwind::elf::{build_id_equals, get_build_id, get_section_metadata, get_section_offsets, read_build_id, SHT_SYMTAB, SHT_DYNSYM, SHT_NOTE};
+use ruwind::elf::{build_id_equals, get_build_id, get_section_metadata, SHT_SYMTAB, SHT_DYNSYM};
 use ruwind::{CodeSection, Unwindable};
 use symbols::ElfSymbolReader;
 

@@ -1,5 +1,4 @@
 use std::cmp::Ordering;
-use std::path::Path;
 
 use ruwind::{CodeSection, ModuleKey};
 

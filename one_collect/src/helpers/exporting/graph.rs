@@ -199,7 +199,7 @@ impl ExportGraph {
                 for symbol in mapping.symbols() {
                     if ip >= symbol.start() && ip <= symbol.end() {
                         /* Get the actual symbol name */
-                        let mut sym_name = match strings.from_id(symbol.name_id()) {
+                        let sym_name = match strings.from_id(symbol.name_id()) {
                             Ok(name) => { name },
                             Err(_) => { UNKNOWN },
                         };

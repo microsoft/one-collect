@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 use std::mem::{zeroed, size_of};
 use std::slice;
 use cpp_demangle::{DemangleOptions, Symbol};
-use rustc_demangle::{demangle, try_demangle};
+use rustc_demangle::try_demangle;
 
 pub const SHT_PROGBITS: ElfWord = 1;
 pub const SHT_SYMTAB: ElfWord = 2;
