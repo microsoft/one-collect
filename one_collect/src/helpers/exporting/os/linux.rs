@@ -1,6 +1,5 @@
 use super::*;
-use std::borrow::Borrow;
-use std::collections::hash_map::{Entry};
+use std::collections::hash_map::Entry;
 use std::collections::hash_map::Entry::{Vacant, Occupied};
 use std::path::Path;
 use std::fs::File;

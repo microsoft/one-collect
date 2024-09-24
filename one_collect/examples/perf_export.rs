@@ -53,7 +53,7 @@ fn os_exporter(
 
     println!("Adding kernel mappings...");
     /* Pull in more data, if wanted */
-    //exporter.borrow_mut().add_kernel_mappings();
+    exporter.borrow_mut().add_kernel_mappings();
 
     println!("Resolving elf symbols...");
     exporter.borrow_mut().load_elf_metadata();
@@ -145,7 +145,6 @@ fn main() {
 
                 for pid in pids {
                     let process = exporter.find_process(pid).expect("PID should be found.");
-                    
                     graph.add_samples(
                         &exporter,
                         process,
