@@ -96,7 +96,7 @@ impl<'a> ElfSymbolIterator<'a> {
         Self {
             phantom: std::marker::PhantomData,
             reader: BufReader::new(file),
-            va_start: 0u64,
+            va_start: 0,
             sections: Vec::new(),
             section_index: 0,
             section_offsets: Vec::new(),
@@ -418,7 +418,7 @@ fn get_va_start64(
     Ok(0)
 }
 
-pub fn get_va_start(
+fn get_va_start(
     reader: &mut (impl Read + Seek)) -> Result<u64, Error> {
     reader.seek(SeekFrom::Start(0))?;
     let slice = get_ident(reader)?;
@@ -560,6 +560,7 @@ pub fn read_section_name<'a>(
     section_offsets: &Vec<u64>,
     buf: &'a mut [u8]) -> Result<&'a str, Error> {
     let mut str_offset = 0u64;
+
     if section.link < section_offsets.len() as u32 {
         str_offset = section_offsets[section.link as usize];
     }
@@ -597,7 +598,7 @@ pub fn read_build_id<'a>(
         let mut name_buf: [u8; 1024] = [0; 1024];
         if let Ok(name) = read_section_name(reader, section, section_offsets, &mut name_buf) {
             if name == ".note.gnu.build-id" {
-                reader.seek(SeekFrom::Start(section.offset+16))?;
+                reader.seek(SeekFrom::Start(section.offset + 16))?; // TODO: Document why +16?
                 reader.read(&mut buf[0..])?;
                 return Ok(Some(buf));
             }

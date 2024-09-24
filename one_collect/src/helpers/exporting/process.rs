@@ -1,13 +1,10 @@
 use core::str;
-use std::borrow::{Borrow, BorrowMut};
+use std::borrow::BorrowMut;
 use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 
 use crate::PathBufInteger;
 use crate::intern::InternedCallstacks;
-use os::OSExportMachine;
 use crate::helpers::exporting::os::{ElfBinaryMetadata, ElfBinaryMetadataLookup};
 
 #[cfg(target_os = "linux")]
@@ -15,7 +12,7 @@ use crate::openat::OpenAt;
 #[cfg(target_os = "linux")]
 use crate::procfs;
 
-use ruwind::elf::{build_id_equals, get_build_id, get_section_metadata, get_section_offsets, get_str, get_va_start, read_build_id, ElfSymbol, SHT_DYNSYM, SHT_NOTE, SHT_PROGBITS, SHT_SYMTAB};
+use ruwind::elf::{build_id_equals, get_build_id, get_section_metadata, get_section_offsets, read_build_id, SHT_SYMTAB, SHT_DYNSYM, SHT_NOTE};
 use ruwind::{CodeSection, Unwindable};
 use symbols::ElfSymbolReader;
 
@@ -329,30 +326,36 @@ impl ExportProcess {
                 frames.push(*addr);
             }
 
-            // Get the binary path.
-            let filename= strings.from_id(map.filename_id());
-            if filename.is_err() {
-                continue;
-            }
+            // Get the file path or continue.
+            let filename = match strings.from_id(map.filename_id()) {
+                Ok(str) => str,
+                Err(_) => continue
+            };
 
-            let filename = filename.unwrap();
+            // Get the dev node or continue.
+            let dev_node = match map.node() {
+                Some(key) => key,
+                None => continue
+            };
 
             // If there is no metadata, then we can't load symbols.
             // It's possible that metadata fields are empty, but if there is no metadata entry,
             // then we should not proceed.
-            let dev_node = &map.node().unwrap();
             if let Some(metadata) = elf_metadata.get(dev_node) {
+
+                // Find the set of symbol files, including the binary.
                 let mut symbol_files = Vec::new();
                 self.find_symbol_files(filename, metadata, &mut symbol_files);
                 
                 for symbol_file in symbol_files {
-                    let mut reader = ElfSymbolReader::new(symbol_file.file);
+                    let mut sym_reader = ElfSymbolReader::new(symbol_file.file);
                     let map_mut = self.mappings.get_mut(map_index).unwrap();
-                    let sym_reader = reader.borrow_mut();
+                    let text_offset = metadata.text_offset().unwrap_or(0);
+
                     map_mut.add_matching_symbols(
                         frames,
-                        sym_reader,
-                        metadata.text_offset().unwrap_or(0),
+                        &mut sym_reader,
+                        text_offset,
                         strings);
                 }
             }
@@ -378,7 +381,7 @@ impl ExportProcess {
             contains_symtab |= sym_file.contains_symtab;
             contains_dynsym |= sym_file.contains_dynsym;
             matching_symbol_files.push(sym_file);
-        
+
             // We've found everything we need.
             if contains_symtab && contains_dynsym {
                 return;
@@ -394,14 +397,29 @@ impl ExportProcess {
             contains_symtab |= sym_file.contains_symtab;
             contains_dynsym |= sym_file.contains_dynsym;
             matching_symbol_files.push(sym_file);
-        
+
             // We've found everything we need.
             if contains_symtab && contains_dynsym {
                 return;
             }
         }
 
-        // DEBUGLINK
+        path_buf.clear();
+        path_buf.push(format!("{}.debug", bin_path));
+        if let Some(sym_file) = self.check_candidate_symbol_file(
+            metadata.build_id(),
+            &path_buf) {
+            contains_symtab |= sym_file.contains_symtab;
+            contains_dynsym |= sym_file.contains_dynsym;
+            matching_symbol_files.push(sym_file);
+
+            // We've found everything we need.
+            if contains_symtab && contains_dynsym {
+                return;
+            }
+        }
+
+        // Debug link.
         if let Some(debug_link) = metadata.debug_link() {
 
             // Directly open debug_link.
@@ -413,7 +431,7 @@ impl ExportProcess {
                 contains_symtab |= sym_file.contains_symtab;
                 contains_dynsym |= sym_file.contains_dynsym;
                 matching_symbol_files.push(sym_file);
-            
+
                 // We've found everything we need.
                 if contains_symtab && contains_dynsym {
                     return;
@@ -480,7 +498,7 @@ impl ExportProcess {
             }
         }
 
-        // BUILDID DEBUGINFO
+        // Build-id-based debuginfo.
         if let Some(build_id) = metadata.build_id() {
             // Convert the build id to a String.
             let build_id_string: String = build_id.iter().map(
@@ -488,7 +506,9 @@ impl ExportProcess {
                 .collect();
             path_buf.clear();
             path_buf.push("/usr/lib/debug/.build-id/");
-            path_buf.push(format!("{}/{}.debug", &build_id_string[0..2], &build_id_string[2..]));
+            path_buf.push(format!("{}/{}.debug",
+                &build_id_string[0..2],
+                &build_id_string[2..]));
             if let Some(sym_file) = self.check_candidate_symbol_file(
                 metadata.build_id(),
                 &path_buf) {
@@ -503,7 +523,7 @@ impl ExportProcess {
             }
         }
 
-        // FEDORA
+        // Fedora-specific path-based lookup.
         // Example path: /usr/lib/debug/path/to/binary/binaryname.so.debug
         path_buf.clear();
         path_buf.push("/usr/lib/debug");
@@ -521,7 +541,7 @@ impl ExportProcess {
             }
         }
 
-        // UBUNTU
+        // Ubuntu-specific path-based lookup.
         // Example path: /usr/lib/debug/path/to/binary/binaryname.so
         path_buf.clear();
         path_buf.push("/usr/lib/debug");
@@ -539,9 +559,8 @@ impl ExportProcess {
             }
         }
 
-        // FIXUP UBUNTU
-        // In some cases, Ubuntu puts symbols that should be in /usr/lib/debug/usr/lib... into
-        // /usr/lib/debug/lib...
+        // In some cases, Ubuntu puts symbols that should be in /usr/lib/debug/usr/lib/... into
+        // /usr/lib/debug/lib/...
         if bin_path.len() > 9 && &bin_path[0..9] == "/usr/lib/" {
             path_buf.clear();
             path_buf.push("/usr/lib/debug/lib/");
@@ -568,22 +587,8 @@ impl ExportProcess {
         let file_path = Path::new(filename);
         let mut matching_sym_file = None;
         if let Ok(mut reader) = self.open_file(file_path) {
-            let mut sections = Vec::new();
-            let mut section_offsets = Vec::new();
-
-            if get_section_offsets(&mut reader, None, &mut section_offsets).is_err() {
-                return None;
-            }
-
-            if get_section_metadata(&mut reader, None, SHT_NOTE, &mut sections).is_err() {
-                return None;
-            }
 
             let mut build_id_buf: [u8; 20] = [0; 20];
-            if read_build_id(&mut reader, &sections, &section_offsets, &mut build_id_buf).is_err() {
-                return None;
-            }
-
             if let Ok(sym_build_id) = get_build_id(&mut reader, &mut build_id_buf) {
                 // If the symbol file has a build id and the binary has a build_id, compare them.
                 // If one has a build id and the other does not, the symbol file does not match.

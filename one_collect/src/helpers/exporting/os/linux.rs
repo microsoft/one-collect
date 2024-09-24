@@ -278,6 +278,12 @@ impl ExportMachine {
         for proc in self.procs.values() {
             for map in proc.mappings() {
                 if let Some(key) = map.node() {
+
+                    // Handle each binary exactly once, regardless of of it's loaded into multiple processes.
+                    if self.os.binary_metadata.contains(key) {
+                        continue;
+                    }
+
                     let elf_metadata = self.os.binary_metadata.entry(*key)
                         .or_insert(ElfBinaryMetadata::new());
 
@@ -297,11 +303,7 @@ impl ExportMachine {
 
                             let mut build_id: [u8; 20] = [0; 20];
                             match read_build_id(&mut reader, &sections, &section_offsets, &mut build_id) {
-                                Ok(id) => {
-                                    if let Some(_) = id {
-                                        elf_metadata.build_id = Some(build_id);
-                                    }
-                                }
+                                Ok(id) => { elf_metadata.build_id = id.copied(); }
                                 Err(_) => {}
                             }
 
@@ -944,10 +946,17 @@ mod tests {
         let symbol_file_path = "/path/to/symbol/file";
         entry.debug_link = Some(String::from_str(symbol_file_path).unwrap());
 
+        let text_offset = 100u64;
+        entry.text_offset = Some(text_offset);
+
         assert!(metadata_lookup.contains(&dev_node_1));
         let result = metadata_lookup.get(&dev_node_1).unwrap();
         match &result.debug_link {
             Some(path) => assert_eq!(path.as_str(), symbol_file_path),
+            None => assert!(false)
+        }
+        match &result.text_offset() {
+            Some(offset) => assert_eq!(offset, &text_offset),
             None => assert!(false)
         }
 
