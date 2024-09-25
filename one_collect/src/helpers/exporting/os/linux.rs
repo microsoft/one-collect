@@ -26,6 +26,9 @@ use self::symbols::PerfMapSymbolReader;
 /* OS Specific Session Type */
 pub type Session = PerfSession;
 
+/* OS Specific Session Builder Type */
+pub type SessionBuilder = RingBufSessionBuilder;
+
 #[derive(Clone)]
 pub(crate) struct OSExportProcess {
     root_fs: Option<OpenAt>,

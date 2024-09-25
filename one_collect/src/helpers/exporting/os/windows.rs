@@ -7,6 +7,9 @@ use crate::etw::*;
 /* OS Specific Session Type */
 pub type Session = EtwSession;
 
+/* OS Specific Session Builder Type */
+pub type SessionBuilder = EtwSession;
+
 trait PushWide {
     fn push_wide_str(
         &mut self,
