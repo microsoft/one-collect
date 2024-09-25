@@ -192,12 +192,23 @@ impl ExportGraph {
                     name = short_name;
                 }
 
-                /* Set the ip */
-                target.address = ip;
+                /* Calc file address, unless anonymous */
+                let mut symbol_ip = ip;
+                if !mapping.anon() {
+                    if ip > KERNEL_START {
+                        target.address = ip;
+                    } else {
+                        target.address = ip - mapping.start();
+                        target.address += mapping.file_offset();
+
+                        // For file-backed mappings, the symbol_ip is a file offset.
+                        symbol_ip = target.address;
+                    }
+                }
 
                 /* Symbol lookup, if any */
                 for symbol in mapping.symbols() {
-                    if ip >= symbol.start() && ip <= symbol.end() {
+                    if symbol_ip >= symbol.start() && symbol_ip <= symbol.end() {
                         /* Get the actual symbol name */
                         let sym_name = match strings.from_id(symbol.name_id()) {
                             Ok(name) => { name },

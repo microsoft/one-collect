@@ -128,8 +128,10 @@ impl ExportMapping {
 
         // Anonymous and kernel symbols use a raw ip.
         let mut start_offset = 0u64;
+        let mut file_offset = 0u64;
         if !self.anon() && self.start() < KERNEL_START {
             start_offset = self.start();
+            file_offset = self.file_offset();
         }
 
         loop {
@@ -140,8 +142,8 @@ impl ExportMapping {
             let mut add_sym = false;
 
             // Convert from address relative address to ip.
-            let start_addr = sym_reader.start() + start_offset - text_offset;
-            let end_addr = sym_reader.end() + start_offset - text_offset;
+            let start_addr = sym_reader.start() + start_offset - file_offset;
+            let end_addr = sym_reader.end() + start_offset - file_offset;
 
             // Find the start address for the current symbol in unique_ips.
             match unique_ips.binary_search(&start_addr) {
@@ -166,8 +168,8 @@ impl ExportMapping {
                 // Add the symbol.
                 let symbol = ExportSymbol::new(
                     strings.to_id(demangled_name),
-                    start_addr,
-                    end_addr);
+                    sym_reader.start(),
+                    sym_reader.end());
 
                 self.add_symbol(symbol);
             }
