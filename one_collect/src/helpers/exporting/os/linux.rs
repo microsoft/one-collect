@@ -302,9 +302,8 @@ impl ExportMachine {
                             }
 
                             let mut build_id: [u8; 20] = [0; 20];
-                            match read_build_id(&mut reader, &sections, &section_offsets, &mut build_id) {
-                                Ok(id) => { elf_metadata.build_id = id.copied(); }
-                                Err(_) => {}
+                            if let Ok(id) = read_build_id(&mut reader, &sections, &section_offsets, &mut build_id) {
+                                elf_metadata.build_id = id.copied();
                             }
 
                             sections.clear();
@@ -312,17 +311,12 @@ impl ExportMachine {
                                 continue;
                             }
 
-                            let mut debug_link: [u8; 1024] = [0; 1024];
-                            match read_debug_link(&mut reader, &sections, &section_offsets, &mut debug_link) {
-                                Ok(link) => {
-                                    if let Some(_) = link {
-                                        let str_val = get_str(&debug_link);
-                                        if let Ok(string_val) = String::from_str(str_val) {
-                                            elf_metadata.debug_link = Some(string_val);
-                                        }
-                                    }
+                            let mut debug_link_buf: [u8; 1024] = [0; 1024];
+                            if let Ok(Some(debug_link)) = read_debug_link(&mut reader, &sections, &section_offsets, &mut debug_link_buf) {
+                                let str_val = get_str(debug_link);
+                                if let Ok(string_val) = String::from_str(str_val) {
+                                    elf_metadata.debug_link = Some(string_val);
                                 }
-                                Err(_) => {}
                             }
 
                             match get_text_offset(&mut reader, &sections, &section_offsets) {

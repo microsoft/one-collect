@@ -1,5 +1,6 @@
 use core::str;
 use std::fs::File;
+use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
 use crate::PathBufInteger;
@@ -29,9 +30,9 @@ impl ElfSymbolFileMatch {
         contains_symtab: bool,
         contains_dynsym: bool) -> Self {
         Self {
-            file: file,
-            contains_symtab: contains_symtab,
-            contains_dynsym: contains_dynsym
+            file,
+            contains_symtab,
+            contains_dynsym
         }
     }
 }
@@ -500,9 +501,12 @@ impl ExportProcess {
         // Build-id-based debuginfo.
         if let Some(build_id) = metadata.build_id() {
             // Convert the build id to a String.
-            let build_id_string: String = build_id.iter().map(
-                |byte| format!("{:02x}", byte))
-                .collect();
+            let build_id_string: String = build_id.iter().fold(
+                String::default(),
+                |mut str, byte| {
+                    write!(&mut str, "{:02x}", byte).unwrap_or_default();
+                    str
+                });
             path_buf.clear();
             path_buf.push("/usr/lib/debug/.build-id/");
             path_buf.push(format!("{}/{}.debug",
@@ -621,7 +625,7 @@ impl ExportProcess {
             if get_section_metadata(&mut reader, None, SHT_SYMTAB, &mut sections).is_err() {
                 return None;
             }
-            if sections.len() > 0 {
+            if !sections.is_empty() {
                 contains_symtab = true;
             }
 
@@ -629,7 +633,7 @@ impl ExportProcess {
             if get_section_metadata(&mut reader, None, SHT_DYNSYM, &mut sections).is_err() {
                 return None;
             }
-            if sections.len() > 0 {
+            if !sections.is_empty() {
                 contains_dynsym = true;
             }
 
