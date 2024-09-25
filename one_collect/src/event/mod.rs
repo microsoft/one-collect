@@ -384,6 +384,17 @@ impl EventFormat {
         &self.fields
     }
 
+    /// Returns a reference to an `EventField` based on the reference.
+    ///
+    /// # Returns
+    ///
+    /// An `EventField` if the field exists, panics otherwise.
+    pub fn get_field_unchecked(
+        &self,
+        field: EventFieldRef) -> &EventField {
+        &self.fields[usize::from(field)]
+    }
+
     /// Returns a reference to an `EventField` in the `fields` vector based on its name, if it exists.
     /// This method does not perform any bounds checking.
     ///
@@ -393,7 +404,7 @@ impl EventFormat {
     ///
     /// # Returns
     ///
-    /// An `EventFieldRef` if a field with the given name exists, `None` otherwise.
+    /// An `EventFieldRef` if a field with the given name exists, panics otherwise.
     pub fn get_field_ref_unchecked(
         &self,
         name: &str) -> EventFieldRef {
@@ -453,6 +464,10 @@ impl EventFormat {
             },
 
             LocationType::StaticString => {
+                if field.offset > data.len() {
+                    return EMPTY;
+                }
+
                 let slice = &data[field.offset..];
                 let mut len = 0usize;
                 
@@ -468,6 +483,10 @@ impl EventFormat {
             },
 
             LocationType::StaticUTF16String => {
+                if field.offset > data.len() {
+                    return EMPTY;
+                }
+
                 let slice = &data[field.offset..];
                 let chunks = slice.chunks_exact(2);
                 let mut len = 0usize;

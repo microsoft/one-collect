@@ -134,6 +134,15 @@ impl AncillaryData {
         }
     }
 
+    pub fn version(&self) -> u8 {
+        match self.event {
+            Some(event) => {
+                unsafe { (*event).EventHeader.EventDescriptor.Version }
+            },
+            None => { 0 },
+        }
+    }
+
     pub fn callstack(
         &self,
         frames: &mut Vec<u64>,
@@ -255,6 +264,8 @@ impl SessionCallbackContext {
 }
 
 type SendClosure = Box<dyn Fn(&SessionCallbackContext) + Send + 'static>;
+type NoSendClosure = Box<dyn Fn(&SessionCallbackContext) + 'static>;
+type SessionClosure = Box<dyn Fn(&mut EtwSession) -> anyhow::Result<()> + 'static>;
 
 pub struct EtwSession {
     enabled: HashMap<Guid, TraceEnable>,
@@ -263,10 +274,11 @@ pub struct EtwSession {
 
     /* Callbacks */
     event_error_callback: Option<Box<dyn Fn(&Event, &anyhow::Error)>>,
+    built_callbacks: Option<Vec<SessionClosure>>,
     starting_callbacks: Option<Vec<SendClosure>>,
     started_callbacks: Option<Vec<SendClosure>>,
     stopping_callbacks: Option<Vec<SendClosure>>,
-    stopped_callbacks: Option<Vec<SendClosure>>,
+    stopped_callbacks: Option<Vec<NoSendClosure>>,
 
     /* Ancillary data */
     ancillary: Writable<AncillaryData>,
@@ -310,6 +322,7 @@ impl EtwSession {
 
             /* Callbacks */
             event_error_callback: None,
+            built_callbacks: Some(Vec::new()),
             starting_callbacks: Some(Vec::new()),
             started_callbacks: Some(Vec::new()),
             stopping_callbacks: Some(Vec::new()),
@@ -324,10 +337,22 @@ impl EtwSession {
         }
     }
 
+    pub fn needs_kernel_callstacks(&self) -> bool {
+        !self.kernel_callstacks.is_empty()
+    }
+
     pub fn set_event_error_callback(
         &mut self,
         callback: impl Fn(&Event, &anyhow::Error) + 'static) {
         self.event_error_callback = Some(Box::new(callback));
+    }
+
+    pub fn add_built_callback(
+        &mut self,
+        callback: impl Fn(&mut EtwSession) -> anyhow::Result<()> + 'static) {
+        if let Some(callbacks) = self.built_callbacks.as_mut() {
+            callbacks.push(Box::new(callback));
+        }
     }
 
     pub fn add_starting_callback(
@@ -356,7 +381,7 @@ impl EtwSession {
 
     pub fn add_stopped_callback(
         &mut self,
-        callback: impl Fn(&SessionCallbackContext) + Send + 'static) {
+        callback: impl Fn(&SessionCallbackContext) + 'static) {
         if let Some(callbacks) = self.stopped_callbacks.as_mut() {
             callbacks.push(Box::new(callback));
         }
@@ -794,6 +819,13 @@ impl EtwSession {
         until: impl FnOnce() + Send + 'static) -> anyhow::Result<()> {
         let mut session = TraceSession::new(name.into());
 
+        /* Run self mutating callbacks for on-demand dynamic hooks */
+        if let Some(callbacks) = self.built_callbacks.take() {
+            for callback in callbacks {
+                callback(&mut self)?;
+            }
+        }
+
         if self.elevate {
             session.enable_privilege("SeDebugPrivilege");
             session.enable_privilege("SeSystemProfilePrivilege");
@@ -805,11 +837,11 @@ impl EtwSession {
 
         session.start()?;
 
+        let handle = session.handle();
+
         if !self.kernel_callstacks.is_empty() {
             session.enable_kernel_callstacks(&self.kernel_callstacks)?;
         }
-        
-        let handle = session.handle();
 
         let enabled = self.take_enabled();
         let mut events = self.take_events();
@@ -817,7 +849,6 @@ impl EtwSession {
         let starting_callbacks = self.starting_callbacks.take();
         let started_callbacks = self.started_callbacks.take();
         let stopping_callbacks = self.stopping_callbacks.take();
-        let stopped_callbacks = self.stopped_callbacks.take();
 
         let thread = thread::spawn(move || -> anyhow::Result<()> {
             let context = SessionCallbackContext::new(handle);
@@ -877,13 +908,6 @@ impl EtwSession {
 
             TraceSession::remote_stop(handle);
 
-            /* Run stopped hooks */
-            if let Some(callbacks) = stopped_callbacks {
-                for callback in callbacks {
-                    callback(&context);
-                }
-            }
-
             Ok(())
         });
 
@@ -931,6 +955,15 @@ impl EtwSession {
                 }
             }
         }));
+
+        let context = SessionCallbackContext::new(0);
+
+        /* Run stopped hooks */
+        if let Some(callbacks) = &self.stopped_callbacks {
+            for callback in callbacks {
+                callback(&context);
+            }
+        }
 
         if result.is_err() {
             return result;
