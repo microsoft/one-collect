@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 
 use crate::PathBufInteger;
 use crate::intern::InternedCallstacks;
+
+#[cfg(target_os = "linux")]
 use crate::helpers::exporting::os::{ElfBinaryMetadata, ElfBinaryMetadataLookup};
 
 #[cfg(target_os = "linux")]
@@ -12,7 +14,9 @@ use crate::openat::OpenAt;
 #[cfg(target_os = "linux")]
 use crate::procfs;
 
+#[cfg(target_os = "linux")]
 use ruwind::elf::{build_id_equals, get_build_id, get_section_metadata, SHT_SYMTAB, SHT_DYNSYM};
+
 use ruwind::{CodeSection, Unwindable};
 use symbols::ElfSymbolReader;
 
@@ -294,6 +298,7 @@ impl ExportProcess {
         }
     }
 
+    #[cfg(target_os = "linux")]
     pub fn add_matching_elf_symbols(
         &mut self,
         elf_metadata: &ElfBinaryMetadataLookup,
@@ -366,6 +371,7 @@ impl ExportProcess {
         }
     }
 
+    #[cfg(target_os = "linux")]
     fn find_symbol_files<'a>(
         &self,
         bin_path: &str,
@@ -587,6 +593,7 @@ impl ExportProcess {
         }
     }
 
+    #[cfg(target_os = "linux")]
     fn check_candidate_symbol_file(
         &self,
         binary_build_id: Option<&[u8; 20]>,
