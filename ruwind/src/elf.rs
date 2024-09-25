@@ -557,7 +557,7 @@ pub fn get_section_metadata(
 pub fn read_section_name<'a>(
     reader: &mut (impl Read + Seek),
     section: &SectionMetadata,
-    section_offsets: &Vec<u64>,
+    section_offsets: &[u64],
     buf: &'a mut [u8]) -> Result<&'a str, Error> {
     let mut str_offset = 0u64;
 

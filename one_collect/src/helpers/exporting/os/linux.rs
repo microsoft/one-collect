@@ -319,11 +319,8 @@ impl ExportMachine {
                                 }
                             }
 
-                            match get_text_offset(&mut reader, &sections, &section_offsets) {
-                                Ok(offset) => {
-                                    elf_metadata.text_offset = offset;
-                                },
-                                Err(_) => {}
+                            if let Ok(offset) = get_text_offset(&mut reader, &sections, &section_offsets) {
+                                elf_metadata.text_offset = offset;
                             }
                         }
                     }
