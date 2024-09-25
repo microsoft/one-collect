@@ -395,7 +395,7 @@ fn get_va_start64(
         reader.read_exact(
             slice::from_raw_parts_mut(
                 &mut header as *mut _ as *mut u8,
-                size_of::<ElfHeader32>()))?;
+                size_of::<ElfHeader64>()))?;
     }
 
     let sec_count = header.e_phnum as u32;
