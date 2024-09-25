@@ -3,9 +3,11 @@ use std::cmp::Ordering;
 use ruwind::{CodeSection, ModuleKey};
 
 use super::*;
+use super::lookup::*;
 
 #[derive(Clone)]
 pub struct ExportMapping {
+    time: u64,
     filename_id: usize,
     start: u64,
     end: u64,
@@ -63,6 +65,7 @@ impl CodeSection for ExportMapping {
 
 impl ExportMapping {
     pub fn new(
+        time: u64,
         filename_id: usize,
         start: u64,
         end: u64,
@@ -70,6 +73,7 @@ impl ExportMapping {
         anon: bool,
         id: usize) -> Self {
         Self {
+            time,
             filename_id,
             start,
             end,
@@ -86,6 +90,8 @@ impl ExportMapping {
         node: ExportDevNode) {
         self.node = Some(node);
     }
+
+    pub fn time(&self) -> u64 { self.time }
 
     pub fn filename_id(&self) -> usize { self.filename_id }
 
@@ -159,5 +165,224 @@ impl ExportMapping {
                 }
             }
         }
+    }
+}
+
+pub struct ExportMappingLookup {
+    lookup: Writable<AddressLookup>,
+    mappings: Vec<ExportMapping>,
+    min_lookup: usize,
+}
+
+impl Default for ExportMappingLookup {
+    fn default() -> Self {
+        Self {
+            lookup: Writable::new(AddressLookup::default()),
+            mappings: Vec::new(),
+            min_lookup: 16,
+        }
+    }
+}
+
+impl Clone for ExportMappingLookup {
+    fn clone(&self) -> Self {
+        Self {
+            lookup: Writable::new(AddressLookup::default()),
+            mappings: self.mappings.clone(),
+            min_lookup: self.min_lookup,
+        }
+    }
+}
+
+impl ExportMappingLookup {
+    pub fn set_lookup_min_size(
+        &mut self,
+        min_lookup: usize) {
+        self.min_lookup = min_lookup;
+    }
+
+    pub fn mappings_mut(&mut self) -> &mut Vec<ExportMapping> {
+        /* Mutations must clear lookup */
+        self.lookup.borrow_mut().clear();
+
+        &mut self.mappings
+    }
+
+    pub fn mappings(&self) -> &Vec<ExportMapping> { &self.mappings }
+
+    fn build_lookup(&self) {
+        let mut items = Vec::new();
+
+        for (i, mapping) in self.mappings.iter().enumerate() {
+            let index = i as u32;
+
+            items.push(
+                AddressLookupItem::new(
+                    mapping.start(),
+                    index,
+                    true));
+
+            items.push(
+                AddressLookupItem::new(
+                    mapping.end(),
+                    index,
+                    false));
+        }
+
+        self.lookup.borrow_mut().update(&mut items);
+    }
+
+    pub fn find(
+        &self,
+        address: u64,
+        time: Option<u64>) -> Option<&ExportMapping> {
+        let time = match time {
+            Some(time) => { time },
+            None => { u64::MAX },
+        };
+
+        let mut best: Option<&ExportMapping> = None;
+
+        if self.mappings.len() >= self.min_lookup {
+            /* Many items, ensure a lookup and use it */
+            if self.lookup.borrow().is_empty() {
+                /* Refresh lookup */
+                self.build_lookup();
+            }
+
+            for index in self.lookup.borrow_mut().find(address) {
+                let map = &self.mappings[*index as usize];
+
+                if map.contains_ip(address) && map.time() <= time {
+                    match best {
+                        Some(existing) => {
+                            if map.time() > existing.time() {
+                                best = Some(map);
+                            }
+                        },
+                        None => { best = Some(map); },
+                    }
+                }
+            }
+        } else {
+            /* Minimal items, no lookup, scan range */
+            for map in &self.mappings {
+                if map.contains_ip(address) && map.time() <= time {
+                    match best {
+                        Some(existing) => {
+                            if map.time() > existing.time() {
+                                best = Some(map);
+                            }
+                        },
+                        None => { best = Some(map); },
+                    }
+                }
+            }
+        }
+
+        best
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn new_map(
+        time: u64,
+        start: u64,
+        end: u64,
+        id: usize) -> ExportMapping {
+        ExportMapping::new(time, 0, start, end, 0, false, id)
+    }
+
+    #[test]
+    fn lookup() {
+        let mappings = vec!(
+            new_map(0, 0, 1023, 1),
+            new_map(0, 2048, 3071, 3),
+            new_map(0, 1024, 2047, 2),
+            new_map(100, 128, 255, 4),
+        );
+
+        let mut lookup = ExportMappingLookup::default();
+
+        for mapping in mappings {
+            lookup.mappings_mut().push(mapping);
+        }
+
+        /* No Time: Linear */
+        lookup.set_lookup_min_size(usize::MAX);
+        assert_eq!(1, lookup.find(0, None).unwrap().id());
+        assert_eq!(2, lookup.find(1024, None).unwrap().id());
+        assert_eq!(3, lookup.find(2048, None).unwrap().id());
+        assert_eq!(4, lookup.find(128, None).unwrap().id());
+
+        /* No Time: Lookup */
+        lookup.set_lookup_min_size(0);
+        assert_eq!(1, lookup.find(0, None).unwrap().id());
+        assert_eq!(2, lookup.find(1024, None).unwrap().id());
+        assert_eq!(3, lookup.find(2048, None).unwrap().id());
+        assert_eq!(4, lookup.find(128, None).unwrap().id());
+
+        /* Time: Linear */
+        lookup.set_lookup_min_size(usize::MAX);
+        assert_eq!(1, lookup.find(0, Some(0)).unwrap().id());
+        assert_eq!(2, lookup.find(1024, Some(0)).unwrap().id());
+        assert_eq!(3, lookup.find(2048, Some(0)).unwrap().id());
+        assert_eq!(1, lookup.find(128, Some(0)).unwrap().id());
+        assert_eq!(4, lookup.find(128, Some(100)).unwrap().id());
+
+        /* Time: Lookup */
+        lookup.set_lookup_min_size(0);
+        assert_eq!(1, lookup.find(0, Some(0)).unwrap().id());
+        assert_eq!(2, lookup.find(1024, Some(0)).unwrap().id());
+        assert_eq!(3, lookup.find(2048, Some(0)).unwrap().id());
+        assert_eq!(1, lookup.find(128, Some(0)).unwrap().id());
+        assert_eq!(4, lookup.find(128, Some(100)).unwrap().id());
+
+        lookup.mappings_mut().push(new_map(200, 0, 3071, 5));
+
+        lookup.set_lookup_min_size(usize::MAX);
+
+        /* No Time: Large span Linear */
+        assert_eq!(5, lookup.find(0, None).unwrap().id());
+        assert_eq!(5, lookup.find(1024, None).unwrap().id());
+        assert_eq!(5, lookup.find(2048, None).unwrap().id());
+        assert_eq!(5, lookup.find(128, None).unwrap().id());
+
+        /* Time: Large span Linear */
+        assert_eq!(1, lookup.find(0, Some(0)).unwrap().id());
+        assert_eq!(2, lookup.find(1024, Some(0)).unwrap().id());
+        assert_eq!(3, lookup.find(2048, Some(0)).unwrap().id());
+        assert_eq!(1, lookup.find(128, Some(0)).unwrap().id());
+        assert_eq!(4, lookup.find(128, Some(100)).unwrap().id());
+
+        assert_eq!(5, lookup.find(0, Some(200)).unwrap().id());
+        assert_eq!(5, lookup.find(1024, Some(200)).unwrap().id());
+        assert_eq!(5, lookup.find(2048, Some(200)).unwrap().id());
+        assert_eq!(5, lookup.find(128, Some(200)).unwrap().id());
+        assert_eq!(5, lookup.find(128, Some(200)).unwrap().id());
+
+        lookup.set_lookup_min_size(0);
+
+        /* No Time: Large span Lookup */
+        assert_eq!(5, lookup.find(0, None).unwrap().id());
+        assert_eq!(5, lookup.find(1024, None).unwrap().id());
+        assert_eq!(5, lookup.find(2048, None).unwrap().id());
+        assert_eq!(5, lookup.find(128, None).unwrap().id());
+
+        /* Time: Large span Lookup */
+        assert_eq!(1, lookup.find(0, Some(0)).unwrap().id());
+        assert_eq!(2, lookup.find(1024, Some(0)).unwrap().id());
+        assert_eq!(3, lookup.find(2048, Some(0)).unwrap().id());
+        assert_eq!(1, lookup.find(128, Some(0)).unwrap().id());
+        assert_eq!(4, lookup.find(128, Some(100)).unwrap().id());
+
+        assert_eq!(5, lookup.find(0, Some(200)).unwrap().id());
+        assert_eq!(5, lookup.find(1024, Some(200)).unwrap().id());
+        assert_eq!(5, lookup.find(2048, Some(200)).unwrap().id());
+        assert_eq!(5, lookup.find(128, Some(200)).unwrap().id());
+        assert_eq!(5, lookup.find(128, Some(200)).unwrap().id());
     }
 }

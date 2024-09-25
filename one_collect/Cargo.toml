@@ -27,3 +27,7 @@ harness = false
 [[bench]]
 name = "intern"
 harness = false
+
+[[bench]]
+name = "export"
+harness = false
