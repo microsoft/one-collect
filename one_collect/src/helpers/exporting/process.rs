@@ -23,25 +23,6 @@ use symbols::ElfSymbolReader;
 use super::*;
 use super::mappings::ExportMappingLookup;
 
-struct ElfSymbolFileMatch {
-    file: File,
-    contains_symtab: bool,
-    contains_dynsym: bool,
-}
-
-impl ElfSymbolFileMatch {
-    fn new(
-        file: File,
-        contains_symtab: bool,
-        contains_dynsym: bool) -> Self {
-        Self {
-            file,
-            contains_symtab,
-            contains_dynsym
-        }
-    }
-}
-
 #[derive(Clone, Copy)]
 pub struct ExportProcessSample {
     time: u64,
@@ -346,12 +327,9 @@ impl ExportProcess {
             // then we should not proceed.
             if let Some(metadata) = elf_metadata.get(dev_node) {
 
-                // Find the set of symbol files, including the binary.
-                let mut symbol_files = Vec::new();
-                self.find_symbol_files(filename, metadata, &mut symbol_files);
-                
-                for symbol_file in symbol_files {
-                    let mut sym_reader = ElfSymbolReader::new(symbol_file.file);
+                // Find a matching symbol file.
+                if let Some(sym_file) = self.find_symbol_file(filename, metadata) {                
+                    let mut sym_reader = ElfSymbolReader::new(sym_file);
                     let map_mut = self.mappings.mappings_mut().get_mut(map_index).unwrap();
                     let text_offset = metadata.text_offset().unwrap_or(0);
 
@@ -366,15 +344,12 @@ impl ExportProcess {
     }
 
     #[cfg(target_os = "linux")]
-    fn find_symbol_files<'a>(
+    fn find_symbol_file<'a>(
         &self,
         bin_path: &str,
-        metadata: &ElfBinaryMetadata,
-        matching_symbol_files: &mut Vec<ElfSymbolFileMatch>) {
+        metadata: &ElfBinaryMetadata) -> Option<File> {
 
-        // Keep evaluating symbol files until we have one or two files that contain symtab and dynsym sections.
-        let mut contains_symtab = false;
-        let mut contains_dynsym = false;
+        // Keep evaluating symbol files until we find a matching one with a symtab.
         let mut path_buf = PathBuf::new();
 
         // Look at the binary itself.
@@ -382,14 +357,7 @@ impl ExportProcess {
         if let Some(sym_file) = self.check_candidate_symbol_file(
             metadata.build_id(),
             &path_buf) {
-            contains_symtab |= sym_file.contains_symtab;
-            contains_dynsym |= sym_file.contains_dynsym;
-            matching_symbol_files.push(sym_file);
-
-            // We've found everything we need.
-            if contains_symtab && contains_dynsym {
-                return;
-            }
+            return Some(sym_file);
         }
 
         // Look next to the binary.
@@ -398,14 +366,7 @@ impl ExportProcess {
         if let Some(sym_file) = self.check_candidate_symbol_file(
             metadata.build_id(),
             &path_buf) {
-            contains_symtab |= sym_file.contains_symtab;
-            contains_dynsym |= sym_file.contains_dynsym;
-            matching_symbol_files.push(sym_file);
-
-            // We've found everything we need.
-            if contains_symtab && contains_dynsym {
-                return;
-            }
+            return Some(sym_file);
         }
 
         path_buf.clear();
@@ -413,14 +374,7 @@ impl ExportProcess {
         if let Some(sym_file) = self.check_candidate_symbol_file(
             metadata.build_id(),
             &path_buf) {
-            contains_symtab |= sym_file.contains_symtab;
-            contains_dynsym |= sym_file.contains_dynsym;
-            matching_symbol_files.push(sym_file);
-
-            // We've found everything we need.
-            if contains_symtab && contains_dynsym {
-                return;
-            }
+            return Some(sym_file);
         }
 
         // Debug link.
@@ -432,14 +386,7 @@ impl ExportProcess {
             if let Some(sym_file) = self.check_candidate_symbol_file(
                 metadata.build_id(),
                 &path_buf) {
-                contains_symtab |= sym_file.contains_symtab;
-                contains_dynsym |= sym_file.contains_dynsym;
-                matching_symbol_files.push(sym_file);
-
-                // We've found everything we need.
-                if contains_symtab && contains_dynsym {
-                    return;
-                }
+                return Some(sym_file);
             }
 
             // These lookups require the directory path containing the binary.
@@ -454,14 +401,7 @@ impl ExportProcess {
                 if let Some(sym_file) = self.check_candidate_symbol_file(
                     metadata.build_id(),
                     &path_buf) {
-                    contains_symtab |= sym_file.contains_symtab;
-                    contains_dynsym |= sym_file.contains_dynsym;
-                    matching_symbol_files.push(sym_file);
-
-                    // We've found everything we need.
-                    if contains_symtab && contains_dynsym {
-                        return;
-                    }
+                    return Some(sym_file);
                 }
 
                 // Open /path/to/binary/.debug/debug_link.
@@ -472,14 +412,7 @@ impl ExportProcess {
                 if let Some(sym_file) = self.check_candidate_symbol_file(
                     metadata.build_id(),
                     &path_buf) {
-                    contains_symtab |= sym_file.contains_symtab;
-                    contains_dynsym |= sym_file.contains_dynsym;
-                    matching_symbol_files.push(sym_file);
-
-                    // We've found everything we need.
-                    if contains_symtab && contains_dynsym {
-                        return;
-                    }
+                    return Some(sym_file);
                 }
 
                 // Open /usr/lib/debug/path/to/binary/debug_link.
@@ -490,14 +423,7 @@ impl ExportProcess {
                 if let Some(sym_file) = self.check_candidate_symbol_file(
                     metadata.build_id(),
                     &path_buf) {
-                    contains_symtab |= sym_file.contains_symtab;
-                    contains_dynsym |= sym_file.contains_dynsym;
-                    matching_symbol_files.push(sym_file);
-
-                    // We've found everything we need.
-                    if contains_symtab && contains_dynsym {
-                        return;
-                    }
+                    return Some(sym_file);
                 }
             }
         }
@@ -519,14 +445,7 @@ impl ExportProcess {
             if let Some(sym_file) = self.check_candidate_symbol_file(
                 metadata.build_id(),
                 &path_buf) {
-                contains_symtab |= sym_file.contains_symtab;
-                contains_dynsym |= sym_file.contains_dynsym;
-                matching_symbol_files.push(sym_file);
-
-                // We've found everything we need.
-                if contains_symtab && contains_dynsym {
-                    return;
-                }
+                return Some(sym_file);
             }
         }
 
@@ -538,14 +457,7 @@ impl ExportProcess {
         if let Some(sym_file) = self.check_candidate_symbol_file(
             metadata.build_id(),
             &path_buf) {
-            contains_symtab |= sym_file.contains_symtab;
-            contains_dynsym |= sym_file.contains_dynsym;
-            matching_symbol_files.push(sym_file);
-
-            // We've found everything we need.
-            if contains_symtab && contains_dynsym {
-                return;
-            }
+            return Some(sym_file);
         }
 
         // Ubuntu-specific path-based lookup.
@@ -556,14 +468,7 @@ impl ExportProcess {
         if let Some(sym_file) = self.check_candidate_symbol_file(
             metadata.build_id(),
             &path_buf) {
-            contains_symtab |= sym_file.contains_symtab;
-            contains_dynsym |= sym_file.contains_dynsym;
-            matching_symbol_files.push(sym_file);
-
-            // We've found everything we need.
-            if contains_symtab && contains_dynsym {
-                return;
-            }
+            return Some(sym_file);
         }
 
         // In some cases, Ubuntu puts symbols that should be in /usr/lib/debug/usr/lib/... into
@@ -575,23 +480,18 @@ impl ExportProcess {
             if let Some(sym_file) = self.check_candidate_symbol_file(
                 metadata.build_id(),
                 &path_buf) {
-                contains_symtab |= sym_file.contains_symtab;
-                contains_dynsym |= sym_file.contains_dynsym;
-                matching_symbol_files.push(sym_file);
-
-                // We've found everything we need.
-                if contains_symtab && contains_dynsym {
-                    return;
-                }
+                return Some(sym_file);
             }
         }
+
+        None
     }
 
     #[cfg(target_os = "linux")]
     fn check_candidate_symbol_file(
         &self,
         binary_build_id: Option<&[u8; 20]>,
-        filename: &PathBuf) -> Option<ElfSymbolFileMatch> {
+        filename: &PathBuf) -> Option<File> {
         let file_path = Path::new(filename);
         let mut matching_sym_file = None;
         if let Ok(mut reader) = self.open_file(file_path) {
@@ -624,31 +524,12 @@ impl ExportProcess {
 
         // If we found a match, look for symbols in the file.
         if let Some(mut reader) = matching_sym_file {
-            let mut contains_symtab = false;
-            let mut contains_dynsym = false;
             let mut sections = Vec::new();
             if get_section_metadata(&mut reader, None, SHT_SYMTAB, &mut sections).is_err() {
                 return None;
             }
             if !sections.is_empty() {
-                contains_symtab = true;
-            }
-
-            sections.clear();
-            if get_section_metadata(&mut reader, None, SHT_DYNSYM, &mut sections).is_err() {
-                return None;
-            }
-            if !sections.is_empty() {
-                contains_dynsym = true;
-            }
-
-            if contains_dynsym || contains_symtab {
-                let elf_match = ElfSymbolFileMatch::new(
-                    reader,
-                    contains_symtab,
-                    contains_dynsym);
-
-                return Some(elf_match);
+                return Some(reader);
             }
         }
 
