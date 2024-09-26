@@ -8,6 +8,8 @@ use crate::intern::{InternedStrings, InternedCallstacks};
 
 use crate::helpers::callstack::CallstackHelper;
 
+mod lookup;
+
 #[cfg_attr(target_os = "linux", path = "os/linux.rs")]
 #[cfg_attr(target_os = "windows", path = "os/windows.rs")]
 pub mod os;
@@ -240,9 +242,8 @@ pub struct ExportSettings {
 }
 
 impl ExportSettings {
-    pub fn new(callstack_helper: CallstackHelper) -> Self {
-        let mut callstack_helper = callstack_helper;
-
+    #[allow(unused_mut)]
+    pub fn new(mut callstack_helper: CallstackHelper) -> Self {
         Self {
             string_buckets: 64,
             callstack_buckets: 512,
@@ -431,6 +432,7 @@ impl ExportMachine {
 
     pub(crate) fn add_mmap_exec(
         &mut self,
+        time: u64,
         pid: u32,
         addr: u64,
         len: u64,
@@ -445,6 +447,7 @@ impl ExportMachine {
             filename.starts_with("//anon");
 
         let mut mapping = ExportMapping::new(
+            time,
             self.intern(filename),
             addr,
             addr + len - 1,

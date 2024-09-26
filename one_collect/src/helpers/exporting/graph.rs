@@ -173,24 +173,26 @@ impl ExportGraph {
         &mut self,
         exporter: &ExportMachine,
         process: &ExportProcess,
+        time: u64,
         ip: u64) -> Target {
+        /* '/' on Linux and '\\' on Windows */
+        const SLASH: char = std::path::MAIN_SEPARATOR;
+
         let strings = exporter.strings();
         let mut target = Target::default();
-        let mut found = false;
 
-        for mapping in process.mappings() {
-            if mapping.contains_ip(ip) {
-                let mut resolvable = Resolvable::default();
+        if let Some(mapping) = process.find_mapping(ip, Some(time)) {
+            let mut resolvable = Resolvable::default();
 
-                let mut name = match strings.from_id(mapping.filename_id()) {
-                    Ok(name) => { name },
-                    Err(_) => { UNKNOWN },
-                };
+            let mut name = match strings.from_id(mapping.filename_id()) {
+                Ok(name) => { name },
+                Err(_) => { UNKNOWN },
+            };
 
-                /* Trim file name to the short name, not full path */
-                if let Some(short_name) = name.rsplit('/').next() {
-                    name = short_name;
-                }
+            /* Trim file name to the short name, not full path */
+            if let Some(short_name) = name.rsplit(SLASH).next() {
+                name = short_name;
+            }
 
                 /* Calc file address, unless anonymous */
                 let mut symbol_ip = ip;
@@ -237,25 +239,19 @@ impl ExportGraph {
                         }
                         */
 
-                        target.method_id = self.strings.to_id(sym_name);
-                        break;
-                    }
+                    target.method_id = self.strings.to_id(sym_name);
+                    break;
                 }
-
-                /*
-                 * TODO
-                 * Version and Symbol Signature strings
-                 * Need mappings to support these
-                 */
-                resolvable.name_id = self.strings.to_id(name);
-                target.resolvable_id = self.import_resolvable(resolvable);
-                found = true;
-
-                break;
             }
-        }
 
-        if !found {
+            /*
+             * TODO
+             * Version and Symbol Signature strings
+             * Need mappings to support these
+             */
+            resolvable.name_id = self.strings.to_id(name);
+            target.resolvable_id = self.import_resolvable(resolvable);
+        } else {
             /* Completely unknown sample */
             let mut resolvable = Resolvable::default();
             resolvable.name_id = self.strings.to_id(UNKNOWN);
@@ -279,6 +275,7 @@ impl ExportGraph {
 
             let callstack_id = sample.callstack_id();
             let value = sample.value();
+            let time = sample.time();
 
             /* Import common frames, if not already */
             let id = match callstack_id_to_node.entry(callstack_id) {
@@ -312,6 +309,7 @@ impl ExportGraph {
                         let target = self.import_ip(
                             exporter,
                             process,
+                            time,
                             ip);
 
                         id = self.merge(
@@ -329,6 +327,7 @@ impl ExportGraph {
             let target = self.import_ip(
                 exporter,
                 process,
+                time,
                 sample.ip());
 
             /* Merge top frame */
@@ -367,6 +366,7 @@ mod tests {
 
         for i in 0..16 {
             exporter.add_mmap_exec(
+                0,
                 1,
                 i,
                 1,

@@ -252,13 +252,13 @@ impl ProviderEvents {
 }
 
 pub struct SessionCallbackContext {
-    handle: u64,
+    _handle: u64,
 }
 
 impl SessionCallbackContext {
     fn new(handle: u64) -> Self {
         SessionCallbackContext {
-            handle,
+            _handle: handle,
         }
     }
 }
