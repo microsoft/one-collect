@@ -148,17 +148,17 @@ impl ExportMapping {
             let mut add_sym = false;
 
             // Convert from address relative address to ip.
-            let start_addr = sym_reader.start() + start_offset - file_offset;
-            let end_addr = sym_reader.end() + start_offset - file_offset;
+            let start_ip = sym_reader.start() + start_offset - file_offset;
+            let end_ip = sym_reader.end() + start_offset - file_offset;
 
             // Find the start address for the current symbol in unique_ips.
-            match unique_ips.binary_search(&start_addr) {
+            match unique_ips.binary_search(&start_ip) {
                 Ok(_) => { 
                     add_sym = true;
                 },
                 Err(i) => {
                     let addr = *unique_ips.get(i).unwrap_or(&0u64);
-                    if unique_ips.len() > i && addr < end_addr {
+                    if unique_ips.len() > i && addr < end_ip {
                         add_sym = true;
                     }
                 }
@@ -174,8 +174,8 @@ impl ExportMapping {
                 // Add the symbol.
                 let symbol = ExportSymbol::new(
                     strings.to_id(demangled_name),
-                    sym_reader.start(),
-                    sym_reader.end());
+                    start_ip,
+                    end_ip);
 
                 self.add_symbol(symbol);
             }

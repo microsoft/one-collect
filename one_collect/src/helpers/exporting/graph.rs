@@ -194,50 +194,46 @@ impl ExportGraph {
                 name = short_name;
             }
 
-                /* Calc file address, unless anonymous */
-                let mut symbol_ip = ip;
-                if !mapping.anon() {
-                    if ip > KERNEL_START {
-                        target.address = ip;
-                    } else {
-                        target.address = ip - mapping.start();
-                        target.address += mapping.file_offset();
-
-                        // For file-backed mappings, the symbol_ip is a file offset.
-                        symbol_ip = target.address;
-                    }
+            /* Calc file address, unless anonymous */
+            if !mapping.anon() {
+                if ip > KERNEL_START {
+                    target.address = ip;
+                } else {
+                    target.address = ip - mapping.start();
+                    target.address += mapping.file_offset();
                 }
+            }
 
-                /* Symbol lookup, if any */
-                for symbol in mapping.symbols() {
-                    if symbol_ip >= symbol.start() && symbol_ip <= symbol.end() {
-                        /* Get the actual symbol name */
-                        let sym_name = match strings.from_id(symbol.name_id()) {
-                            Ok(name) => { name },
-                            Err(_) => { UNKNOWN },
-                        };
+            /* Symbol lookup, if any */
+            for symbol in mapping.symbols() {
+                if ip >= symbol.start() && ip <= symbol.end() {
+                    /* Get the actual symbol name */
+                    let sym_name = match strings.from_id(symbol.name_id()) {
+                        Ok(name) => { name },
+                        Err(_) => { UNKNOWN },
+                    };
 
-                        // This is not functioning properly for native code, and removes the module name.
-                        /* 
-                        /* Check for method segments */
-                        let mut parts = sym_name.rsplitn(2, "::");
+                    // This is not functioning properly for native code, and removes the module name.
+                    /*
+                    /* Check for method segments */
+                    let mut parts = sym_name.rsplitn(2, "::");
 
-                        /*
-                         * If we got 2, then treat up to the last "::"
-                         * as the namespace and treat the last segment
-                         * as the method.
-                         */
-
-                        if let Some(method_) = parts.next() {
-                            if let Some(namespace_) = parts.next() {
-                                /* Use namespace as resolvable name */
-                                name = namespace_;
-
-                                /* Use method name as the symbol name */
-                                sym_name = method_;
-                            }
-                        }
+                    /*
+                        * If we got 2, then treat up to the last "::"
+                        * as the namespace and treat the last segment
+                        * as the method.
                         */
+
+                    if let Some(method_) = parts.next() {
+                        if let Some(namespace_) = parts.next() {
+                            /* Use namespace as resolvable name */
+                            name = namespace_;
+
+                            /* Use method name as the symbol name */
+                            sym_name = method_;
+                        }
+                    }
+                    */
 
                     target.method_id = self.strings.to_id(sym_name);
                     break;
@@ -251,7 +247,8 @@ impl ExportGraph {
              */
             resolvable.name_id = self.strings.to_id(name);
             target.resolvable_id = self.import_resolvable(resolvable);
-        } else {
+        }
+        else {
             /* Completely unknown sample */
             let mut resolvable = Resolvable::default();
             resolvable.name_id = self.strings.to_id(UNKNOWN);
