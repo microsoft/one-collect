@@ -88,6 +88,8 @@ pub struct ElfSymbolIterator<'a> {
     section_offsets: Vec<u64>,
     section_str_offset: u64,
 
+    load_offset: u64,
+
     entry_count: u64,
     entry_index: u64,
 
@@ -104,6 +106,7 @@ impl<'a> ElfSymbolIterator<'a> {
             section_index: 0,
             section_offsets: Vec::new(),
             section_str_offset: 0,
+            load_offset: 0,
             entry_count: 0,
             entry_index: 0,
             reset: true,
@@ -134,14 +137,13 @@ impl<'a> ElfSymbolIterator<'a> {
         // Seek to the beginning of the file in-case this is not the first call to initialize.
         self.reader.seek(SeekFrom::Start(0))?;
 
-        // Read the section metadata and store it.
-        get_section_metadata(&mut self.reader, None, SHT_SYMTAB, &mut self.sections)
-            .unwrap_or_default();
-        get_section_metadata(&mut self.reader, None, SHT_DYNSYM, &mut self.sections)
-            .unwrap_or_default();
+        // Get the load offset.
+        self.load_offset = get_load_offset(&mut self.reader)?;
 
-        get_section_offsets(&mut self.reader, None, &mut self.section_offsets)?;
+        // Read the section metadata and store it.
         enum_section_metadata(&mut self.reader, None, None, &mut self.all_sections)?;
+        get_section_metadata(&mut self.reader, None, SHT_SYMTAB, &mut self.sections)?;
+        get_section_offsets(&mut self.reader, None, &mut self.section_offsets)?;
 
         Ok(())
     }
@@ -195,6 +197,7 @@ impl<'a> ElfSymbolIterator<'a> {
                 &self.all_sections,
                 self.entry_index,
                 self.section_str_offset,
+                self.load_offset,
                 symbol);
 
             self.entry_index+=1;
@@ -233,6 +236,8 @@ fn get_symbols32(
     mut callback: impl FnMut(&ElfSymbol)) -> Result<(), Error> {
     let mut symbol = ElfSymbol::new();
     
+    let load_offset = get_load_offset(reader)?;
+
     for i in 0..count {
         if get_symbol32(
             reader,
@@ -240,6 +245,7 @@ fn get_symbols32(
             sections,
             i,
             str_offset,
+            load_offset,
             &mut symbol).is_err() {
                 continue;
         }
@@ -253,7 +259,8 @@ fn get_symbols32(
 fn symbol_rva(
     value: u64,
     sec_index: usize,
-    sections: &Vec<SectionMetadata>) -> u64 {
+    sections: &Vec<SectionMetadata>,
+    load_offset: u64) -> u64 {
     if sec_index >= sections.len() {
         return value;
     }
@@ -261,7 +268,12 @@ fn symbol_rva(
     let section = &sections[sec_index];
 
     if section.sec_type == SHT_NOBITS {
-        return value;
+        if load_offset % 0x1000 != 0 {
+            return value - 0x1000; // TODO What's the right thing here?
+        }
+        else {
+            return value;   
+        }
     }
 
     (value - section.address) + section.offset
@@ -273,6 +285,7 @@ fn get_symbol32(
     sections: &Vec<SectionMetadata>,
     sym_index: u64,
     str_offset: u64,
+    load_offset: u64,
     symbol: &mut ElfSymbol) -> Result<(), Error> {
     let mut sym = ElfSymbol32::default();
     let pos = metadata.offset + (sym_index * metadata.entry_size);
@@ -283,7 +296,7 @@ fn get_symbol32(
         return Err(Error::new(std::io::ErrorKind::InvalidData, "Invalid symbol"));
     }
 
-    symbol.start = symbol_rva(sym.st_value as u64, sym.st_shndx as usize, sections);
+    symbol.start = symbol_rva(sym.st_value as u64, sym.st_shndx as usize, sections, load_offset);
     symbol.end = symbol.start + (sym.st_size as u64 - 1);
     let str_pos = sym.st_name as u64 + str_offset;
 
@@ -302,6 +315,8 @@ fn get_symbols64(
     mut callback: impl FnMut(&ElfSymbol)) -> Result<(), Error> {
     let mut symbol = ElfSymbol::new();
 
+    let load_offset = get_load_offset(reader)?;
+
     for i in 0..count {
         if get_symbol64(
             reader,
@@ -309,6 +324,7 @@ fn get_symbols64(
             sections,
             i,
             str_offset,
+            load_offset,
             &mut symbol).is_err() {
                 continue;
         }
@@ -325,6 +341,7 @@ fn get_symbol64(
     sections: &Vec<SectionMetadata>,
     sym_index: u64,
     str_offset: u64,
+    load_offset: u64,
     symbol: &mut ElfSymbol) -> Result<(), Error> {
     let mut sym = ElfSymbol64::default();
     let pos = metadata.offset + (sym_index * metadata.entry_size);
@@ -335,7 +352,7 @@ fn get_symbol64(
         return Err(Error::new(std::io::ErrorKind::InvalidData, "Invalid symbol"));
     }
 
-    symbol.start = symbol_rva(sym.st_value as u64, sym.st_shndx as usize, sections);
+    symbol.start = symbol_rva(sym.st_value as u64, sym.st_shndx as usize, sections, load_offset);
     symbol.end = symbol.start + (sym.st_size - 1);
     let str_pos = sym.st_name as u64 + str_offset;
 
@@ -417,13 +434,14 @@ pub fn get_symbol(
     sections: &Vec<SectionMetadata>,
     sym_index: u64,
     str_offset: u64,
+    load_offset: u64,
     symbol: &mut ElfSymbol) -> Result<(), Error> {
     match metadata.class {
         ELFCLASS32 => {
-            return get_symbol32(reader, metadata, sections, sym_index, str_offset, symbol);
+            return get_symbol32(reader, metadata, sections, sym_index, str_offset, load_offset, symbol);
         },
         ELFCLASS64 => {
-            return get_symbol64(reader, metadata, sections, sym_index, str_offset, symbol);
+            return get_symbol64(reader, metadata, sections, sym_index, str_offset, load_offset, symbol);
         }
         _ => {
             /* Unknown, no symbols */
@@ -591,20 +609,22 @@ pub fn read_debug_link<'a>(
     Ok(None)
 }
 
-pub fn get_text_offset(
-    reader: &mut (impl Read + Seek),
-    sections: &Vec<SectionMetadata>,
-    section_offsets: &Vec<u64>) -> Result<Option<u64>, Error> {
-    let mut buf: [u8; 1024] = [0; 1024];
-    for section in sections {
-        if let Ok(name) = read_section_name(reader, section, section_offsets, &mut buf) {
-            if name == ".text" {
-                return Ok(Some(section.offset));
-            }
-        }
-    }
+pub fn get_load_offset(
+    reader: &mut (impl Read + Seek)) -> Result<u64, Error> {
+    reader.seek(SeekFrom::Start(0))?;
+    let slice = get_ident(reader)?;
+    let class = slice[EI_CLASS];
+    match class {
+        ELFCLASS32 => {
+            return get_load_offset32(reader);
 
-    Ok(None)
+        },
+        ELFCLASS64 => {
+            return get_load_offset64(reader);
+        },
+        _ => { return Ok(0); }
+
+    }
 }
 
 const EI_CLASS: usize = 4;
@@ -1071,6 +1091,56 @@ fn get_section_metadata64(
     }
 
     Ok(())
+}
+
+fn get_load_offset32(
+    reader: &mut (impl Read + Seek)) -> Result<u64, Error> {
+    let mut header = ElfHeader32::default();
+    unsafe {
+        reader.read_exact(
+            slice::from_raw_parts_mut(
+                &mut header as *mut _ as *mut u8,
+                size_of::<ElfHeader32>()))?;
+    }
+    let sec_count = header.e_phnum as u32;
+    let mut sec_offset = header.e_phoff as u64;
+    let mut pheader = ElfProgramHeader32::default();
+    for _ in 0..sec_count {
+        reader.seek(SeekFrom::Start(sec_offset))?;
+        get_program_header32(reader, &mut pheader)?;
+        if pheader.p_type == PT_LOAD &&
+            (pheader.p_flags & PF_X) == PF_X {
+            return Ok(pheader.p_offset as u64);
+        }
+        sec_offset += header.e_phentsize as u64;
+    }
+    /* No program headers, assume absolute */
+    Ok(0)
+}
+
+fn get_load_offset64(
+    reader: &mut (impl Read + Seek)) -> Result<u64, Error> {
+    let mut header = ElfHeader64::default();
+    unsafe {
+        reader.read_exact(
+            slice::from_raw_parts_mut(
+                &mut header as *mut _ as *mut u8,
+                size_of::<ElfHeader64>()))?;
+    }
+    let sec_count = header.e_phnum as u32;
+    let mut sec_offset = header.e_phoff as u64;
+    let mut pheader = ElfProgramHeader64::default();
+    for _ in 0..sec_count {
+        reader.seek(SeekFrom::Start(sec_offset))?;
+        get_program_header64(reader, &mut pheader)?;
+        if pheader.p_type == PT_LOAD &&
+            (pheader.p_flags & PF_X) == PF_X {
+            return Ok(pheader.p_offset);
+        }
+        sec_offset += header.e_phentsize as u64;
+    }
+    /* No program headers, assume absolute */
+    Ok(0)
 }
 
 #[cfg(test)]

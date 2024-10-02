@@ -132,6 +132,11 @@ impl ExportMapping {
         let map_file_start = self.file_offset();
         let map_file_end = map_file_start + self.len();
 
+        // If the map is anonymous or kernel the input addresses are already a va range.
+        if self.anon() || self.start() >= KERNEL_START {
+            return Some((file_start, file_end))
+        }
+
         // Bail fast if file start/end are not within mapping at all.
         if file_end < map_file_start || file_start > map_file_end {
             return None
@@ -166,18 +171,9 @@ impl ExportMapping {
         &mut self,
         unique_ips: &mut Vec<u64>,
         sym_reader: &mut impl ExportSymbolReader,
-        text_offset: u64,
         strings: &mut InternedStrings) {
         unique_ips.sort();
         sym_reader.reset();
-
-        // Anonymous and kernel symbols use a raw ip.
-        let mut start_offset = 0u64;
-        let mut file_offset = 0u64;
-        if !self.anon() && self.start() < KERNEL_START {
-            start_offset = self.start();
-            file_offset = self.file_offset();
-        }
 
         loop {
             if !sym_reader.next() {
@@ -186,37 +182,39 @@ impl ExportMapping {
 
             let mut add_sym = false;
 
-            // Convert from address relative address to ip.
-            let start_ip = sym_reader.start() + start_offset - file_offset;
-            let end_ip = sym_reader.end() + start_offset - file_offset;
+            if let Some((start_ip, end_ip)) = self.file_to_va_range(
+                sym_reader.start(), sym_reader.end()) {
 
-            // Find the start address for the current symbol in unique_ips.
-            match unique_ips.binary_search(&start_ip) {
-                Ok(_) => { 
-                    add_sym = true;
-                },
-                Err(i) => {
-                    let addr = *unique_ips.get(i).unwrap_or(&0u64);
-                    if unique_ips.len() > i && addr < end_ip {
+                match unique_ips.binary_search(&start_ip) {
+                    Ok(_) => {
                         add_sym = true;
+                    },
+                    Err(i) => {
+                        let addr = *unique_ips.get(i).unwrap_or(&0u64);
+                        if unique_ips.len() > i && addr < end_ip {
+                            add_sym = true;
+                        }
                     }
                 }
-            }
 
-            if add_sym {
-                let demangled_name = sym_reader.demangle();
-                let demangled_name = match &demangled_name {
-                    Some(n) => n.as_str(),
-                    None => sym_reader.name()
-                };
+                if add_sym {
+                    let demangled_name = sym_reader.demangle();
+                    let demangled_name = match &demangled_name {
+                        Some(n) => n.as_str(),
+                        None => sym_reader.name()
+                    };
 
-                // Add the symbol.
-                let symbol = ExportSymbol::new(
-                    strings.to_id(demangled_name),
-                    start_ip,
-                    end_ip);
+                    // Add the symbol.
+                    let symbol = ExportSymbol::new(
+                        strings.to_id(demangled_name),
+                        start_ip,
+                        end_ip);
 
-                self.add_symbol(symbol);
+                    self.add_symbol(symbol);
+                    if sym_reader.start() == 0x338050 {
+                        println!("Added symbol.");
+                    }
+                }
             }
         }
     }

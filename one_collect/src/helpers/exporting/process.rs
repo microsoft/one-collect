@@ -268,7 +268,6 @@ impl ExportProcess {
             map.add_matching_symbols(
                 frames,
                 sym_reader,
-                0u64,
                 strings);
         }
     }
@@ -331,12 +330,10 @@ impl ExportProcess {
                 if let Some(sym_file) = self.find_symbol_file(filename, metadata) {                
                     let mut sym_reader = ElfSymbolReader::new(sym_file);
                     let map_mut = self.mappings.mappings_mut().get_mut(map_index).unwrap();
-                    let text_offset = metadata.text_offset().unwrap_or(0);
 
                     map_mut.add_matching_symbols(
                         frames,
                         &mut sym_reader,
-                        text_offset,
                         strings);
                 }
             }
