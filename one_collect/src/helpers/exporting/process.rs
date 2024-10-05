@@ -15,7 +15,7 @@ use crate::openat::OpenAt;
 use crate::procfs;
 
 #[cfg(target_os = "linux")]
-use ruwind::elf::{build_id_equals, get_build_id, get_section_metadata, SHT_SYMTAB, SHT_DYNSYM};
+use ruwind::elf::{build_id_equals, get_build_id, get_section_metadata, SHT_SYMTAB, SHT_DYNSYM, SYMBOL_TYPE_ELF_SYMTAB, SYMBOL_TYPE_ELF_DYNSYM};
 
 use ruwind::{CodeSection, Unwindable};
 use symbols::ElfSymbolReader;
@@ -326,8 +326,13 @@ impl ExportProcess {
             // then we should not proceed.
             if let Some(metadata) = elf_metadata.get(dev_node) {
 
-                // Find a matching symbol file.
-                if let Some(sym_file) = self.find_symbol_file(filename, metadata) {                
+                // Find matching symbol files.
+                let sym_files = self.find_symbol_files(
+                    filename,
+                    metadata,
+                    SYMBOL_TYPE_ELF_SYMTAB | SYMBOL_TYPE_ELF_DYNSYM);
+
+                for sym_file in sym_files {
                     let mut sym_reader = ElfSymbolReader::new(sym_file);
                     let map_mut = self.mappings.mappings_mut().get_mut(map_index).unwrap();
 
@@ -341,37 +346,52 @@ impl ExportProcess {
     }
 
     #[cfg(target_os = "linux")]
-    fn find_symbol_file<'a>(
+    fn find_symbol_files(
         &self,
         bin_path: &str,
-        metadata: &ElfBinaryMetadata) -> Option<File> {
+        metadata: &ElfBinaryMetadata,
+        sym_types_requested: u32) -> Vec<File> {
+        let mut symbol_files = Vec::new();
+        let mut sym_types_found = 0u32;
 
         // Keep evaluating symbol files until we find a matching one with a symtab.
         let mut path_buf = PathBuf::new();
 
         // Look at the binary itself.
         path_buf.push(bin_path);
-        if let Some(sym_file) = self.check_candidate_symbol_file(
+        if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
             metadata.build_id(),
             &path_buf) {
-            return Some(sym_file);
+            symbol_files.push(sym_file);
+            sym_types_found |= types_found;
+            if sym_types_found == sym_types_requested {
+                return symbol_files
+            }
         }
 
         // Look next to the binary.
         path_buf.clear();
         path_buf.push(format!("{}.dbg", bin_path));
-        if let Some(sym_file) = self.check_candidate_symbol_file(
+        if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
             metadata.build_id(),
             &path_buf) {
-            return Some(sym_file);
+            symbol_files.push(sym_file);
+            sym_types_found |= types_found;
+            if sym_types_found == sym_types_requested {
+                return symbol_files
+            }
         }
 
         path_buf.clear();
         path_buf.push(format!("{}.debug", bin_path));
-        if let Some(sym_file) = self.check_candidate_symbol_file(
+        if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
             metadata.build_id(),
             &path_buf) {
-            return Some(sym_file);
+            symbol_files.push(sym_file);
+            sym_types_found |= types_found;
+            if sym_types_found == sym_types_requested {
+                return symbol_files
+            }
         }
 
         // Debug link.
@@ -380,10 +400,14 @@ impl ExportProcess {
             // Directly open debug_link.
             path_buf.clear();
             path_buf.push(debug_link);
-            if let Some(sym_file) = self.check_candidate_symbol_file(
+            if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
                 metadata.build_id(),
                 &path_buf) {
-                return Some(sym_file);
+                symbol_files.push(sym_file);
+                sym_types_found |= types_found;
+                if sym_types_found == sym_types_requested {
+                    return symbol_files
+                }
             }
 
             // These lookups require the directory path containing the binary.
@@ -395,10 +419,14 @@ impl ExportProcess {
                 // Open /path/to/binary/debug_link.
                 path_buf.push(bin_dir_path);
                 path_buf.push(debug_link);
-                if let Some(sym_file) = self.check_candidate_symbol_file(
+                if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
                     metadata.build_id(),
                     &path_buf) {
-                    return Some(sym_file);
+                    symbol_files.push(sym_file);
+                    sym_types_found |= types_found;
+                    if sym_types_found == sym_types_requested {
+                        return symbol_files
+                    }
                 }
 
                 // Open /path/to/binary/.debug/debug_link.
@@ -406,10 +434,14 @@ impl ExportProcess {
                 path_buf.push(bin_dir_path);
                 path_buf.push(".debug");
                 path_buf.push(debug_link);
-                if let Some(sym_file) = self.check_candidate_symbol_file(
+                if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
                     metadata.build_id(),
                     &path_buf) {
-                    return Some(sym_file);
+                    symbol_files.push(sym_file);
+                    sym_types_found |= types_found;
+                    if sym_types_found == sym_types_requested {
+                        return symbol_files
+                    }
                 }
 
                 // Open /usr/lib/debug/path/to/binary/debug_link.
@@ -417,10 +449,14 @@ impl ExportProcess {
                 path_buf.push("/usr/lib/debug");
                 path_buf.push(&bin_dir_path.to_str().unwrap()[1..]);
                 path_buf.push(debug_link);
-                if let Some(sym_file) = self.check_candidate_symbol_file(
+                if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
                     metadata.build_id(),
                     &path_buf) {
-                    return Some(sym_file);
+                    symbol_files.push(sym_file);
+                    sym_types_found |= types_found;
+                    if sym_types_found == sym_types_requested {
+                        return symbol_files
+                    }
                 }
             }
         }
@@ -439,10 +475,14 @@ impl ExportProcess {
             path_buf.push(format!("{}/{}.debug",
                 &build_id_string[0..2],
                 &build_id_string[2..]));
-            if let Some(sym_file) = self.check_candidate_symbol_file(
+                if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
                 metadata.build_id(),
                 &path_buf) {
-                return Some(sym_file);
+                symbol_files.push(sym_file);
+                sym_types_found |= types_found;
+                if sym_types_found == sym_types_requested {
+                    return symbol_files
+                }
             }
         }
 
@@ -451,10 +491,14 @@ impl ExportProcess {
         path_buf.clear();
         path_buf.push("/usr/lib/debug");
         path_buf.push(format!("{}{}", &bin_path[1..], ".debug"));
-        if let Some(sym_file) = self.check_candidate_symbol_file(
+        if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
             metadata.build_id(),
             &path_buf) {
-            return Some(sym_file);
+            symbol_files.push(sym_file);
+            sym_types_found |= types_found;
+            if sym_types_found == sym_types_requested {
+                return symbol_files
+            }
         }
 
         // Ubuntu-specific path-based lookup.
@@ -462,10 +506,14 @@ impl ExportProcess {
         path_buf.clear();
         path_buf.push("/usr/lib/debug");
         path_buf.push(&bin_path[1..]);
-        if let Some(sym_file) = self.check_candidate_symbol_file(
+        if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
             metadata.build_id(),
             &path_buf) {
-            return Some(sym_file);
+            symbol_files.push(sym_file);
+            sym_types_found |= types_found;
+            if sym_types_found == sym_types_requested {
+                return symbol_files
+            }
         }
 
         // In some cases, Ubuntu puts symbols that should be in /usr/lib/debug/usr/lib/... into
@@ -474,21 +522,25 @@ impl ExportProcess {
             path_buf.clear();
             path_buf.push("/usr/lib/debug/lib/");
             path_buf.push(&bin_path[9..]);
-            if let Some(sym_file) = self.check_candidate_symbol_file(
+            if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
                 metadata.build_id(),
                 &path_buf) {
-                return Some(sym_file);
+                symbol_files.push(sym_file);
+                sym_types_found |= types_found;
+                if sym_types_found == sym_types_requested {
+                    return symbol_files
+                }
             }
         }
 
-        None
+        symbol_files
     }
 
     #[cfg(target_os = "linux")]
     fn check_candidate_symbol_file(
         &self,
         binary_build_id: Option<&[u8; 20]>,
-        filename: &PathBuf) -> Option<File> {
+        filename: &PathBuf) -> Option<(File, u32)> {
         let file_path = Path::new(filename);
         let mut matching_sym_file = None;
         if let Ok(mut reader) = self.open_file(file_path) {
@@ -522,11 +574,24 @@ impl ExportProcess {
         // If we found a match, look for symbols in the file.
         if let Some(mut reader) = matching_sym_file {
             let mut sections = Vec::new();
+            let mut sym_flags = 0;
             if get_section_metadata(&mut reader, None, SHT_SYMTAB, &mut sections).is_err() {
                 return None;
             }
             if !sections.is_empty() {
-                return Some(reader);
+                sym_flags |= SYMBOL_TYPE_ELF_SYMTAB;
+            }
+
+            sections.clear();
+            if get_section_metadata(&mut reader, None, SHT_DYNSYM, &mut sections).is_err() {
+                return None;
+            }
+            if !sections.is_empty() {
+                sym_flags |= SYMBOL_TYPE_ELF_DYNSYM;
+            }
+
+            if sym_flags != 0 {
+                return Some((reader, sym_flags));
             }
         }
 

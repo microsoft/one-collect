@@ -12,6 +12,11 @@ pub const SHT_NOTE: ElfWord = 7;
 pub const SHT_NOBITS: ElfWord = 8;
 pub const SHT_DYNSYM: ElfWord = 11;
 
+// Symbol type flags that can be or'd together to keep track of
+// which types of symbols are present in a binary.
+pub const SYMBOL_TYPE_ELF_SYMTAB: u32 = 1;
+pub const SYMBOL_TYPE_ELF_DYNSYM: u32 = 2;
+
 pub struct ElfSymbol {
     start: u64,
     end: u64,
@@ -143,6 +148,7 @@ impl<'a> ElfSymbolIterator<'a> {
         // Read the section metadata and store it.
         enum_section_metadata(&mut self.reader, None, None, &mut self.all_sections)?;
         get_section_metadata(&mut self.reader, None, SHT_SYMTAB, &mut self.sections)?;
+        get_section_metadata(&mut self.reader, None, SHT_DYNSYM, &mut self.sections)?;
         get_section_offsets(&mut self.reader, None, &mut self.section_offsets)?;
 
         Ok(())
