@@ -239,7 +239,6 @@ impl ExportMachine {
                         mapping.add_matching_symbols(
                             &mut frames,
                             kernel_symbols,
-                            0,
                             &mut self.strings);
 
                         /* Add resolved mapping to process */
