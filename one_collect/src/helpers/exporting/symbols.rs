@@ -473,7 +473,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn elf_symbol_reader() {
         #[cfg(target_arch = "x86_64")]
-        let path = "/home/brianrob/work/sdk-8.0/shared/Microsoft.NETCore.App/8.0.8/libcoreclr.so.dbg";
+        let path = "/usr/lib/x86_64-linux-gnu/libc.so.6";
 
         #[cfg(target_arch = "aarch64")]
         let path = "/usr/lib/aarch64-linux-gnu/libc.so.6";
