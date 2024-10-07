@@ -211,9 +211,6 @@ impl ExportMapping {
                         end_ip);
 
                     self.add_symbol(symbol);
-                    if sym_reader.start() == 0x338050 {
-                        println!("Added symbol.");
-                    }
                 }
             }
         }

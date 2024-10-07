@@ -304,6 +304,8 @@ fn symbol_rva(
 
     if section.sec_type == SHT_NOBITS {
         if load_header.file_offset() % load_header.align() != 0 {
+            // Work around invalid file_offset due to a bug in LLVM.
+            // https://reviews.llvm.org/D60131
             let offset = align_up(load_header.file_offset, load_header.align);
             return value - offset;
         }
