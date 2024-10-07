@@ -541,9 +541,8 @@ impl ExportProcess {
         &self,
         binary_build_id: Option<&[u8; 20]>,
         filename: &PathBuf) -> Option<(File, u32)> {
-        let file_path = Path::new(filename);
         let mut matching_sym_file = None;
-        if let Ok(mut reader) = self.open_file(file_path) {
+        if let Ok(mut reader) = self.open_file(filename) {
 
             let mut build_id_buf: [u8; 20] = [0; 20];
             if let Ok(sym_build_id) = get_build_id(&mut reader, &mut build_id_buf) {

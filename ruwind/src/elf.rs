@@ -83,6 +83,35 @@ impl SectionMetadata {
     }
 }
 
+pub struct ElfLoadHeader {
+    file_offset: u64,
+    align: u64
+}
+
+impl ElfLoadHeader {
+    pub fn new (
+        file_offset: u64,
+        align: u64) -> Self {
+        Self {
+            file_offset,
+            align
+        }
+    }
+
+    pub fn default() -> Self {
+        Self::new(0,0)
+    }
+
+    pub fn file_offset(&self) -> u64 {
+        self.file_offset
+    }
+
+    pub fn align(&self) -> u64 {
+        self.align
+    }
+
+}
+
 pub struct ElfSymbolIterator<'a> {
     phantom: PhantomData<&'a ()>,
     reader: BufReader<File>,
@@ -93,7 +122,7 @@ pub struct ElfSymbolIterator<'a> {
     section_offsets: Vec<u64>,
     section_str_offset: u64,
 
-    load_offset: u64,
+    load_header: ElfLoadHeader,
 
     entry_count: u64,
     entry_index: u64,
@@ -111,7 +140,7 @@ impl<'a> ElfSymbolIterator<'a> {
             section_index: 0,
             section_offsets: Vec::new(),
             section_str_offset: 0,
-            load_offset: 0,
+            load_header: ElfLoadHeader::default(),
             entry_count: 0,
             entry_index: 0,
             reset: true,
@@ -143,7 +172,7 @@ impl<'a> ElfSymbolIterator<'a> {
         self.reader.seek(SeekFrom::Start(0))?;
 
         // Get the load offset.
-        self.load_offset = get_load_offset(&mut self.reader)?;
+        self.load_header = get_load_header(&mut self.reader)?;
 
         // Read the section metadata and store it.
         enum_section_metadata(&mut self.reader, None, None, &mut self.all_sections)?;
@@ -203,7 +232,7 @@ impl<'a> ElfSymbolIterator<'a> {
                 &self.all_sections,
                 self.entry_index,
                 self.section_str_offset,
-                self.load_offset,
+                &self.load_header,
                 symbol);
 
             self.entry_index+=1;
@@ -242,7 +271,7 @@ fn get_symbols32(
     mut callback: impl FnMut(&ElfSymbol)) -> Result<(), Error> {
     let mut symbol = ElfSymbol::new();
     
-    let load_offset = get_load_offset(reader)?;
+    let load_header = get_load_header(reader)?;
 
     for i in 0..count {
         if get_symbol32(
@@ -251,7 +280,7 @@ fn get_symbols32(
             sections,
             i,
             str_offset,
-            load_offset,
+            &load_header,
             &mut symbol).is_err() {
                 continue;
         }
@@ -266,7 +295,7 @@ fn symbol_rva(
     value: u64,
     sec_index: usize,
     sections: &Vec<SectionMetadata>,
-    load_offset: u64) -> u64 {
+    load_header: &ElfLoadHeader) -> u64 {
     if sec_index >= sections.len() {
         return value;
     }
@@ -274,8 +303,9 @@ fn symbol_rva(
     let section = &sections[sec_index];
 
     if section.sec_type == SHT_NOBITS {
-        if load_offset % 0x1000 != 0 {
-            return value - 0x1000; // TODO What's the right thing here?
+        if load_header.file_offset() % load_header.align() != 0 {
+            let offset = align_up(load_header.file_offset, load_header.align);
+            return value - offset;
         }
         else {
             return value;   
@@ -285,13 +315,19 @@ fn symbol_rva(
     (value - section.address) + section.offset
 }
 
+fn align_up(
+    value: u64,
+    align: u64) -> u64 {
+    (value + align - 1) & !(align - 1)
+}
+
 fn get_symbol32(
     reader: &mut (impl Read + Seek),
     metadata: &SectionMetadata,
     sections: &Vec<SectionMetadata>,
     sym_index: u64,
     str_offset: u64,
-    load_offset: u64,
+    load_header: &ElfLoadHeader,
     symbol: &mut ElfSymbol) -> Result<(), Error> {
     let mut sym = ElfSymbol32::default();
     let pos = metadata.offset + (sym_index * metadata.entry_size);
@@ -302,7 +338,7 @@ fn get_symbol32(
         return Err(Error::new(std::io::ErrorKind::InvalidData, "Invalid symbol"));
     }
 
-    symbol.start = symbol_rva(sym.st_value as u64, sym.st_shndx as usize, sections, load_offset);
+    symbol.start = symbol_rva(sym.st_value as u64, sym.st_shndx as usize, sections, load_header);
     symbol.end = symbol.start + (sym.st_size as u64 - 1);
     let str_pos = sym.st_name as u64 + str_offset;
 
@@ -321,7 +357,7 @@ fn get_symbols64(
     mut callback: impl FnMut(&ElfSymbol)) -> Result<(), Error> {
     let mut symbol = ElfSymbol::new();
 
-    let load_offset = get_load_offset(reader)?;
+    let load_header = get_load_header(reader)?;
 
     for i in 0..count {
         if get_symbol64(
@@ -330,7 +366,7 @@ fn get_symbols64(
             sections,
             i,
             str_offset,
-            load_offset,
+            &load_header,
             &mut symbol).is_err() {
                 continue;
         }
@@ -347,7 +383,7 @@ fn get_symbol64(
     sections: &Vec<SectionMetadata>,
     sym_index: u64,
     str_offset: u64,
-    load_offset: u64,
+    load_header: &ElfLoadHeader,
     symbol: &mut ElfSymbol) -> Result<(), Error> {
     let mut sym = ElfSymbol64::default();
     let pos = metadata.offset + (sym_index * metadata.entry_size);
@@ -358,7 +394,7 @@ fn get_symbol64(
         return Err(Error::new(std::io::ErrorKind::InvalidData, "Invalid symbol"));
     }
 
-    symbol.start = symbol_rva(sym.st_value as u64, sym.st_shndx as usize, sections, load_offset);
+    symbol.start = symbol_rva(sym.st_value as u64, sym.st_shndx as usize, sections, load_header);
     symbol.end = symbol.start + (sym.st_size - 1);
     let str_pos = sym.st_name as u64 + str_offset;
 
@@ -440,14 +476,14 @@ pub fn get_symbol(
     sections: &Vec<SectionMetadata>,
     sym_index: u64,
     str_offset: u64,
-    load_offset: u64,
+    load_header: &ElfLoadHeader,
     symbol: &mut ElfSymbol) -> Result<(), Error> {
     match metadata.class {
         ELFCLASS32 => {
-            return get_symbol32(reader, metadata, sections, sym_index, str_offset, load_offset, symbol);
+            return get_symbol32(reader, metadata, sections, sym_index, str_offset, load_header, symbol);
         },
         ELFCLASS64 => {
-            return get_symbol64(reader, metadata, sections, sym_index, str_offset, load_offset, symbol);
+            return get_symbol64(reader, metadata, sections, sym_index, str_offset, load_header, symbol);
         }
         _ => {
             /* Unknown, no symbols */
@@ -615,20 +651,20 @@ pub fn read_debug_link<'a>(
     Ok(None)
 }
 
-pub fn get_load_offset(
-    reader: &mut (impl Read + Seek)) -> Result<u64, Error> {
+pub fn get_load_header(
+    reader: &mut (impl Read + Seek)) -> Result<ElfLoadHeader, Error> {
     reader.seek(SeekFrom::Start(0))?;
     let slice = get_ident(reader)?;
     let class = slice[EI_CLASS];
     match class {
         ELFCLASS32 => {
-            return get_load_offset32(reader);
+            return get_load_header32(reader);
 
         },
         ELFCLASS64 => {
-            return get_load_offset64(reader);
+            return get_load_header64(reader);
         },
-        _ => { return Ok(0); }
+        _ => { return Ok(ElfLoadHeader::default()); }
 
     }
 }
@@ -1099,8 +1135,8 @@ fn get_section_metadata64(
     Ok(())
 }
 
-fn get_load_offset32(
-    reader: &mut (impl Read + Seek)) -> Result<u64, Error> {
+fn get_load_header32(
+    reader: &mut (impl Read + Seek)) -> Result<ElfLoadHeader, Error> {
     let mut header = ElfHeader32::default();
     unsafe {
         reader.read_exact(
@@ -1116,16 +1152,18 @@ fn get_load_offset32(
         get_program_header32(reader, &mut pheader)?;
         if pheader.p_type == PT_LOAD &&
             (pheader.p_flags & PF_X) == PF_X {
-            return Ok(pheader.p_offset as u64);
+            return Ok(ElfLoadHeader::new(
+                pheader.p_offset as u64,
+                pheader.p_align as u64));
         }
         sec_offset += header.e_phentsize as u64;
     }
     /* No program headers, assume absolute */
-    Ok(0)
+    Ok(ElfLoadHeader::default())
 }
 
-fn get_load_offset64(
-    reader: &mut (impl Read + Seek)) -> Result<u64, Error> {
+fn get_load_header64(
+    reader: &mut (impl Read + Seek)) -> Result<ElfLoadHeader, Error> {
     let mut header = ElfHeader64::default();
     unsafe {
         reader.read_exact(
@@ -1141,12 +1179,14 @@ fn get_load_offset64(
         get_program_header64(reader, &mut pheader)?;
         if pheader.p_type == PT_LOAD &&
             (pheader.p_flags & PF_X) == PF_X {
-            return Ok(pheader.p_offset);
+                return Ok(ElfLoadHeader::new(
+                    pheader.p_offset,
+                    pheader.p_align));
         }
         sec_offset += header.e_phentsize as u64;
     }
     /* No program headers, assume absolute */
-    Ok(0)
+    Ok(ElfLoadHeader::default())
 }
 
 #[cfg(test)]
