@@ -598,7 +598,8 @@ impl ExportMachine {
         let mut addrs = HashSet::new();
 
         let mut path_buf = self.os.path_buf.borrow_mut();
-        path_buf.push("tmp");
+        path_buf.clear();
+        path_buf.push("/tmp");
 
         for proc in self.procs.values_mut() {
             if !proc.has_anon_mappings() {
