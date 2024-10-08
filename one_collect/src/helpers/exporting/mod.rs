@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::collections::hash_map::{Values, ValuesMut};
-use std::path::PathBuf;
 
 use crate::Writable;
 use crate::event::{Event, EventData};
@@ -16,8 +15,8 @@ pub mod os;
 
 pub type ExportSampler = os::ExportSampler;
 
-const KERNEL_START:u64 = 0xFFFF800000000000;
-const KERNEL_END:u64 = 0xFFFFFFFFFFFFFFFF;
+pub const KERNEL_START:u64 = 0xFFFF800000000000;
+pub const KERNEL_END:u64 = 0xFFFFFFFFFFFFFFFF;
 
 pub type ExportDevNode = ruwind::ModuleKey;
 
@@ -237,7 +236,8 @@ pub struct ExportSettings {
     cpu_freq: u64,
     cswitches: bool,
     callstack_helper: Option<CallstackHelper>,
-    os: os::OSExportSettings,
+    #[cfg(target_os = "linux")]
+    pub(crate) os: os::OSExportSettings,
     events: Option<Vec<ExportEventCallback>>,
 }
 
@@ -251,6 +251,7 @@ impl ExportSettings {
             cpu_freq: 1000,
             cswitches: true,
             callstack_helper: Some(callstack_helper.with_external_lookup()),
+            #[cfg(target_os = "linux")]
             os: os::OSExportSettings::new(),
             events: None,
         }
@@ -321,7 +322,6 @@ pub struct ExportMachine {
     os: os::OSExportMachine,
     procs: HashMap<u32, ExportProcess>,
     cswitches: HashMap<u32, ExportCSwitch>,
-    path_buf: Writable<PathBuf>,
     kinds: Vec<String>,
     map_index: usize,
 }
@@ -342,7 +342,6 @@ impl ExportMachine {
             os: os::OSExportMachine::new(),
             procs: HashMap::new(),
             cswitches: HashMap::new(),
-            path_buf: Writable::new(PathBuf::new()),
             kinds: Vec::new(),
             map_index: 0,
         }

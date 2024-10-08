@@ -30,14 +30,23 @@ impl PushWide for String {
     }
 }
 
-pub(crate) struct OSExportSettings {
+#[derive(Clone)]
+pub(crate) struct OSExportProcess {
     /* Placeholder */
 }
 
-impl OSExportSettings {
+impl OSExportProcess {
     pub fn new() -> Self {
         Self {
         }
+    }
+}
+
+impl ExportProcess {
+    pub fn add_ns_pid(
+        &mut self,
+        pid: u32) {
+        self.ns_pid_mut().replace(pid);
     }
 }
 

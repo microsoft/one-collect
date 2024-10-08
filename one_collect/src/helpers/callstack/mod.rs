@@ -5,7 +5,7 @@ pub mod os;
 pub type CallstackReader = os::CallstackReader;
 pub type CallstackHelper = os::CallstackHelper;
 
-const KERNEL_START:u64 = 0xFFFF800000000000;
+use crate::helpers::exporting::KERNEL_START;
 
 pub trait CallstackHelp {
     fn with_callstack_help(
