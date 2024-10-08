@@ -1,15 +1,24 @@
+use core::str;
 use std::fs::File;
+use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
 use crate::PathBufInteger;
 use crate::intern::InternedCallstacks;
 
 #[cfg(target_os = "linux")]
+use crate::helpers::exporting::os::{ElfBinaryMetadata, ElfBinaryMetadataLookup};
+
+#[cfg(target_os = "linux")]
 use crate::openat::OpenAt;
 #[cfg(target_os = "linux")]
 use crate::procfs;
 
+#[cfg(target_os = "linux")]
+use ruwind::elf::{build_id_equals, get_build_id, get_section_metadata, SHT_SYMTAB, SHT_DYNSYM, SYMBOL_TYPE_ELF_SYMTAB, SYMBOL_TYPE_ELF_DYNSYM};
+
 use ruwind::{CodeSection, Unwindable};
+use symbols::ElfSymbolReader;
 
 use super::*;
 use super::mappings::ExportMappingLookup;
@@ -251,6 +260,7 @@ impl ExportProcess {
                 continue;
             }
 
+            frames.clear();
             for addr in addrs.iter() {
                 frames.push(*addr);
             }
@@ -261,6 +271,333 @@ impl ExportProcess {
                 strings);
         }
     }
+
+    #[cfg(target_os = "linux")]
+    pub fn add_matching_elf_symbols(
+        &mut self,
+        elf_metadata: &ElfBinaryMetadataLookup,
+        addrs: &mut HashSet<u64>,
+        frames: &mut Vec<u64>,
+        callstacks: &InternedCallstacks,
+        strings: &mut InternedStrings) {
+        addrs.clear();
+        frames.clear();
+
+        if self.root_fs.is_none() {
+            return;
+        }
+
+        for map_index in 0..self.mappings.mappings().len() {
+            let map = self.mappings.mappings().get(map_index).unwrap();
+            if map.anon() {
+                continue;
+            }
+
+            Self::get_unique_user_ips(
+                &self.samples,
+                addrs,
+                frames,
+                &callstacks,
+                Some(map));
+
+            if addrs.is_empty() {
+                continue;
+            }
+
+            frames.clear();
+            for addr in addrs.iter() {
+                frames.push(*addr);
+            }
+
+            // Get the file path or continue.
+            let filename = match strings.from_id(map.filename_id()) {
+                Ok(str) => str,
+                Err(_) => continue
+            };
+
+            // Get the dev node or continue.
+            let dev_node = match map.node() {
+                Some(key) => key,
+                None => continue
+            };
+
+            // If there is no metadata, then we can't load symbols.
+            // It's possible that metadata fields are empty, but if there is no metadata entry,
+            // then we should not proceed.
+            if let Some(metadata) = elf_metadata.get(dev_node) {
+
+                // Find matching symbol files.
+                let sym_files = self.find_symbol_files(
+                    filename,
+                    metadata,
+                    SYMBOL_TYPE_ELF_SYMTAB | SYMBOL_TYPE_ELF_DYNSYM);
+
+                for sym_file in sym_files {
+                    let mut sym_reader = ElfSymbolReader::new(sym_file);
+                    let map_mut = self.mappings.mappings_mut().get_mut(map_index).unwrap();
+
+                    map_mut.add_matching_symbols(
+                        frames,
+                        &mut sym_reader,
+                        strings);
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn find_symbol_files(
+        &self,
+        bin_path: &str,
+        metadata: &ElfBinaryMetadata,
+        sym_types_requested: u32) -> Vec<File> {
+        let mut symbol_files = Vec::new();
+        let mut sym_types_found = 0u32;
+
+        // Keep evaluating symbol files until we find a matching one with a symtab.
+        let mut path_buf = PathBuf::new();
+
+        // Look at the binary itself.
+        path_buf.push(bin_path);
+        if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
+            metadata.build_id(),
+            &path_buf) {
+            symbol_files.push(sym_file);
+            sym_types_found |= types_found;
+            if sym_types_found == sym_types_requested {
+                return symbol_files
+            }
+        }
+
+        // Look next to the binary.
+        path_buf.clear();
+        path_buf.push(format!("{}.dbg", bin_path));
+        if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
+            metadata.build_id(),
+            &path_buf) {
+            symbol_files.push(sym_file);
+            sym_types_found |= types_found;
+            if sym_types_found == sym_types_requested {
+                return symbol_files
+            }
+        }
+
+        path_buf.clear();
+        path_buf.push(format!("{}.debug", bin_path));
+        if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
+            metadata.build_id(),
+            &path_buf) {
+            symbol_files.push(sym_file);
+            sym_types_found |= types_found;
+            if sym_types_found == sym_types_requested {
+                return symbol_files
+            }
+        }
+
+        // Debug link.
+        if let Some(debug_link) = metadata.debug_link() {
+
+            // Directly open debug_link.
+            path_buf.clear();
+            path_buf.push(debug_link);
+            if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
+                metadata.build_id(),
+                &path_buf) {
+                symbol_files.push(sym_file);
+                sym_types_found |= types_found;
+                if sym_types_found == sym_types_requested {
+                    return symbol_files
+                }
+            }
+
+            // These lookups require the directory path containing the binary.
+            path_buf.clear();
+            path_buf.push(bin_path);
+            if let Some(bin_dir_path) = path_buf.parent() {
+                let mut path_buf = PathBuf::new();
+
+                // Open /path/to/binary/debug_link.
+                path_buf.push(bin_dir_path);
+                path_buf.push(debug_link);
+                if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
+                    metadata.build_id(),
+                    &path_buf) {
+                    symbol_files.push(sym_file);
+                    sym_types_found |= types_found;
+                    if sym_types_found == sym_types_requested {
+                        return symbol_files
+                    }
+                }
+
+                // Open /path/to/binary/.debug/debug_link.
+                path_buf.clear();
+                path_buf.push(bin_dir_path);
+                path_buf.push(".debug");
+                path_buf.push(debug_link);
+                if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
+                    metadata.build_id(),
+                    &path_buf) {
+                    symbol_files.push(sym_file);
+                    sym_types_found |= types_found;
+                    if sym_types_found == sym_types_requested {
+                        return symbol_files
+                    }
+                }
+
+                // Open /usr/lib/debug/path/to/binary/debug_link.
+                path_buf.clear();
+                path_buf.push("/usr/lib/debug");
+                path_buf.push(&bin_dir_path.to_str().unwrap()[1..]);
+                path_buf.push(debug_link);
+                if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
+                    metadata.build_id(),
+                    &path_buf) {
+                    symbol_files.push(sym_file);
+                    sym_types_found |= types_found;
+                    if sym_types_found == sym_types_requested {
+                        return symbol_files
+                    }
+                }
+            }
+        }
+
+        // Build-id-based debuginfo.
+        if let Some(build_id) = metadata.build_id() {
+            // Convert the build id to a String.
+            let build_id_string: String = build_id.iter().fold(
+                String::default(),
+                |mut str, byte| {
+                    write!(&mut str, "{:02x}", byte).unwrap_or_default();
+                    str
+                });
+            path_buf.clear();
+            path_buf.push("/usr/lib/debug/.build-id/");
+            path_buf.push(format!("{}/{}.debug",
+                &build_id_string[0..2],
+                &build_id_string[2..]));
+                if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
+                metadata.build_id(),
+                &path_buf) {
+                symbol_files.push(sym_file);
+                sym_types_found |= types_found;
+                if sym_types_found == sym_types_requested {
+                    return symbol_files
+                }
+            }
+        }
+
+        // Fedora-specific path-based lookup.
+        // Example path: /usr/lib/debug/path/to/binary/binaryname.so.debug
+        path_buf.clear();
+        path_buf.push("/usr/lib/debug");
+        path_buf.push(format!("{}{}", &bin_path[1..], ".debug"));
+        if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
+            metadata.build_id(),
+            &path_buf) {
+            symbol_files.push(sym_file);
+            sym_types_found |= types_found;
+            if sym_types_found == sym_types_requested {
+                return symbol_files
+            }
+        }
+
+        // Ubuntu-specific path-based lookup.
+        // Example path: /usr/lib/debug/path/to/binary/binaryname.so
+        path_buf.clear();
+        path_buf.push("/usr/lib/debug");
+        path_buf.push(&bin_path[1..]);
+        if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
+            metadata.build_id(),
+            &path_buf) {
+            symbol_files.push(sym_file);
+            sym_types_found |= types_found;
+            if sym_types_found == sym_types_requested {
+                return symbol_files
+            }
+        }
+
+        // In some cases, Ubuntu puts symbols that should be in /usr/lib/debug/usr/lib/... into
+        // /usr/lib/debug/lib/...
+        if bin_path.len() > 9 && &bin_path[0..9] == "/usr/lib/" {
+            path_buf.clear();
+            path_buf.push("/usr/lib/debug/lib/");
+            path_buf.push(&bin_path[9..]);
+            if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
+                metadata.build_id(),
+                &path_buf) {
+                symbol_files.push(sym_file);
+                sym_types_found |= types_found;
+                if sym_types_found == sym_types_requested {
+                    return symbol_files
+                }
+            }
+        }
+
+        symbol_files
+    }
+
+    #[cfg(target_os = "linux")]
+    fn check_candidate_symbol_file(
+        &self,
+        binary_build_id: Option<&[u8; 20]>,
+        filename: &PathBuf) -> Option<(File, u32)> {
+        let mut matching_sym_file = None;
+        if let Ok(mut reader) = self.open_file(filename) {
+
+            let mut build_id_buf: [u8; 20] = [0; 20];
+            if let Ok(sym_build_id) = get_build_id(&mut reader, &mut build_id_buf) {
+                // If the symbol file has a build id and the binary has a build_id, compare them.
+                // If one has a build id and the other does not, the symbol file does not match.
+                // If neither the binary or the symbol file have a build id, consider the candidate a match.
+                match sym_build_id {
+                    Some(sym_id) => {
+                        match binary_build_id {
+                            Some(bin_id) => {
+                                if build_id_equals(bin_id, sym_id) {
+                                    matching_sym_file = Some(reader);
+                                }
+                            }
+                            None => return None,
+                        }
+                    },
+                    None => {
+                        match binary_build_id {
+                            Some(_) => return None,
+                            None => matching_sym_file = Some(reader),
+                        }
+                    }
+                }
+            }
+        }
+
+        // If we found a match, look for symbols in the file.
+        if let Some(mut reader) = matching_sym_file {
+            let mut sections = Vec::new();
+            let mut sym_flags = 0;
+            if get_section_metadata(&mut reader, None, SHT_SYMTAB, &mut sections).is_err() {
+                return None;
+            }
+            if !sections.is_empty() {
+                sym_flags |= SYMBOL_TYPE_ELF_SYMTAB;
+            }
+
+            sections.clear();
+            if get_section_metadata(&mut reader, None, SHT_DYNSYM, &mut sections).is_err() {
+                return None;
+            }
+            if !sections.is_empty() {
+                sym_flags |= SYMBOL_TYPE_ELF_DYNSYM;
+            }
+
+            if sym_flags != 0 {
+                return Some((reader, sym_flags));
+            }
+        }
+
+        // If the symbol file cannot be opened, does not match, or does not contain any symbols.
+        None
+    }
+
 
     pub fn get_unique_user_ips(
         samples: &[ExportProcessSample],

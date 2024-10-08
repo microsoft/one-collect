@@ -208,19 +208,22 @@ impl ExportGraph {
             for symbol in mapping.symbols() {
                 if ip >= symbol.start() && ip <= symbol.end() {
                     /* Get the actual symbol name */
-                    let mut sym_name = match strings.from_id(symbol.name_id()) {
+                    let sym_name = match strings.from_id(symbol.name_id()) {
                         Ok(name) => { name },
                         Err(_) => { UNKNOWN },
                     };
 
+                    // This is not functioning properly for native code, and removes the module name.
+                    /*
                     /* Check for method segments */
                     let mut parts = sym_name.rsplitn(2, "::");
 
                     /*
-                     * If we got 2, then treat up to the last "::"
-                     * as the namespace and treat the last segment
-                     * as the method.
-                     */
+                        * If we got 2, then treat up to the last "::"
+                        * as the namespace and treat the last segment
+                        * as the method.
+                        */
+
                     if let Some(method_) = parts.next() {
                         if let Some(namespace_) = parts.next() {
                             /* Use namespace as resolvable name */
@@ -230,6 +233,7 @@ impl ExportGraph {
                             sym_name = method_;
                         }
                     }
+                    */
 
                     target.method_id = self.strings.to_id(sym_name);
                     break;
@@ -243,7 +247,8 @@ impl ExportGraph {
              */
             resolvable.name_id = self.strings.to_id(name);
             target.resolvable_id = self.import_resolvable(resolvable);
-        } else {
+        }
+        else {
             /* Completely unknown sample */
             let mut resolvable = Resolvable::default();
             resolvable.name_id = self.strings.to_id(UNKNOWN);

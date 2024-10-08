@@ -1,4 +1,4 @@
-use ruwind::elf::{self};
+use ruwind::elf::{self, SHT_DYNSYM, SHT_SYMTAB};
 use std::fs::File;
 use anyhow::Result;
 
@@ -36,8 +36,8 @@ pub fn enum_uprobes(
     let mut sections = Vec::new();
 
     /* Get symbol sections */
-    elf::get_section_metadata(&mut file, None, 0x2, &mut sections)?;
-    elf::get_section_metadata(&mut file, None, 0xb, &mut sections)?;
+    elf::get_section_metadata(&mut file, None, SHT_SYMTAB, &mut sections)?;
+    elf::get_section_metadata(&mut file, None, SHT_DYNSYM, &mut sections)?;
 
     /* Get symbols from those sections and pass to caller */
     elf::get_symbols(&mut file, &sections, move |symbol| {

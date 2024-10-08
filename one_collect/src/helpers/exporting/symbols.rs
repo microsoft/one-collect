@@ -320,6 +320,9 @@ impl PerfMapSymbolReader {
                         if self.name.ends_with("\n") {
                             self.name.pop();
                         }
+                        if self.name.ends_with("\r") {
+                            self.name.pop();
+                        }
                     },
                 }
             }

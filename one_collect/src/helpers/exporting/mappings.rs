@@ -99,6 +99,8 @@ impl ExportMapping {
 
     pub fn end(&self) -> u64 { self.end }
 
+    pub fn len(&self) -> u64 { self.end - self.start }
+
     pub fn file_offset(&self) -> u64 { self.file_offset }
 
     pub fn anon(&self) -> bool { self.anon }
@@ -123,6 +125,48 @@ impl ExportMapping {
         ip >= self.start && ip <= self.end
     }
 
+    pub fn file_to_va_range(
+        &self,
+        mut file_start: u64,
+        mut file_end: u64) -> Option<(u64, u64)> {
+        let map_file_start = self.file_offset();
+        let map_file_end = map_file_start + self.len();
+
+        // If the map is anonymous or kernel the input addresses are already a va range.
+        if self.anon() || self.start() >= KERNEL_START {
+            return Some((file_start, file_end))
+        }
+
+        // Bail fast if file start/end are not within mapping at all.
+        if file_end < map_file_start || file_start > map_file_end {
+            return None
+        }
+
+        // Ensure start is within mapping.
+        if file_start < map_file_start {
+            file_start = map_file_start;
+        }
+
+        // Ensure end is within mapping.
+        if file_end > map_file_end {
+            file_end = map_file_end;
+        }
+
+        // Calc length of target file range within mapping.
+        let file_len = file_end - file_start;
+
+        // Calc offset within mapping by file range.
+        let file_offset = file_start - map_file_start;
+
+        // VA start is the file offset in addition to va start.
+        let va_offset_start = file_offset + self.start();
+
+        // VA end is the VA start in addition to the file range length.
+        let va_offset_end = va_offset_start + file_len;
+
+        Some((va_offset_start, va_offset_end))
+    }
+
     pub fn add_matching_symbols(
         &mut self,
         unique_ips: &mut Vec<u64>,
@@ -130,38 +174,43 @@ impl ExportMapping {
         strings: &mut InternedStrings) {
         unique_ips.sort();
         sym_reader.reset();
-        sym_reader.next();
 
-        let mut next_ip = 0;
-
-        for ip in unique_ips {
-            let ip = *ip;
-
-            if ip <= next_ip {
-                /* Already added this method, skip */
-                continue;
+        loop {
+            if !sym_reader.next() {
+                break;
             }
 
-            loop {
-                if sym_reader.start() <= ip &&
-                    sym_reader.end() >= ip {
+            let mut add_sym = false;
 
-                    let name = sym_reader.name();
+            if let Some((start_ip, end_ip)) = self.file_to_va_range(
+                sym_reader.start(), sym_reader.end()) {
 
-                    let symbol = ExportSymbol::new(
-                        strings.to_id(name),
-                        sym_reader.start(),
-                        sym_reader.end());
-
-                    self.add_symbol(symbol);
-
-                    next_ip = sym_reader.end();
-
-                    break;
+                match unique_ips.binary_search(&start_ip) {
+                    Ok(_) => {
+                        add_sym = true;
+                    },
+                    Err(i) => {
+                        let addr = *unique_ips.get(i).unwrap_or(&0u64);
+                        if unique_ips.len() > i && addr < end_ip {
+                            add_sym = true;
+                        }
+                    }
                 }
 
-                if !sym_reader.next() {
-                    break;
+                if add_sym {
+                    let demangled_name = sym_reader.demangle();
+                    let demangled_name = match &demangled_name {
+                        Some(n) => n.as_str(),
+                        None => sym_reader.name()
+                    };
+
+                    // Add the symbol.
+                    let symbol = ExportSymbol::new(
+                        strings.to_id(demangled_name),
+                        start_ip,
+                        end_ip);
+
+                    self.add_symbol(symbol);
                 }
             }
         }
@@ -384,5 +433,34 @@ mod tests {
         assert_eq!(5, lookup.find(2048, Some(200)).unwrap().id());
         assert_eq!(5, lookup.find(128, Some(200)).unwrap().id());
         assert_eq!(5, lookup.find(128, Some(200)).unwrap().id());
+    }
+
+    #[test]
+    fn file_to_va() {
+        let start = 4096;
+        let end = start + 4096;
+        let file_offset = 1024;
+
+        let mapping = ExportMapping::new(0, 0, start, end, file_offset, false, 0);
+
+        /* Simple in range case: start */
+        let va_range = mapping.file_to_va_range(1024, 1096).unwrap();
+        assert_eq!((start, start + 72), va_range);
+
+        /* Simple in range case: middle */
+        let va_range = mapping.file_to_va_range(1096, 2048).unwrap();
+        assert_eq!((start + 72, start + 72 + 952), va_range);
+
+        /* Entirely out of range cases */
+        assert!(mapping.file_to_va_range(end, end+1).is_none());
+        assert!(mapping.file_to_va_range(0, 1023).is_none());
+
+        /* Partial start case */
+        let va_range = mapping.file_to_va_range(956, 1096).unwrap();
+        assert_eq!((start, start + 72), va_range);
+
+        /* Partial end case */
+        let va_range = mapping.file_to_va_range(1096, 9216).unwrap();
+        assert_eq!((start + 72, end), va_range);
     }
 }

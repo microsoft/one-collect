@@ -4,10 +4,18 @@ use std::marker::PhantomData;
 use std::mem::{zeroed, size_of};
 use std::slice;
 use cpp_demangle::{DemangleOptions, Symbol};
-use rustc_demangle::{demangle, try_demangle};
+use rustc_demangle::try_demangle;
 
 pub const SHT_PROGBITS: ElfWord = 1;
+pub const SHT_SYMTAB: ElfWord = 2;
+pub const SHT_NOTE: ElfWord = 7;
 pub const SHT_NOBITS: ElfWord = 8;
+pub const SHT_DYNSYM: ElfWord = 11;
+
+// Symbol type flags that can be or'd together to keep track of
+// which types of symbols are present in a binary.
+pub const SYMBOL_TYPE_ELF_SYMTAB: u32 = 1;
+pub const SYMBOL_TYPE_ELF_DYNSYM: u32 = 2;
 
 pub struct ElfSymbol {
     start: u64,
@@ -75,6 +83,35 @@ impl SectionMetadata {
     }
 }
 
+pub struct ElfLoadHeader {
+    file_offset: u64,
+    align: u64
+}
+
+impl ElfLoadHeader {
+    pub fn new (
+        file_offset: u64,
+        align: u64) -> Self {
+        Self {
+            file_offset,
+            align
+        }
+    }
+
+    pub fn default() -> Self {
+        Self::new(0,0)
+    }
+
+    pub fn file_offset(&self) -> u64 {
+        self.file_offset
+    }
+
+    pub fn align(&self) -> u64 {
+        self.align
+    }
+
+}
+
 pub struct ElfSymbolIterator<'a> {
     phantom: PhantomData<&'a ()>,
     reader: BufReader<File>,
@@ -84,6 +121,8 @@ pub struct ElfSymbolIterator<'a> {
     section_index: usize,
     section_offsets: Vec<u64>,
     section_str_offset: u64,
+
+    load_header: ElfLoadHeader,
 
     entry_count: u64,
     entry_index: u64,
@@ -101,6 +140,7 @@ impl<'a> ElfSymbolIterator<'a> {
             section_index: 0,
             section_offsets: Vec::new(),
             section_str_offset: 0,
+            load_header: ElfLoadHeader::default(),
             entry_count: 0,
             entry_index: 0,
             reset: true,
@@ -131,14 +171,14 @@ impl<'a> ElfSymbolIterator<'a> {
         // Seek to the beginning of the file in-case this is not the first call to initialize.
         self.reader.seek(SeekFrom::Start(0))?;
 
-        // Read the section metadata and store it.
-        get_section_metadata(&mut self.reader, None, 0x2, &mut self.sections)
-            .unwrap_or_default();
-        get_section_metadata(&mut self.reader, None, 0xb, &mut self.sections)
-            .unwrap_or_default();
+        // Get the load offset.
+        self.load_header = get_load_header(&mut self.reader)?;
 
-        get_section_offsets(&mut self.reader, None, &mut self.section_offsets)?;
+        // Read the section metadata and store it.
         enum_section_metadata(&mut self.reader, None, None, &mut self.all_sections)?;
+        get_section_metadata(&mut self.reader, None, SHT_SYMTAB, &mut self.sections)?;
+        get_section_metadata(&mut self.reader, None, SHT_DYNSYM, &mut self.sections)?;
+        get_section_offsets(&mut self.reader, None, &mut self.section_offsets)?;
 
         Ok(())
     }
@@ -192,6 +232,7 @@ impl<'a> ElfSymbolIterator<'a> {
                 &self.all_sections,
                 self.entry_index,
                 self.section_str_offset,
+                &self.load_header,
                 symbol);
 
             self.entry_index+=1;
@@ -203,7 +244,7 @@ impl<'a> ElfSymbolIterator<'a> {
     }
 }
 
-fn get_str(
+pub fn get_str(
     buffer: &[u8]) -> &str {
     let mut i = 0;
 
@@ -230,6 +271,8 @@ fn get_symbols32(
     mut callback: impl FnMut(&ElfSymbol)) -> Result<(), Error> {
     let mut symbol = ElfSymbol::new();
     
+    let load_header = get_load_header(reader)?;
+
     for i in 0..count {
         if get_symbol32(
             reader,
@@ -237,6 +280,7 @@ fn get_symbols32(
             sections,
             i,
             str_offset,
+            &load_header,
             &mut symbol).is_err() {
                 continue;
         }
@@ -250,7 +294,8 @@ fn get_symbols32(
 fn symbol_rva(
     value: u64,
     sec_index: usize,
-    sections: &Vec<SectionMetadata>) -> u64 {
+    sections: &Vec<SectionMetadata>,
+    load_header: &ElfLoadHeader) -> u64 {
     if sec_index >= sections.len() {
         return value;
     }
@@ -258,10 +303,24 @@ fn symbol_rva(
     let section = &sections[sec_index];
 
     if section.sec_type == SHT_NOBITS {
-        return value;
+        if load_header.file_offset() % load_header.align() != 0 {
+            // Work around invalid file_offset due to a bug in LLVM.
+            // https://reviews.llvm.org/D60131
+            let offset = align_up(load_header.file_offset, load_header.align);
+            return value - offset;
+        }
+        else {
+            return value;   
+        }
     }
 
     (value - section.address) + section.offset
+}
+
+fn align_up(
+    value: u64,
+    align: u64) -> u64 {
+    (value + align - 1) & !(align - 1)
 }
 
 fn get_symbol32(
@@ -270,6 +329,7 @@ fn get_symbol32(
     sections: &Vec<SectionMetadata>,
     sym_index: u64,
     str_offset: u64,
+    load_header: &ElfLoadHeader,
     symbol: &mut ElfSymbol) -> Result<(), Error> {
     let mut sym = ElfSymbol32::default();
     let pos = metadata.offset + (sym_index * metadata.entry_size);
@@ -280,7 +340,7 @@ fn get_symbol32(
         return Err(Error::new(std::io::ErrorKind::InvalidData, "Invalid symbol"));
     }
 
-    symbol.start = symbol_rva(sym.st_value as u64, sym.st_shndx as usize, sections);
+    symbol.start = symbol_rva(sym.st_value as u64, sym.st_shndx as usize, sections, load_header);
     symbol.end = symbol.start + (sym.st_size as u64 - 1);
     let str_pos = sym.st_name as u64 + str_offset;
 
@@ -299,6 +359,8 @@ fn get_symbols64(
     mut callback: impl FnMut(&ElfSymbol)) -> Result<(), Error> {
     let mut symbol = ElfSymbol::new();
 
+    let load_header = get_load_header(reader)?;
+
     for i in 0..count {
         if get_symbol64(
             reader,
@@ -306,6 +368,7 @@ fn get_symbols64(
             sections,
             i,
             str_offset,
+            &load_header,
             &mut symbol).is_err() {
                 continue;
         }
@@ -322,6 +385,7 @@ fn get_symbol64(
     sections: &Vec<SectionMetadata>,
     sym_index: u64,
     str_offset: u64,
+    load_header: &ElfLoadHeader,
     symbol: &mut ElfSymbol) -> Result<(), Error> {
     let mut sym = ElfSymbol64::default();
     let pos = metadata.offset + (sym_index * metadata.entry_size);
@@ -332,7 +396,7 @@ fn get_symbol64(
         return Err(Error::new(std::io::ErrorKind::InvalidData, "Invalid symbol"));
     }
 
-    symbol.start = symbol_rva(sym.st_value as u64, sym.st_shndx as usize, sections);
+    symbol.start = symbol_rva(sym.st_value as u64, sym.st_shndx as usize, sections, load_header);
     symbol.end = symbol.start + (sym.st_size - 1);
     let str_pos = sym.st_name as u64 + str_offset;
 
@@ -414,13 +478,14 @@ pub fn get_symbol(
     sections: &Vec<SectionMetadata>,
     sym_index: u64,
     str_offset: u64,
+    load_header: &ElfLoadHeader,
     symbol: &mut ElfSymbol) -> Result<(), Error> {
     match metadata.class {
         ELFCLASS32 => {
-            return get_symbol32(reader, metadata, sections, sym_index, str_offset, symbol);
+            return get_symbol32(reader, metadata, sections, sym_index, str_offset, load_header, symbol);
         },
         ELFCLASS64 => {
-            return get_symbol64(reader, metadata, sections, sym_index, str_offset, symbol);
+            return get_symbol64(reader, metadata, sections, sym_index, str_offset, load_header, symbol);
         }
         _ => {
             /* Unknown, no symbols */
@@ -505,6 +570,104 @@ pub fn enum_section_metadata(
             /* Unknown, no metadata */
             Ok(())
         },
+    }
+}
+
+pub fn read_section_name<'a>(
+    reader: &mut (impl Read + Seek),
+    section: &SectionMetadata,
+    section_offsets: &[u64],
+    buf: &'a mut [u8]) -> Result<&'a str, Error> {
+    let mut str_offset = 0u64;
+
+    if section.link < section_offsets.len() as u32 {
+        str_offset = section_offsets[section.link as usize];
+    }
+
+    let str_pos = section.name_offset + str_offset;
+    reader.seek(SeekFrom::Start(str_pos))?;
+
+    let mut name = "";
+    if let Ok(bytes_read) = reader.read(buf) {
+        name = get_str(&buf[0..bytes_read]);
+    }
+
+    Ok(name)
+}
+
+pub fn get_build_id<'a>(
+    reader: &mut (impl Read + Seek),
+    buf: &'a mut [u8; 20]) -> Result<Option<&'a [u8; 20]>, Error> {
+    let mut sections = Vec::new();
+    let mut section_offsets = Vec::new();
+
+    get_section_offsets(reader, None, &mut section_offsets)?;
+    get_section_metadata(reader, None, SHT_NOTE, &mut sections)?;
+
+    read_build_id(reader, &sections, &section_offsets, buf)
+}
+
+pub fn read_build_id<'a>(
+    reader: &mut (impl Read + Seek),
+    sections: &Vec<SectionMetadata>,
+    section_offsets: &Vec<u64>,
+    buf: &'a mut [u8; 20]) -> Result<Option<&'a [u8; 20]>, Error> {
+    
+    for section in sections {
+        let mut name_buf: [u8; 1024] = [0; 1024];
+        if let Ok(name) = read_section_name(reader, section, section_offsets, &mut name_buf) {
+            if name == ".note.gnu.build-id" {
+                reader.seek(SeekFrom::Start(section.offset + 16))?; // TODO: Document why +16?
+                reader.read(&mut buf[0..])?;
+                return Ok(Some(buf));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+pub fn build_id_equals(
+    left: &[u8; 20],
+    right: &[u8; 20]) -> bool {
+    left == right
+}
+
+pub fn read_debug_link<'a>(
+    reader: &mut (impl Read + Seek),
+    sections: &Vec<SectionMetadata>,
+    section_offsets: &Vec<u64>,
+    buf: &'a mut [u8]) -> Result<Option<&'a [u8]>, Error> {
+    
+    for section in sections {
+        let mut name_buf: [u8; 1024] = [0; 1024];
+        if let Ok(name) = read_section_name(reader, section, section_offsets, &mut name_buf) {
+            if name == ".gnu_debuglink" {
+                reader.seek(SeekFrom::Start(section.offset))?;
+                reader.read(&mut buf[0..section.size as usize])?;
+                return Ok(Some(buf));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+pub fn get_load_header(
+    reader: &mut (impl Read + Seek)) -> Result<ElfLoadHeader, Error> {
+    reader.seek(SeekFrom::Start(0))?;
+    let slice = get_ident(reader)?;
+    let class = slice[EI_CLASS];
+    match class {
+        ELFCLASS32 => {
+            return get_load_header32(reader);
+
+        },
+        ELFCLASS64 => {
+            return get_load_header64(reader);
+        },
+        _ => { return Ok(ElfLoadHeader::default()); }
+
     }
 }
 
@@ -974,8 +1137,64 @@ fn get_section_metadata64(
     Ok(())
 }
 
+fn get_load_header32(
+    reader: &mut (impl Read + Seek)) -> Result<ElfLoadHeader, Error> {
+    let mut header = ElfHeader32::default();
+    unsafe {
+        reader.read_exact(
+            slice::from_raw_parts_mut(
+                &mut header as *mut _ as *mut u8,
+                size_of::<ElfHeader32>()))?;
+    }
+    let sec_count = header.e_phnum as u32;
+    let mut sec_offset = header.e_phoff as u64;
+    let mut pheader = ElfProgramHeader32::default();
+    for _ in 0..sec_count {
+        reader.seek(SeekFrom::Start(sec_offset))?;
+        get_program_header32(reader, &mut pheader)?;
+        if pheader.p_type == PT_LOAD &&
+            (pheader.p_flags & PF_X) == PF_X {
+            return Ok(ElfLoadHeader::new(
+                pheader.p_offset as u64,
+                pheader.p_align as u64));
+        }
+        sec_offset += header.e_phentsize as u64;
+    }
+    /* No program headers, assume absolute */
+    Ok(ElfLoadHeader::default())
+}
+
+fn get_load_header64(
+    reader: &mut (impl Read + Seek)) -> Result<ElfLoadHeader, Error> {
+    let mut header = ElfHeader64::default();
+    unsafe {
+        reader.read_exact(
+            slice::from_raw_parts_mut(
+                &mut header as *mut _ as *mut u8,
+                size_of::<ElfHeader64>()))?;
+    }
+    let sec_count = header.e_phnum as u32;
+    let mut sec_offset = header.e_phoff as u64;
+    let mut pheader = ElfProgramHeader64::default();
+    for _ in 0..sec_count {
+        reader.seek(SeekFrom::Start(sec_offset))?;
+        get_program_header64(reader, &mut pheader)?;
+        if pheader.p_type == PT_LOAD &&
+            (pheader.p_flags & PF_X) == PF_X {
+                return Ok(ElfLoadHeader::new(
+                    pheader.p_offset,
+                    pheader.p_align));
+        }
+        sec_offset += header.e_phentsize as u64;
+    }
+    /* No program headers, assume absolute */
+    Ok(ElfLoadHeader::default())
+}
+
 #[cfg(test)]
 mod tests {
+    use crate::elf;
+
     use super::*;
     use std::fs::File;
 
@@ -992,8 +1211,8 @@ mod tests {
         let mut sections = Vec::new();
 
         /* Get Dyn and Function Symbols */
-        get_section_metadata(&mut file, None, 0x2, &mut sections).unwrap();
-        get_section_metadata(&mut file, None, 0xb, &mut sections).unwrap();
+        get_section_metadata(&mut file, None, SHT_SYMTAB, &mut sections).unwrap();
+        get_section_metadata(&mut file, None, SHT_DYNSYM, &mut sections).unwrap();
 
         let mut found = false;
 
@@ -1044,5 +1263,35 @@ mod tests {
         assert_eq!(
             None,
             demangle_symbol("_RFoo"));
+    }
+
+    #[test]
+    fn build_id_equals() {
+        let build_id_1: [u8; 20] = [
+            0x30, 0x31, 0x32, 0x33,
+            0x34, 0x35, 0x36, 0x37,
+            0x38, 0x39, 0x61, 0x62,
+            0x63, 0x64, 0x65, 0x66,
+            0x67, 0x68, 0x69, 0x6A
+        ];
+
+        let build_id_2: [u8; 20] = [
+            0x30, 0x31, 0x32, 0x33,
+            0x34, 0x35, 0x36, 0x37,
+            0x38, 0x39, 0x61, 0x62,
+            0x63, 0x64, 0x65, 0x66,
+            0x67, 0x68, 0x69, 0x6A
+        ];
+
+        let build_id_3: [u8; 20] = [
+            0x30, 0x31, 0x32, 0x33,
+            0x34, 0x35, 0x36, 0x37,
+            0x38, 0x39, 0x61, 0x62,
+            0x63, 0x64, 0x66, 0x66,
+            0x67, 0x68, 0x69, 0x6A
+        ];
+
+        assert!(elf::build_id_equals(&build_id_1, &build_id_2));
+        assert!(!elf::build_id_equals(&build_id_1, &build_id_3));
     }
 }
