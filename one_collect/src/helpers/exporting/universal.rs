@@ -23,6 +23,7 @@ pub struct UniversalExporter {
     settings: Option<ExportSettings>,
     build_hooks: Vec<BoxedBuildCallback>,
     parsed_hooks: Vec<BoxedParsedCallback>,
+    cpu_buf_bytes: usize,
 }
 
 impl UniversalExporter {
@@ -31,7 +32,15 @@ impl UniversalExporter {
             settings: Some(settings),
             build_hooks: Vec::new(),
             parsed_hooks: Vec::new(),
+            cpu_buf_bytes: 64*1024,
         }
+    }
+
+    pub fn with_per_cpu_buffer_bytes(
+        mut self,
+        bytes: usize) -> Self {
+        self.cpu_buf_bytes = bytes;
+        self
     }
 
     pub fn with_build_hook(
@@ -112,13 +121,10 @@ impl UniversalExporter {
 
         let settings = self.settings()?;
 
-        /*
-         * TODO:
-         * Make per-CPU buffer size universally
-         * configurable within ExportSettings
-         */
+        let page_count = self.cpu_buf_bytes / 4096;
+
         let builder = RingBufSessionBuilder::new()
-            .with_page_count(256)
+            .with_page_count(page_count)
             .with_exporter_events(&settings);
 
         let mut builder = self.run_build_hooks(builder)?;
@@ -154,6 +160,7 @@ impl UniversalExporter {
         };
 
         let mut session = EtwSession::new()
+            .with_per_cpu_buffer_bytes(self.cpu_buf_bytes)
             .with_callstack_help(&callstack_helper);
 
         session = self.run_build_hooks(session)?;

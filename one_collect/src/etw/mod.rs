@@ -272,6 +272,9 @@ pub struct EtwSession {
     providers: ProviderLookup,
     kernel_callstacks: Vec<CLASSIC_EVENT_ID>,
 
+    /* Config */
+    cpu_buf_kb: u32,
+
     /* Callbacks */
     event_error_callback: Option<Box<dyn Fn(&Event, &anyhow::Error)>>,
     built_callbacks: Option<Vec<SessionClosure>>,
@@ -320,6 +323,9 @@ impl EtwSession {
             providers: HashMap::default(),
             kernel_callstacks: Vec::new(),
 
+            /* Config */
+            cpu_buf_kb: 64,
+
             /* Callbacks */
             event_error_callback: None,
             built_callbacks: Some(Vec::new()),
@@ -335,6 +341,13 @@ impl EtwSession {
             elevate: false,
             profile_interval: None,
         }
+    }
+
+    pub fn with_per_cpu_buffer_bytes(
+        mut self,
+        bytes: usize) -> Self {
+        self.cpu_buf_kb = (bytes / 1024) as u32;
+        self
     }
 
     pub fn needs_kernel_callstacks(&self) -> bool {
@@ -818,7 +831,9 @@ impl EtwSession {
         mut self,
         name: &str,
         until: impl Fn() -> bool + Send + 'static) -> anyhow::Result<()> {
-        let mut session = TraceSession::new(name.into());
+        let mut session = TraceSession::new(
+            name.into(),
+            self.cpu_buf_kb);
 
         /* Run self mutating callbacks for on-demand dynamic hooks */
         if let Some(callbacks) = self.built_callbacks.take() {
