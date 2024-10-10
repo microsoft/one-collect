@@ -24,7 +24,10 @@ pub mod graph;
 pub mod formats;
 
 pub mod universal;
-pub use universal::UniversalExporter;
+pub use universal::{
+    UniversalExporter,
+    UniversalSymbols,
+};
 
 pub mod symbols;
 pub use symbols::{

@@ -176,3 +176,41 @@ impl UniversalExporter {
         Ok(exporter)
     }
 }
+
+pub trait UniversalSymbols {
+    fn capture_file_symbol_metadata(&mut self);
+
+    fn resolve_local_file_symbols(&mut self);
+
+    fn resolve_local_kernel_symbols(&mut self);
+
+    fn resolve_local_anon_symbols(&mut self);
+
+    fn capture_and_resolve_symbols(&mut self) {
+        self.capture_file_symbol_metadata();
+        self.resolve_local_kernel_symbols();
+        self.resolve_local_file_symbols();
+        self.resolve_local_anon_symbols();
+    }
+}
+
+impl UniversalSymbols for ExportMachine {
+    fn capture_file_symbol_metadata(&mut self) {
+        #[cfg(target_os = "linux")]
+        self.load_elf_metadata();
+    }
+
+    fn resolve_local_file_symbols(&mut self) {
+        #[cfg(target_os = "linux")]
+        self.resolve_elf_symbols();
+    }
+
+    fn resolve_local_kernel_symbols(&mut self) {
+        self.add_kernel_mappings();
+    }
+
+    fn resolve_local_anon_symbols(&mut self) {
+        #[cfg(target_os = "linux")]
+        self.resolve_perf_map_symbols();
+    }
+}
