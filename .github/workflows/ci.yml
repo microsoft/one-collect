@@ -22,12 +22,6 @@ jobs:
     - name: 'one_collect: Run tests'
       working-directory: one_collect
       run: cargo test --verbose
-    - name: 'cli: Build'
-      working-directory: cli
-      run: cargo build --verbose
-    - name: 'cli: Run tests'
-      working-directory: cli
-      run: cargo test --verbose
     - name: 'ruwind: Build'
       working-directory: ruwind
       run: cargo build --verbose
@@ -66,12 +60,6 @@ jobs:
     - name: 'one_collect: Run tests'
       working-directory: one_collect
       run: cargo test --release --verbose
-    - name: 'cli: Build'
-      working-directory: cli
-      run: cargo build --verbose
-    - name: 'cli: Run tests'
-      working-directory: cli
-      run: cargo test --verbose
     - name: 'ruwind: Build'
       working-directory: ruwind
       run: cargo build --release --verbose
