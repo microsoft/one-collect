@@ -113,5 +113,5 @@ jobs:
     steps:
     - uses: actions/checkout@v3
     - name: Run Docker tests
-      working-directory: test/docker/console-logger
+      working-directory: test/docker/perf_export
       run: ./run.sh
