@@ -1,3 +1,7 @@
+use super::*;
+
+use crate::etw::EtwSession;
+
 pub struct DotNetHelper {
     /* Placeholder */
 }
@@ -7,5 +11,15 @@ impl DotNetHelper {
         Self {
             /* Placeholder */
         }
+    }
+}
+
+impl DotNetHelp for EtwSession {
+    fn with_dotnet_help(
+        self,
+        helper: &mut DotNetHelper) -> Self {
+        /* Placeholder */
+
+        self
     }
 }
