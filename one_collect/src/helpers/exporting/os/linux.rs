@@ -402,6 +402,25 @@ impl ExportProcess {
     }
 }
 
+pub(crate) fn default_export_settings() -> ExportSettings {
+        let helper = if cfg!(target_arch="x86_64") {
+            /* X64 Linux */
+
+            /*
+             * TODO:
+             * When SFRAME is supported, we should query to see
+             * if SFRAME is being supported. If so, we don't need
+             * to use DWARF anymore.
+             */
+            CallstackHelper::new().with_dwarf_unwinding()
+        } else {
+            /* Non-X64 Linux */
+            CallstackHelper::new()
+        };
+
+        ExportSettings::new(helper)
+}
+
 pub(crate) struct OSExportSettings {
     process_fs: bool,
 }

@@ -28,11 +28,18 @@ pub struct UniversalExporter {
 
 impl UniversalExporter {
     pub fn new(settings: ExportSettings) -> Self {
+        let mut cpu_buf_bytes = 64*1024;
+
+        if settings.has_unwinder() {
+            /* Unwinders need more data per-CPU than normal */
+            cpu_buf_bytes = 1024*1024;
+        }
+
         Self {
             settings: Some(settings),
             build_hooks: Vec::new(),
             parsed_hooks: Vec::new(),
-            cpu_buf_bytes: 64*1024,
+            cpu_buf_bytes,
         }
     }
 

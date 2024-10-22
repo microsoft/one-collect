@@ -626,6 +626,12 @@ impl ExportSessionHelp for EtwSession {
     }
 }
 
+pub(crate) fn default_export_settings() -> ExportSettings {
+    let helper = CallstackHelper::new();
+
+    ExportSettings::new(helper)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

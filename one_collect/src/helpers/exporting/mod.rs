@@ -241,15 +241,24 @@ pub struct ExportSettings {
     cpu_profiling: bool,
     cpu_freq: u64,
     cswitches: bool,
+    unwinder: bool,
     callstack_helper: Option<CallstackHelper>,
     #[cfg(target_os = "linux")]
     pub(crate) os: os::OSExportSettings,
     events: Option<Vec<ExportEventCallback>>,
 }
 
+impl Default for ExportSettings {
+    fn default() -> Self {
+        os::default_export_settings()
+    }
+}
+
 impl ExportSettings {
     #[allow(unused_mut)]
     pub fn new(mut callstack_helper: CallstackHelper) -> Self {
+        let unwinder = callstack_helper.has_unwinder();
+
         Self {
             string_buckets: 64,
             callstack_buckets: 512,
@@ -257,11 +266,14 @@ impl ExportSettings {
             cpu_freq: 1000,
             cswitches: true,
             callstack_helper: Some(callstack_helper.with_external_lookup()),
+            unwinder,
             #[cfg(target_os = "linux")]
             os: os::OSExportSettings::new(),
             events: None,
         }
     }
+
+    pub fn has_unwinder(&self) -> bool { self.unwinder }
 
     pub fn with_event(
         self,
