@@ -785,10 +785,11 @@ impl EtwSession {
         self,
         name: &str,
         duration: std::time::Duration) -> anyhow::Result<()> {
+        let now = std::time::Instant::now();
 
         self.parse_until(
             name,
-            move || std::thread::sleep(duration))
+            move || { now.elapsed() >= duration })
     }
 
     fn take_enabled(
@@ -816,7 +817,7 @@ impl EtwSession {
     pub fn parse_until(
         mut self,
         name: &str,
-        until: impl FnOnce() + Send + 'static) -> anyhow::Result<()> {
+        until: impl Fn() -> bool + Send + 'static) -> anyhow::Result<()> {
         let mut session = TraceSession::new(name.into());
 
         /* Run self mutating callbacks for on-demand dynamic hooks */
@@ -892,7 +893,11 @@ impl EtwSession {
             }
 
             /* Run until told to stop */
-            until();
+            let quantum = std::time::Duration::from_millis(15);
+
+            while !until() {
+                std::thread::sleep(quantum);
+            }
 
             /* Disable providers */
             for enable in enabled.values() {
