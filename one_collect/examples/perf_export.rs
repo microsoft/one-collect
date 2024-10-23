@@ -1,101 +1,8 @@
-use one_collect::Writable;
+use one_collect::helpers::dotnet::*;
 
 use one_collect::helpers::exporting::*;
 use one_collect::helpers::exporting::graph::*;
 use one_collect::helpers::exporting::formats::perf_view::*;
-
-#[cfg(target_os = "linux")]
-fn os_exporter(
-    duration: std::time::Duration) -> Writable<ExportMachine> {
-    use one_collect::perf_event::*;
-    use one_collect::helpers::dotnet::*;
-    use one_collect::helpers::callstack::*;
-
-    let need_permission = "Need permission (run via sudo?)";
-
-    let helper = CallstackHelper::new()
-        .with_dwarf_unwinding();
-
-    let settings = ExportSettings::new(helper)
-        .without_cswitches();
-
-    let mut dotnet = DotNetHelper::new()
-        .with_perf_maps();
-
-    let mut builder = RingBufSessionBuilder::new()
-        .with_page_count(256)
-        .with_exporter_events(&settings)
-        .with_dotnet_help(&mut dotnet);
-
-    let mut session = builder.build().unwrap();
-
-    let exporter = session.build_exporter(settings).unwrap();
-
-    session.lost_event().add_callback(|_| {
-        println!("WARN: Lost event data");
-
-        Ok(())
-    });
-
-    session.lost_samples_event().add_callback(|_| {
-        println!("WARN: Lost samples data");
-
-        Ok(())
-    });
-
-    println!("Capturing environment...");
-    session.capture_environment();
-
-    println!("Profiling...");
-    session.enable().expect(need_permission);
-    session.parse_for_duration(duration).unwrap();
-    session.disable().expect(need_permission);
-
-    println!("Adding kernel mappings...");
-    /* Pull in more data, if wanted */
-    exporter.borrow_mut().add_kernel_mappings();
-
-    println!("Resolving elf symbols...");
-    exporter.borrow_mut().load_elf_metadata();
-    exporter.borrow_mut().resolve_elf_symbols();
-
-    println!("Resolving perfmap symbols...");
-    exporter.borrow_mut().resolve_perf_map_symbols();
-
-    dotnet.disable_perf_maps();
-    dotnet.remove_perf_maps();
-
-    exporter
-}
-
-#[cfg(target_os = "windows")]
-fn os_exporter(
-    duration: std::time::Duration) -> Writable<ExportMachine> {
-    use one_collect::etw::*;
-    use one_collect::helpers::callstack::*;
-
-    let helper = CallstackHelper::new();
-
-    let mut session = EtwSession::new()
-        .with_callstack_help(&helper);
-
-    let settings = ExportSettings::new(helper)
-        .without_cswitches();
-
-    let exporter = session.build_exporter(settings).unwrap();
-
-    println!("Capturing environment...");
-    session.capture_environment();
-
-    println!("Profiling...");
-    session.parse_for_duration("One-Collect Export Example", duration).unwrap();
-
-    println!("Adding kernel mappings...");
-    /* Pull in more data, if wanted */
-    exporter.borrow_mut().add_kernel_mappings();
-
-    exporter
-}
 
 fn main() {
     let args: Vec<_> = std::env::args().collect();
@@ -109,8 +16,26 @@ fn main() {
 
     let duration = std::time::Duration::from_secs(5);
 
-    let exporter = os_exporter(duration);
-    let exporter = exporter.borrow();
+    let settings = ExportSettings::default()
+        .without_cswitches();
+
+    let mut dotnet = UniversalDotNetHelper::default()
+        .with_dynamic_symbols();
+
+    let universal = UniversalExporter::new(settings)
+        .with_dotnet_help(&dotnet);
+
+    println!("Capturing...");
+    let exporter = universal.parse_for_duration("perf_export", duration)
+        .expect("Check permissions.");
+
+    dotnet.disable_dynamic_symbols();
+
+    let mut exporter = exporter.borrow_mut();
+
+    exporter.capture_and_resolve_symbols();
+
+    dotnet.cleanup_dynamic_symbols();
 
     println!("Exporting...");
 
