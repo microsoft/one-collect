@@ -270,7 +270,7 @@ impl DotNetHelper {
 
 impl DotNetHelp for RingBufSessionBuilder {
     fn with_dotnet_help(
-        &mut self,
+        mut self,
         helper: &mut DotNetHelper) -> Self {
         let perf_maps = helper.perf_maps;
         let perf_maps_procs = match helper.perf_map_procs.as_ref() {

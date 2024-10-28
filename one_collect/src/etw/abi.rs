@@ -700,12 +700,18 @@ extern fn event_callback(record: *const EVENT_RECORD) {
 }
 
 impl TraceSession {
-    pub fn new(name: String) -> Self {
-        Self {
+    pub fn new(
+        name: String,
+        buf_size_kb: u32) -> Self {
+        let mut session = Self {
             properties: EVENT_TRACE_PROPERTIES::default(),
             name,
             handle: 0,
-        }
+        };
+
+        session.properties.BufferSize = buf_size_kb;
+
+        session
     }
 
     pub fn handle(&self) -> u64 { self.handle }

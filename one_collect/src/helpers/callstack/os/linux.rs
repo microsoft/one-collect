@@ -384,6 +384,8 @@ impl CallstackHelper {
         clone
     }
 
+    pub fn has_unwinder(&self) -> bool { self.unwinder.is_some() }
+
     #[cfg(target_arch = "x86_64")]
     pub fn with_dwarf_unwinding(&mut self) -> Self {
         let mut clone = self.clone_mut();

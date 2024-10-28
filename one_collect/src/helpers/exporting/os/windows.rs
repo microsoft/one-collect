@@ -7,6 +7,9 @@ use crate::etw::*;
 /* OS Specific Session Type */
 pub type Session = EtwSession;
 
+/* OS Specific Session Builder Type */
+pub type SessionBuilder = EtwSession;
+
 trait PushWide {
     fn push_wide_str(
         &mut self,
@@ -621,6 +624,12 @@ impl ExportSessionHelp for EtwSession {
 
         exporter.hook_to_session(self)
     }
+}
+
+pub(crate) fn default_export_settings() -> ExportSettings {
+    let helper = CallstackHelper::new();
+
+    ExportSettings::new(helper)
 }
 
 #[cfg(test)]

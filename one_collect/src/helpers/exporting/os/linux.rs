@@ -26,6 +26,9 @@ use self::symbols::PerfMapSymbolReader;
 /* OS Specific Session Type */
 pub type Session = PerfSession;
 
+/* OS Specific Session Builder Type */
+pub type SessionBuilder = RingBufSessionBuilder;
+
 #[derive(Clone)]
 pub(crate) struct OSExportProcess {
     root_fs: Option<OpenAt>,
@@ -397,6 +400,25 @@ impl ExportProcess {
         // If the symbol file cannot be opened, does not match, or does not contain any symbols.
         None
     }
+}
+
+pub(crate) fn default_export_settings() -> ExportSettings {
+        let helper = if cfg!(target_arch="x86_64") {
+            /* X64 Linux */
+
+            /*
+             * TODO:
+             * When SFRAME is supported, we should query to see
+             * if SFRAME is being supported. If so, we don't need
+             * to use DWARF anymore.
+             */
+            CallstackHelper::new().with_dwarf_unwinding()
+        } else {
+            /* Non-X64 Linux */
+            CallstackHelper::new()
+        };
+
+        ExportSettings::new(helper)
 }
 
 pub(crate) struct OSExportSettings {

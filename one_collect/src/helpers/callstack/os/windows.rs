@@ -236,6 +236,8 @@ impl CallstackHelper {
         self
     }
 
+    pub fn has_unwinder(&self) -> bool { false }
+
     pub fn to_reader(self) -> CallstackReader {
         CallstackReader {
             ancillary: self.ancillary.borrow().clone(),
