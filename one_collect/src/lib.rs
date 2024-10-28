@@ -2,10 +2,7 @@ pub mod event;
 pub mod sharing;
 pub mod helpers;
 pub mod intern;
-pub mod state;
 
-#[cfg(target_os = "linux")]
-pub mod session;
 #[cfg(target_os = "linux")]
 pub mod tracefs;
 #[cfg(target_os = "linux")]
