@@ -9,7 +9,6 @@ use std::rc::Rc;
 use super::*;
 use crate::sharing::*;
 use crate::event::*;
-use crate::state::*;
 use crate::PathBufInteger;
 
 pub mod abi;
@@ -202,7 +201,6 @@ pub struct PerfSession {
     source: Box<dyn PerfDataSource>,
     source_enabled: bool,
     events: HashMap<usize, Event>,
-    state: Writable<SessionState>,
     errors: Vec<anyhow::Error>,
     event_error_callback: Option<Box<dyn Fn(&Event, &anyhow::Error)>>,
 
@@ -248,9 +246,6 @@ pub struct PerfSession {
     /* Header data (static) */
     misc_field: DataFieldRef,
     data_type_field: DataFieldRef,
-
-    /* State tracking */
-    process_tracking_options: ProcessTrackingOptions,
 }
 
 impl Drop for PerfSession {
@@ -266,14 +261,12 @@ impl Drop for PerfSession {
 
 impl PerfSession {
     pub fn new(
-        source: Box<dyn PerfDataSource>,
-        process_tracking_options: ProcessTrackingOptions) -> Self {
+        source: Box<dyn PerfDataSource>) -> Self {
 
-        let mut session = Self {
+        let session = Self {
             source,
             source_enabled: false,
             events: HashMap::new(),
-            state: Writable::new(SessionState::new()),
             errors: Vec::new(),
             event_error_callback: None,
 
@@ -319,12 +312,7 @@ impl PerfSession {
             /* Header data */
             misc_field: DataFieldRef::new(),
             data_type_field: DataFieldRef::new(),
-
-            /* State tracking */
-            process_tracking_options,
         };
-
-        session.track_processes(&process_tracking_options);
 
         /* Header static offsets */
         session.data_type_field.update(0, 4);
@@ -333,120 +321,14 @@ impl PerfSession {
         session
     }
 
-    fn track_processes(
-        &mut self,
-        process_tracking_options: &ProcessTrackingOptions) {
-
-        if !process_tracking_options.any() {
-            return;
-        }
-
-        let session_state = self.state.clone();
-        let comm_event = self.comm_event();
-        let comm_event_format = comm_event.format();
-        let pid_field = comm_event_format.get_field_ref_unchecked("pid");
-        let tid_field = comm_event_format.get_field_ref_unchecked("tid");
-        let comm_field = comm_event_format.get_field_ref_unchecked("comm[]");
-
-        let mut path_buf = PathBuf::new();
-        path_buf.push("/proc");
-
-        comm_event.add_callback(move |data| {
-            let format = data.format();
-            let event_data = data.event_data();
-
-            let pid = format.get_u32(pid_field, event_data)?;
-            let tid = format.get_u32(tid_field, event_data)?;
-
-            // When pid == tid, the process is new.  Otherwise, it is a new thread.
-            // Ignore swapper (pid 0).
-            if (pid == tid) && (pid != 0) {
-                let proc_name = format.get_str(comm_field, event_data)?;
-
-                session_state.write(|state| {
-                    let proc = state.new_process(pid);
-                    let mut use_procfs = false;
-
-                    // Check procfs if proc_name is 15 chars (length limit of comm_event).
-                    if proc_name.len() == 15 {
-                        path_buf.push_u32(pid);
-                        if let Some(proc_name) = procfs::get_comm(&mut path_buf) {
-                            use_procfs = true;
-                            proc.set_name(proc_name.as_str());
-                        }
-                        path_buf.pop();
-                    }
-
-                    if !use_procfs {
-                        proc.set_name(proc_name);
-                    }
-                });
-            }
-
-            Ok(())
-        });
-
-        let session_state = self.state.clone();
-        let fork_event = self.fork_event();
-        let fork_event_format = fork_event.format();
-        let pid_field: EventFieldRef = fork_event_format.get_field_ref_unchecked("pid");
-        let ppid_field = fork_event_format.get_field_ref_unchecked("ppid");
-
-        fork_event.add_callback(move |data| {
-            let format = data.format();
-            let event_data = data.event_data();
-
-            let pid = format.get_u32(pid_field, event_data)?;
-            let ppid = format.get_u32(ppid_field, event_data)?;
-
-            session_state.write(|state| {
-                state.fork_process(pid, ppid);
-            });
-
-            Ok(())
-        });
-
-        let session_state = self.state.clone();
-        let exit_event = self.exit_event();
-        let exit_event_format = exit_event.format();
-        let pid_field = exit_event_format.get_field_ref_unchecked("pid");
-        let tid_field = exit_event_format.get_field_ref_unchecked("tid");
-
-        exit_event.add_callback(move |data| {
-            let format = data.format();
-            let event_data = data.event_data();
-
-            let pid = format.get_u32(pid_field, event_data)?;
-            let tid = format.get_u32(tid_field, event_data)?;
-
-            // When pid == tid, the process has died.  Otherwise it is a thread death.
-            // Ignore swapper (pid 0).
-            if (pid == tid) && (pid != 0) {
-                session_state.write(|state| {
-                    state.drop_process(pid);
-                });
-            }
-
-            Ok(())
-        });
-    }
-
     pub fn set_event_error_callback(
         &mut self,
         callback: impl Fn(&Event, &anyhow::Error) + 'static) {
         self.event_error_callback = Some(Box::new(callback));
     }
 
-    pub fn process_tracking_options(&self) -> &ProcessTrackingOptions {
-        &self.process_tracking_options
-    }
-
     pub fn ancillary_data(&self) -> ReadOnly<AncillaryData> {
         self.ancillary.read_only()
-    }
-
-    pub fn session_state(&self) -> ReadOnly<SessionState> {
-        self.state.read_only()
     }
 
     pub fn cpu_profile_event(&mut self) -> &mut Event {
@@ -1391,7 +1273,7 @@ mod tests {
                 "3".into(), "unsigned char".into(),
                 LocationType::Static, 2, 1));
 
-        let mut session = PerfSession::new(Box::new(mock), ProcessTrackingOptions::default());
+        let mut session = PerfSession::new(Box::new(mock));
 
         let count = Arc::new(AtomicUsize::new(0));
 
@@ -1489,7 +1371,7 @@ mod tests {
         perf_data.clear();
 
         /* Create session with our mock data */
-        let mut session = PerfSession::new(Box::new(mock), ProcessTrackingOptions::default());
+        let mut session = PerfSession::new(Box::new(mock));
 
         /* Create a Mock event that describes our mock data */
         let mut e = Event::new(id as usize, "test".into());

@@ -5,7 +5,7 @@ use std::fs::File;
 
 #[cfg(target_os = "linux")]
 fn main() {
-    use one_collect::state::ProcessTrackingOptions;
+    use std::collections::HashMap;
 
     use one_collect::perf_event::{
         self,
@@ -25,22 +25,88 @@ fn main() {
         .with_task_records()
         .with_cswitch_records();
 
-    /* Auto-track names */
-    let tracking = ProcessTrackingOptions::new()
-        .with_process_names();
-
     /* Build a session with those events */
     let mut session = RingBufSessionBuilder::new()
         .with_page_count(4)
         .with_kernel_events(kernel)
-        .track_process_state(tracking)
         .build()
         .expect(need_permission);
+
+    let state: HashMap<u32, String> = HashMap::new();
+    let state = Writable::new(state);
+
+    /* Hook comm event */
+    let comm_event = session.comm_event();
+    let comm_event_format = comm_event.format();
+    let pid_field = comm_event_format.get_field_ref_unchecked("pid");
+    let tid_field = comm_event_format.get_field_ref_unchecked("tid");
+    let comm_field = comm_event_format.get_field_ref_unchecked("comm[]");
+    let event_state = state.clone();
+
+    comm_event.add_callback(move |data| {
+        let format = data.format();
+        let event_data = data.event_data();
+
+        let pid = format.get_u32(pid_field, event_data)?;
+        let tid = format.get_u32(tid_field, event_data)?;
+
+        if (pid == tid) && (pid != 0) {
+            let proc_name = format.get_str(comm_field, event_data)?;
+
+            event_state.borrow_mut().insert(pid, proc_name.to_owned());
+        }
+
+        Ok(())
+    });
+
+    /* Hook fork event */
+    let fork_event = session.fork_event();
+    let fork_event_format = fork_event.format();
+    let pid_field = fork_event_format.get_field_ref_unchecked("pid");
+    let ppid_field = fork_event_format.get_field_ref_unchecked("ppid");
+    let event_state = state.clone();
+
+    fork_event.add_callback(move |data| {
+        let format = data.format();
+        let event_data = data.event_data();
+
+        let pid = format.get_u32(pid_field, event_data)?;
+        let ppid = format.get_u32(ppid_field, event_data)?;
+
+        let mut event_state = event_state.borrow_mut();
+        let mut parent_name = None;
+
+        if let Some(proc_name) = event_state.get(&ppid) {
+            parent_name = Some(proc_name.to_owned());
+        }
+
+        if let Some(parent_name) = parent_name {
+            event_state.insert(pid, parent_name);
+        }
+
+        Ok(())
+    });
+
+    /* Hook exit event */
+    let exit_event = session.exit_event();
+    let exit_event_format = exit_event.format();
+    let pid_field = exit_event_format.get_field_ref_unchecked("pid");
+    let event_state = state.clone();
+
+    exit_event.add_callback(move |data| {
+        let format = data.format();
+        let event_data = data.event_data();
+
+        let pid = format.get_u32(pid_field, event_data)?;
+
+        event_state.borrow_mut().remove(&pid);
+
+        Ok(())
+    });
 
     /* Hook cswitch events */
     let misc = session.misc_data_ref();
     let time = session.time_data_ref();
-    let state = session.session_state();
     let cswitch = session.cswitch_event();
     let format = cswitch.format();
     let next_prev_pid = format.get_field_ref_unchecked("next_prev_pid");
@@ -70,8 +136,8 @@ fn main() {
             perf_event::abi::PERF_RECORD_MISC_SWITCH_OUT;
 
         state.read(|state| {
-            let comm = match state.process(pid) {
-                Some(state) => { state.name() },
+            let comm = match state.get(&pid) {
+                Some(proc_name) => { proc_name },
                 None => { "" },
             };
 
