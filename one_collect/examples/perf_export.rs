@@ -17,7 +17,7 @@ fn main() {
     let duration = std::time::Duration::from_secs(5);
 
     let settings = ExportSettings::default()
-        .without_cswitches();
+        .with_cpu_profiling(1000);
 
     let mut dotnet = UniversalDotNetHelper::default()
         .with_dynamic_symbols();

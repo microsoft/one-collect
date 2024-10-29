@@ -645,7 +645,9 @@ mod tests {
         let mut session = EtwSession::new()
             .with_callstack_help(&helper);
 
-        let settings = ExportSettings::new(helper);
+        let settings = ExportSettings::new(helper)
+            .with_cpu_profiling(1000)
+            .with_cswitches();
 
         let exporter = session.build_exporter(settings).unwrap();
 

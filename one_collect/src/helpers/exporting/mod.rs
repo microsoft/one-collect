@@ -262,9 +262,9 @@ impl ExportSettings {
         Self {
             string_buckets: 64,
             callstack_buckets: 512,
-            cpu_profiling: true,
+            cpu_profiling: false,
             cpu_freq: 1000,
-            cswitches: true,
+            cswitches: false,
             callstack_helper: Some(callstack_helper.with_external_lookup()),
             unwinder,
             #[cfg(target_os = "linux")]
@@ -304,10 +304,11 @@ impl ExportSettings {
         clone
     }
 
-    pub fn with_cpu_profile_freq(
+    pub fn with_cpu_profiling(
         self,
         freq: u64) -> Self {
         let mut clone = self;
+        clone.cpu_profiling = true;
         clone.cpu_freq = freq;
         clone
     }
@@ -320,15 +321,9 @@ impl ExportSettings {
         clone
     }
 
-    pub fn without_cswitches(self) -> Self {
+    pub fn with_cswitches(self) -> Self {
         let mut clone = self;
-        clone.cswitches = false;
-        clone
-    }
-
-    pub fn without_cpu_profiling(self) -> Self {
-        let mut clone = self;
-        clone.cpu_profiling = false;
+        clone.cswitches = true;
         clone
     }
 }
