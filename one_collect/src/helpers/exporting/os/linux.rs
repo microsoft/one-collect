@@ -1212,7 +1212,9 @@ mod tests {
         let helper = CallstackHelper::new()
             .with_dwarf_unwinding();
 
-        let mut settings = ExportSettings::new(helper);
+        let mut settings = ExportSettings::new(helper)
+            .with_cpu_profiling(1000)
+            .with_cswitches();
 
         /* Hookup page_fault as a new event sample */
         let tracefs = TraceFS::open().unwrap();
