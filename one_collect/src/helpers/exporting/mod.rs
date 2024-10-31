@@ -1,11 +1,15 @@
 use std::collections::{HashMap, HashSet};
 use std::collections::hash_map::{Values, ValuesMut};
+use std::path::Path;
 
 use crate::Writable;
 use crate::event::{Event, EventData};
 use crate::intern::{InternedStrings, InternedCallstacks};
 
 use crate::helpers::callstack::CallstackHelper;
+
+use modulemetadata::ModuleMetadata;
+use crate::helpers::modules::pe_file::PEModuleMetadata;
 
 mod lookup;
 
@@ -22,8 +26,11 @@ pub type ExportDevNode = ruwind::ModuleKey;
 
 pub mod graph;
 pub mod formats;
+pub mod modulemetadata;
 
 pub mod universal;
+use modulemetadata::ModuleMetadataLookup;
+
 pub use universal::{
     UniversalExporter,
     UniversalSymbols,
@@ -334,6 +341,7 @@ pub struct ExportMachine {
     callstacks: InternedCallstacks,
     os: os::OSExportMachine,
     procs: HashMap<u32, ExportProcess>,
+    module_metadata: ModuleMetadataLookup,
     cswitches: HashMap<u32, ExportCSwitch>,
     kinds: Vec<String>,
     map_index: usize,
@@ -354,6 +362,7 @@ impl ExportMachine {
             callstacks,
             os: os::OSExportMachine::new(),
             procs: HashMap::new(),
+            module_metadata: ModuleMetadataLookup::new(),
             cswitches: HashMap::new(),
             kinds: Vec::new(),
             map_index: 0,
@@ -556,6 +565,39 @@ impl ExportMachine {
         self.process_mut(pid).add_sample(sample);
 
         Ok(())
+    }
+
+    pub fn load_pe_metadata(
+        &mut self) {
+        for proc in self.procs.values() {
+            for map in proc.mappings() {
+                if let Some(key) = map.node() {
+
+                    // Handle each binary exactly once, regardless of of it's loaded into multiple processes.
+                    if self.module_metadata.contains(key) {
+                        continue;
+                    }
+
+                    // Skip anonymous mappings.
+                    if map.anon() {
+                        continue;
+                    }
+
+                    if let Ok(filename) = self.strings.from_id(map.filename_id()) {
+                        if filename.ends_with(".dll") || filename.ends_with(".exe") {
+                            if let ModuleMetadata::PE(pe_metadata) = self.module_metadata.entry(*key)
+                                .or_insert(ModuleMetadata::PE(PEModuleMetadata::new())) {
+
+                                if let Ok(file) = proc.open_file(Path::new(filename)) {
+                                    // Ignore failures for now, but ideally, we log these failures.
+                                    let _ = pe_metadata.get_metadata_direct(file);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

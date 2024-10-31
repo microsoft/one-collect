@@ -205,6 +205,7 @@ impl UniversalSymbols for ExportMachine {
     fn capture_file_symbol_metadata(&mut self) {
         #[cfg(target_os = "linux")]
         self.load_elf_metadata();
+        self.load_pe_metadata();
     }
 
     fn resolve_local_file_symbols(&mut self) {

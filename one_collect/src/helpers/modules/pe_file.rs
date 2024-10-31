@@ -1,26 +1,59 @@
 use std::io::{Read, Seek, SeekFrom};
 use std::fs::File;
-use std::error::Error;
 use std::mem::{zeroed, size_of};
 use std::string::{FromUtf8Error, FromUtf16Error};
 use std::slice;
 
-#[derive(Default)]
-pub struct PEModuleInfo {
-    pub machine: u16,
-    pub date_time: u32,
-    pub symbol_name: Option<String>,
-    pub symbol_age: u32,
-    pub symbol_sig: [u8; 16],
-    pub version_name: Option<String>,
-    pub perfmap_sig: [u8; 16],
-    pub perfmap_ver: u32,
-    pub perfmap_name: Option<String>,
+pub struct PEModuleMetadata {
+    machine: u16,
+    date_time: u32,
+    symbol_name: Option<String>,
+    symbol_age: u32,
+    symbol_sig: [u8; 16],
+    version_name: Option<String>,
+    perfmap_sig: [u8; 16],
+    perfmap_version: u32,
+    perfmap_name: Option<String>,
 }
 
-impl PEModuleInfo {
-    pub fn reset(
-        &mut self) {
+impl Default for PEModuleMetadata {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PEModuleMetadata {
+    pub fn new() -> Self {
+        Self {
+            machine: 0,
+            date_time: 0,
+            symbol_name: None,
+            symbol_age: 0,
+            symbol_sig: [0; 16],
+            version_name: None,
+            perfmap_sig: [0; 16],
+            perfmap_version: 0,
+            perfmap_name: None,
+        }
+    }
+
+    pub fn get_metadata(
+        &mut self,
+        path: &str) -> anyhow::Result<()> {
+        let file = File::open(path)?;
+        self.get_metadata_direct(
+            file)
+    }
+
+    pub fn get_metadata_direct(
+        &mut self,
+        mut file: File) -> anyhow::Result<()> {
+        get_pe_info(&mut file, self)?;
+
+        Ok(())
+    }
+
+    pub fn reset(&mut self) {
         self.machine = 0;
         self.date_time = 0;
         self.symbol_name = None;
@@ -28,27 +61,55 @@ impl PEModuleInfo {
         self.symbol_sig = [0; 16];
         self.version_name = None;
         self.perfmap_sig = [0; 16];
-        self.perfmap_ver = 0;
+        self.perfmap_version = 0;
         self.perfmap_name = None;
     }
 
-    pub fn get_info(
-        &mut self,
-        path: &str) -> anyhow::Result<()> {
-        let file = File::open(path)?;
-        self.get_info_direct(
-            file)
+    pub fn machine(&self) -> u16 {
+        self.machine
     }
 
-    pub fn get_info_direct(
-        &mut self,
-        mut file: File) -> anyhow::Result<()> {
-        get_pe_info(&mut file, self)?;
+    pub fn date_time(&self) -> u32 {
+        self.date_time
+    }
 
-        Ok(())
+    pub fn symbol_name(&self) -> Option<&str> {
+        match &self.symbol_name {
+            Some(name) => Some(name.as_str()),
+            None => None
+        }
+    }
+
+    pub fn symbol_age(&self) -> u32 {
+        self.symbol_age
+    }
+
+    pub fn symbol_sig(&self) -> &[u8; 16] {
+        &self.symbol_sig
+    }
+
+    pub fn version_name(&self) -> Option<&str> {
+        match &self.version_name {
+            Some(name) => Some(name.as_str()),
+            None => None
+        }
+    }
+
+    pub fn perfmap_sig(&self) -> &[u8; 16] {
+        &self.perfmap_sig
+    }
+
+    pub fn perfmap_version(&self) -> u32 {
+        self.perfmap_version
+    }
+
+    pub fn perfmap_name(&self) -> Option<&str> {
+        match &self.perfmap_name {
+            Some(name) => Some(name.as_str()),
+            None => None
+        }
     }
 }
-
 
 #[repr(C)]
 struct PEHeader {
@@ -445,7 +506,7 @@ fn get_string(
 
 fn get_pe_info(
     reader: &mut (impl Read + Seek),
-    module: &mut PEModuleInfo) -> anyhow::Result<()> {
+    module: &mut PEModuleMetadata) -> anyhow::Result<()> {
     let dbg_offset: u64;
     let dbg_size: u64;
     let res_offset: u64;
@@ -504,7 +565,7 @@ fn get_pe_info(
                 read_cv_perfmap(reader, &mut cv)?;
                 if cv.perfmap_magic == PERFMAP_MAGIC {
                     module.perfmap_sig[0..16].clone_from_slice(&cv.perfmap_sig);
-                    module.perfmap_ver = cv.perfmap_ver;
+                    module.perfmap_version = cv.perfmap_ver;
                     module.perfmap_name = Some(get_string(&cv.perfmap_name)?);
                 }
             }
@@ -650,7 +711,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn get_details() {
-        let mut m = PEModuleInfo::default();
+        let mut m = PEModuleMetadata::default();
 
         let windir = env::var("WINDIR").unwrap();
         let ntdll_path = format!("{}\\System32\\ntdll.dll", windir);
