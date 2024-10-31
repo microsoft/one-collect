@@ -1,4 +1,4 @@
-use std::io::{Read, Seek, SeekFrom, Error as IOError, ErrorKind};
+use std::io::{Read, Seek, SeekFrom};
 use std::fs::File;
 use std::error::Error;
 use std::mem::{zeroed, size_of};
@@ -33,29 +33,19 @@ impl PEModuleInfo {
     }
 
     pub fn get_info(
-        path: &str) -> Result<PEModuleInfo, Box<dyn Error>> {
+        &mut self,
+        path: &str) -> anyhow::Result<()> {
         let file = File::open(path)?;
-        Self::get_info_direct(
+        self.get_info_direct(
             file)
     }
 
     pub fn get_info_direct(
-        mut file: File) -> Result<PEModuleInfo, Box<dyn Error>> {
-        let mut module = PEModuleInfo {
-            machine: 0,
-            date_time: 0,
-            symbol_name: None,
-            symbol_age: 0,
-            symbol_sig: [0; 16],
-            version_name: None,
-            perfmap_sig: [0; 16],
-            perfmap_ver: 0,
-            perfmap_name: None,
-        };
+        &mut self,
+        mut file: File) -> anyhow::Result<()> {
+        get_pe_info(&mut file, self)?;
 
-        get_pe_info(&mut file, &mut module)?;
-
-        Ok(module)
+        Ok(())
     }
 }
 
@@ -175,7 +165,7 @@ struct CodeViewPerfMap {
 
 fn read_header(
     reader: &mut impl Read,
-    header: &mut PEHeader) -> Result<(), Box<dyn Error>> {
+    header: &mut PEHeader) -> anyhow::Result<()> {
     unsafe {
         reader.read_exact(
             slice::from_raw_parts_mut(
@@ -188,7 +178,7 @@ fn read_header(
 
 fn read_directory(
     reader: &mut impl Read,
-    dir: &mut PEDataDirectory) -> Result<(), Box<dyn Error>> {
+    dir: &mut PEDataDirectory) -> anyhow::Result<()> {
     unsafe {
         reader.read_exact(
             slice::from_raw_parts_mut(
@@ -201,7 +191,7 @@ fn read_directory(
 
 fn read_cv_nb10(
     reader: &mut impl Read,
-    dir: &mut CodeViewNb10) -> Result<(), Box<dyn Error>> {
+    dir: &mut CodeViewNb10) -> anyhow::Result<()> {
     unsafe {
         reader.read_exact(
             slice::from_raw_parts_mut(
@@ -214,7 +204,7 @@ fn read_cv_nb10(
 
 fn read_cv_rsds(
     reader: &mut impl Read,
-    dir: &mut CodeViewRsds) -> Result<(), Box<dyn Error>> {
+    dir: &mut CodeViewRsds) -> anyhow::Result<()> {
     unsafe {
         reader.read_exact(
             slice::from_raw_parts_mut(
@@ -227,7 +217,7 @@ fn read_cv_rsds(
 
 fn read_cv_perfmap(
     reader: &mut impl Read,
-    dir: &mut CodeViewPerfMap) -> Result<(), Box<dyn Error>> {
+    dir: &mut CodeViewPerfMap) -> anyhow::Result<()> {
     unsafe {
         reader.read_exact(
             slice::from_raw_parts_mut(
@@ -240,7 +230,7 @@ fn read_cv_perfmap(
 
 fn read_debug_directory(
     reader: &mut impl Read,
-    dir: &mut PEDebugDirectory) -> Result<(), Box<dyn Error>> {
+    dir: &mut PEDebugDirectory) -> anyhow::Result<()> {
     unsafe {
         reader.read_exact(
             slice::from_raw_parts_mut(
@@ -253,7 +243,7 @@ fn read_debug_directory(
 
 fn read_res_directory(
     reader: &mut impl Read,
-    dir: &mut PEResDirectory) -> Result<(), Box<dyn Error>> {
+    dir: &mut PEResDirectory) -> anyhow::Result<()> {
     unsafe {
         reader.read_exact(
             slice::from_raw_parts_mut(
@@ -266,7 +256,7 @@ fn read_res_directory(
 
 fn read_res_entry(
     reader: &mut impl Read,
-    entry: &mut PEResEntry) -> Result<(), Box<dyn Error>> {
+    entry: &mut PEResEntry) -> anyhow::Result<()> {
     unsafe {
         reader.read_exact(
             slice::from_raw_parts_mut(
@@ -279,7 +269,7 @@ fn read_res_entry(
 
 fn read_res_data(
     reader: &mut impl Read,
-    entry: &mut PEResData) -> Result<(), Box<dyn Error>> {
+    entry: &mut PEResData) -> anyhow::Result<()> {
     unsafe {
         reader.read_exact(
             slice::from_raw_parts_mut(
@@ -293,7 +283,7 @@ fn read_res_data(
 fn find_res_entry(
     reader: &mut (impl Read + Seek),
     offset: u64,
-    wanted_id: u32) -> Result<Option<PEResEntry>, Box<dyn Error>> {
+    wanted_id: u32) -> anyhow::Result<Option<PEResEntry>> {
     let mut res_dir: PEResDirectory = unsafe { zeroed() };
     let mut entry: PEResEntry = unsafe { zeroed() };
     reader.seek(SeekFrom::Start(offset))?;
@@ -317,7 +307,7 @@ fn find_res_entry(
 
 fn read_section(
     reader: &mut impl Read,
-    sec: &mut PESection) -> Result<(), Box<dyn Error>> {
+    sec: &mut PESection) -> anyhow::Result<()> {
     unsafe {
         reader.read_exact(
             slice::from_raw_parts_mut(
@@ -329,7 +319,7 @@ fn read_section(
 }
 
 fn read_u32(
-    reader: &mut impl Read) -> Result<u32, Box<dyn Error>> {
+    reader: &mut impl Read) -> anyhow::Result<u32> {
     let mut v: [u8; 4] = [0; 4];
     reader.read_exact(&mut v)?;
     Ok(u32::from_le_bytes(v))
@@ -338,7 +328,7 @@ fn read_u32(
 fn get_pe_header(
     reader: &mut (impl Read + Seek),
     pe_header: &mut PEHeader,
-    pe_offset: &mut u64) -> Result<(), Box<dyn Error>> {
+    pe_offset: &mut u64) -> anyhow::Result<()> {
     /* Get offset to pe header */
     reader.seek(SeekFrom::Start(0x3C))?;
     *pe_offset = read_u32(reader)? as u64;
@@ -354,7 +344,7 @@ fn va_to_offset(
     reader: &mut (impl Read + Seek),
     pe_header: &PEHeader,
     pe_offset: u64,
-    va: u32) -> Result<Option<u64>, Box<dyn Error>> {
+    va: u32) -> anyhow::Result<Option<u64>> {
     /* Read sections */
     let mut sections_offset: u64 = pe_offset as u64;
     sections_offset += 24;
@@ -382,7 +372,7 @@ fn get_directory_data(
     reader: &mut (impl Read + Seek),
     pe_header: &PEHeader,
     pe_offset: u64,
-    index: u64) -> Result<(u64, u64), Box<dyn Error>> {
+    index: u64) -> anyhow::Result<(u64, u64)> {
     /* Get data header offset */
     let data_offset: u64;
 
@@ -391,11 +381,10 @@ fn get_directory_data(
     } else if pe_header.magic == 0x20b {
         data_offset = pe_offset + 24 + 112 + (index * 8);
     } else {
-        return Err(Box::new(IOError::new(
-            ErrorKind::Other,
+        return Err(anyhow::Error::msg(
             format!(
                 "Unexpected magic value {}",
-                pe_header.magic))));
+                pe_header.magic)));
     }
 
     /* Read data directory */
@@ -454,9 +443,9 @@ fn get_string(
     String::from_utf8((&name[0..null_pos]).to_vec())
 }
 
-pub fn get_pe_info(
+fn get_pe_info(
     reader: &mut (impl Read + Seek),
-    module: &mut PEModuleInfo) -> Result<(), Box<dyn Error>> {
+    module: &mut PEModuleInfo) -> anyhow::Result<()> {
     let dbg_offset: u64;
     let dbg_size: u64;
     let res_offset: u64;
@@ -656,6 +645,7 @@ pub fn get_pe_info(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
 
     #[cfg(target_os = "windows")]
     #[test]
