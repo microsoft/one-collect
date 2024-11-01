@@ -1,8 +1,6 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-#[cfg_attr(target_os = "linux", path = "os/linux.rs")]
-#[cfg_attr(target_os = "windows", path = "os/windows.rs")]
 pub mod os;
 
 pub type EventExtension = os::EventExtension;

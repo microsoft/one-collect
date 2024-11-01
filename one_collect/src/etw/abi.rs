@@ -1,4 +1,9 @@
-use std::os::windows::io::RawHandle;
+/*
+ * std::os::windows::RawHandle is not available when
+ * documenting windows code on non-windows builds.
+ * Use the common definition to allow for this.
+ */
+type RawHandle = *mut std::os::raw::c_void;
 
 use super::*;
 
