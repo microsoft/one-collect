@@ -12,7 +12,7 @@ pub mod perf_event;
 #[cfg(target_os = "linux")]
 pub mod openat;
 
-#[cfg(target_os = "windows")]
+#[cfg(any(doc, target_os = "windows"))]
 pub mod etw;
 
 pub use sharing::{Writable, ReadOnly};
