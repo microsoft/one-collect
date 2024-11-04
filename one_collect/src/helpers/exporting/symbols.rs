@@ -384,6 +384,180 @@ impl ExportSymbolReader for PerfMapSymbolReader {
     }
 }
 
+pub struct R2RMapSymbolReader {
+    reader: BufReader<File>,
+    buffer: String,
+    start_ip: u64,
+    end_ip: u64,
+    name: String,
+    done: bool,
+    signature: [u8; 16],
+}
+
+impl R2RMapSymbolReader {
+    pub fn new(file: File) -> Self {
+        Self {
+            reader: BufReader::new(file),
+            buffer: String::with_capacity(256),
+            name: String::with_capacity(256),
+            start_ip: 0,
+            end_ip: 0,
+            done: true,
+            signature: [0; 16],
+        }
+    }
+
+    pub fn signature(&self) -> &[u8; 16] {
+        &self.signature
+    }
+
+    fn initialize(&mut self) {
+        loop {
+            self.load_next();
+
+            if self.done {
+                break;
+            }
+
+            if self.start_ip == 0xFFFFFFFF {
+                if Self::read_signature(self.name.as_str(), &mut self.signature).is_err() {
+                    // If there was a failure reading the signature, reset to zero.
+                    self.signature = [0; 16];
+                }
+                break;
+            }
+        }
+    }
+
+    fn read_signature(
+        name: &str,
+        buf: &mut [u8; 16]) -> anyhow::Result<()> {
+        // Don't set the signature if it's not the right length (16 bytes).
+        if name.len() != 32 {
+            return Ok(());
+        }
+
+        for i in 0..16 {
+            let byte_str = &name[(2*i)..(2*i)+2];
+            buf[i] = u8::from_str_radix(byte_str, 16)?;
+        }
+
+        Ok(())
+    }
+
+    fn load_next(&mut self) {
+        loop {
+            self.buffer.clear();
+
+            self.start_ip = 0;
+            self.end_ip = 0;
+            self.name.clear();
+
+            if let Ok(len) = self.reader.read_line(&mut self.buffer) {
+                if len == 0 {
+                    break;
+                }
+            } else {
+                break;
+            }
+
+            for (index, part) in self.buffer.splitn(3, ' ').enumerate() {
+                match index {
+                    0 => {
+                        if part.starts_with("0x") || part.starts_with("0X") {
+                            self.start_ip = u64::from_str_radix(&part[2..], 16).unwrap();
+                        }
+                        else {
+                            self.start_ip = u64::from_str_radix(part, 16).unwrap();
+                        }
+                    },
+                    1 => {
+                        let size = u64::from_str_radix(part, 16).unwrap();
+                        self.end_ip = self.start_ip + size;
+                    },
+                    _ => {
+                        /*
+                         * Symbols sometimes have nulls in them. When we see
+                         * this we'll just use up to the null as the name.
+                         */
+                        let part = part.split('\0').next().unwrap();
+
+                        self.name.push_str(part);
+                        if self.name.ends_with("\n") {
+                            self.name.pop();
+                        }
+                        if self.name.ends_with("\r") {
+                            self.name.pop();
+                        }
+                    },
+                }
+            }
+
+            self.done = false;
+
+            return;
+        }
+
+        self.done = true;
+    }
+}
+
+impl ExportSymbolReader for R2RMapSymbolReader {
+    fn reset(&mut self) {
+        if self.reader.seek(SeekFrom::Start(0)).is_ok() {
+            self.done = false;
+            self.initialize();
+            return;
+        }
+        else {
+            // If we fail to seek to the start of the file,
+            // set the values to their defaults and set
+            // done = true to prevent further reading.
+            self.start_ip = 0;
+            self.end_ip = 0;
+            self.name.clear();
+            self.done = true;
+        }
+    }
+
+    fn next(&mut self) -> bool {
+        loop {
+            if self.done {
+                return false;
+            }
+
+            self.load_next();
+
+            if self.done {
+                return false;
+            }
+
+            // Skip perfmap metadata.
+            if self.start_ip <= 0xFFFFFFF0 {
+                break;
+            }
+        }
+
+        true
+    }
+
+    fn start(&self) -> u64 {
+        self.start_ip
+    }
+
+    fn end(&self) -> u64 {
+        self.end_ip
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn demangle(&mut self) -> Option<String> {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -466,6 +640,66 @@ mod tests {
         }
         else {
             assert!(false, "Unable to open file {}", perf_map_path.display());
+        }
+    }
+
+    #[test]
+    fn r2r_map_symbol_reader() {
+        let expected_count = 45433;
+        let r2r_map_path = std::env::current_dir().unwrap().join(
+            "../test/assets/r2rmap/System.Private.CoreLib.ni.r2rmap");
+
+        if let Ok(file) = File::open(r2r_map_path.clone()) {
+            let mut reader = R2RMapSymbolReader::new(file);
+            reader.reset();
+
+            let expected_signature: [u8; 16] = [
+                0x7B, 0x8E, 0x67, 0x11, 0xBF, 0xD1, 0xA8, 0x79,
+                0x11, 0x84, 0xF7, 0xDB, 0x99, 0xCD, 0xB3, 0xA5
+            ];
+            assert_eq!(&expected_signature, reader.signature());
+
+            let mut actual_count = 0;
+            let mut s1 = false;
+            let mut s2 = false;
+            let mut s3 = false;
+            loop {
+                if !reader.next() {
+                    break;
+                }
+
+                actual_count+=1;
+                assert!(reader.start() < reader.end(), "Start must be less than end - start: {}, end: {}", reader.start(), reader.end());
+                assert!(reader.name().len() > 0);
+
+                // Check for a few known symbols.
+                match reader.start() {
+                    0x0011D1D0 => {
+                        assert_eq!(0x0011D1D0 + 0x23, reader.end());
+                        assert_eq!(reader.name(), "Interop::CheckIo(Interop+Error, System.String, System.Boolean)");
+                        s1 = true;
+                    },
+                    0x0011E880 => {
+                        assert_eq!(0x0011E880 + 0xA5, reader.end());
+                        assert_eq!(reader.name(), "System.Int32 Interop+Globalization::WindowsIdToIanaId(System.String, System.IntPtr, System.Char*, System.Int32)");
+                        s2 = true;
+                    },
+                    0x0011FB00 => {
+                        assert_eq!(0x0011FB00 + 0x54, reader.end());
+                        assert_eq!(reader.name(), "System.Int32 Interop+ErrorInfo::get_RawErrno()");
+                        s3 = true;
+                    },
+                    _ => {},
+                }
+            }
+
+            assert_eq!(s1, true);
+            assert_eq!(s2, true);
+            assert_eq!(s3, true);
+            assert_eq!(actual_count, expected_count);
+        }
+        else {
+            assert!(false, "Unable to open file {}", r2r_map_path.display());
         }
     }
 
