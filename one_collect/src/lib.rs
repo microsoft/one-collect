@@ -3,13 +3,13 @@ pub mod sharing;
 pub mod helpers;
 pub mod intern;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(doc, target_os = "linux"))]
 pub mod tracefs;
-#[cfg(target_os = "linux")]
+#[cfg(any(doc, target_os = "linux"))]
 pub mod procfs;
-#[cfg(target_os = "linux")]
+#[cfg(any(doc, target_os = "linux"))]
 pub mod perf_event;
-#[cfg(target_os = "linux")]
+#[cfg(any(doc, target_os = "linux"))]
 pub mod openat;
 
 #[cfg(any(doc, target_os = "windows"))]
