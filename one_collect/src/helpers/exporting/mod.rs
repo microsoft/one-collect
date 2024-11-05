@@ -16,6 +16,9 @@ mod lookup;
 #[cfg_attr(target_os = "linux", path = "os/linux.rs")]
 #[cfg_attr(target_os = "windows", path = "os/windows.rs")]
 pub mod os;
+use os::OSExportMachine;
+
+pub type OSExportSettings = os::OSExportSettings;
 
 pub type ExportSampler = os::ExportSampler;
 
@@ -34,7 +37,6 @@ use modulemetadata::ModuleMetadataLookup;
 
 pub use universal::{
     UniversalExporter,
-    UniversalSymbols,
 };
 
 pub mod symbols;
@@ -251,8 +253,7 @@ pub struct ExportSettings {
     cswitches: bool,
     unwinder: bool,
     callstack_helper: Option<CallstackHelper>,
-    #[cfg(target_os = "linux")]
-    pub(crate) os: os::OSExportSettings,
+    os: OSExportSettings,
     events: Option<Vec<ExportEventCallback>>,
 }
 
@@ -275,11 +276,14 @@ impl ExportSettings {
             cswitches: false,
             callstack_helper: Some(callstack_helper.with_external_lookup()),
             unwinder,
-            #[cfg(target_os = "linux")]
-            os: os::OSExportSettings::new(),
+            os: OSExportSettings::new(),
             events: None,
         }
     }
+
+    pub fn os_settings(&self) -> &OSExportSettings { &self.os }
+
+    pub fn os_settings_mut(&mut self) -> &mut OSExportSettings { &mut self.os }
 
     pub fn has_unwinder(&self) -> bool { self.unwinder }
 
@@ -340,12 +344,40 @@ pub struct ExportMachine {
     settings: ExportSettings,
     strings: InternedStrings,
     callstacks: InternedCallstacks,
-    os: os::OSExportMachine,
+    os: OSExportMachine,
     procs: HashMap<u32, ExportProcess>,
     module_metadata: ModuleMetadataLookup,
     cswitches: HashMap<u32, ExportCSwitch>,
     kinds: Vec<String>,
     map_index: usize,
+}
+
+pub trait ExportMachineSessionHooks {
+    fn hook_export_machine(
+        &mut self) -> anyhow::Result<Writable<ExportMachine>>;
+}
+
+pub trait ExportMachineOSHooks {
+    fn os_add_kernel_mappings_with(
+        &mut self,
+        kernel_symbols: &mut impl ExportSymbolReader);
+
+    fn os_capture_file_symbol_metadata(&mut self);
+
+    fn os_resolve_local_file_symbols(&mut self);
+
+    fn os_resolve_local_anon_symbols(&mut self);
+
+    fn os_add_mmap_exec(
+        &mut self,
+        pid: u32,
+        mapping: &mut ExportMapping,
+        filename: &str) -> anyhow::Result<()>;
+
+    fn os_add_comm_exec(
+        &mut self,
+        pid: u32,
+        comm: &str) -> anyhow::Result<()>;
 }
 
 pub type CommMap = HashMap<Option<usize>, Vec<u32>>;
@@ -361,7 +393,7 @@ impl ExportMachine {
             settings,
             strings,
             callstacks,
-            os: os::OSExportMachine::new(),
+            os: OSExportMachine::new(),
             procs: HashMap::new(),
             module_metadata: ModuleMetadataLookup::new(),
             cswitches: HashMap::new(),
@@ -446,13 +478,33 @@ impl ExportMachine {
         self.add_kernel_mappings_with(&mut kernel_symbols);
     }
 
+    pub fn capture_file_symbol_metadata(&mut self) {
+        self.os_resolve_local_file_symbols();
+    }
+
+    pub fn resolve_local_file_symbols(&mut self) {
+        self.os_resolve_local_file_symbols();
+    }
+
+
+    pub fn resolve_local_anon_symbols(&mut self) {
+        self.os_resolve_local_anon_symbols();
+    }
+
+    pub fn capture_and_resolve_symbols(&mut self) {
+        self.capture_file_symbol_metadata();
+        self.add_kernel_mappings();
+        self.resolve_local_file_symbols();
+        self.resolve_local_anon_symbols();
+    }
+
     fn process_mut(
         &mut self,
         pid: u32) -> &mut ExportProcess {
         self.procs.entry(pid).or_insert_with(|| ExportProcess::new(pid))
     }
 
-    pub(crate) fn add_mmap_exec(
+    pub fn add_mmap_exec(
         &mut self,
         time: u64,
         pid: u32,
@@ -495,7 +547,7 @@ impl ExportMachine {
         Ok(())
     }
 
-    pub(crate) fn add_comm_exec(
+    pub fn add_comm_exec(
         &mut self,
         pid: u32,
         comm: &str) -> anyhow::Result<()> {

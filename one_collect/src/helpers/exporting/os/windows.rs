@@ -35,6 +35,17 @@ impl PushWide for String {
     }
 }
 
+pub struct OSExportSettings {
+    /* Placeholder */
+}
+
+impl OSExportSettings {
+    pub fn new() -> Self {
+        Self {
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct OSExportProcess {
     /* Placeholder */
@@ -163,7 +174,7 @@ impl CpuProfileKey {
     }
 }
 
-pub(crate) struct OSExportMachine {
+pub struct OSExportMachine {
     pid_mapping: HashMap<u32, u32>,
     cpu_samples: Option<HashMap<CpuProfileKey, CpuProfile>>,
     pid_index: u32,
@@ -214,78 +225,6 @@ impl OSExportMachine {
         self.pid_index += 1;
 
         global_pid
-    }
-}
-
-impl ExportMachine {
-    pub(crate) fn os_add_kernel_mappings_with(
-        &mut self,
-        kernel_symbols: &mut impl ExportSymbolReader) {
-        let mut frames = Vec::new();
-        let mut addrs = HashSet::new();
-
-        /* Take mappings from Idle process */
-        let kernel_mappings: Vec<ExportMapping> = self
-            .process_mut(0)
-            .mappings_mut()
-            .drain(..)
-            .collect();
-
-        for proc in self.procs.values_mut() {
-            proc.get_unique_kernel_ips(
-                &mut addrs,
-                &mut frames,
-                &self.callstacks);
-
-            if addrs.is_empty() {
-                continue;
-            }
-
-            /* Copy unique addresses to a Vec */
-            frames.clear();
-
-            for addr in &addrs {
-                frames.push(*addr);
-            }
-
-            /* Find the correct mappings */
-            for mapping in &kernel_mappings {
-                for addr in &addrs {
-                    /* Mapping is used in process */
-                    if mapping.contains_ip(*addr) {
-                        /* Copy mapping for process */
-                        let mut mapping = mapping.clone();
-
-                        /* Resolve symbols */
-                        mapping.add_matching_symbols(
-                            &mut frames,
-                            kernel_symbols,
-                            &mut self.strings);
-
-                        /* Add resolved mapping to process */
-                        proc.add_mapping(mapping);
-
-                        /* Next mapping */
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    pub(crate) fn os_add_mmap_exec(
-        &mut self,
-        _pid: u32,
-        _mapping: &mut ExportMapping,
-        _filename: &str) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    pub(crate) fn os_add_comm_exec(
-        &mut self,
-        _pid: u32,
-        _comm: &str) -> anyhow::Result<()> {
-        Ok(())
     }
 
     fn sid_length(data: &[u8]) -> anyhow::Result<usize> {
@@ -401,19 +340,19 @@ impl ExportMachine {
         });
     }
 
-    pub fn hook_to_session(
-        mut self,
+    fn hook_to_etw_session(
+        mut machine: ExportMachine,
         session: &mut EtwSession) -> anyhow::Result<Writable<ExportMachine>> {
-        let cpu_profiling = self.settings.cpu_profiling;
-        let cswitches = self.settings.cswitches;
-        let events = self.settings.events.take();
+        let cpu_profiling = machine.settings.cpu_profiling;
+        let cswitches = machine.settings.cswitches;
+        let events = machine.settings.events.take();
 
-        let callstack_reader = match self.settings.callstack_helper.take() {
+        let callstack_reader = match machine.settings.callstack_helper.take() {
             Some(callstack_helper) => { callstack_helper.to_reader() },
             None => { anyhow::bail!("No callstack reader specified."); }
         };
 
-        let machine = Writable::new(self);
+        let machine = Writable::new(machine);
 
         if let Some(events) = events {
             let shared_sampler = Writable::new(
@@ -625,13 +564,97 @@ impl ExportMachine {
     }
 }
 
+impl ExportMachineOSHooks for ExportMachine {
+    fn os_add_kernel_mappings_with(
+        &mut self,
+        kernel_symbols: &mut impl ExportSymbolReader) {
+        let mut frames = Vec::new();
+        let mut addrs = HashSet::new();
+
+        /* Take mappings from Idle process */
+        let kernel_mappings: Vec<ExportMapping> = self
+            .process_mut(0)
+            .mappings_mut()
+            .drain(..)
+            .collect();
+
+        for proc in self.procs.values_mut() {
+            proc.get_unique_kernel_ips(
+                &mut addrs,
+                &mut frames,
+                &self.callstacks);
+
+            if addrs.is_empty() {
+                continue;
+            }
+
+            /* Copy unique addresses to a Vec */
+            frames.clear();
+
+            for addr in &addrs {
+                frames.push(*addr);
+            }
+
+            /* Find the correct mappings */
+            for mapping in &kernel_mappings {
+                for addr in &addrs {
+                    /* Mapping is used in process */
+                    if mapping.contains_ip(*addr) {
+                        /* Copy mapping for process */
+                        let mut mapping = mapping.clone();
+
+                        /* Resolve symbols */
+                        mapping.add_matching_symbols(
+                            &mut frames,
+                            kernel_symbols,
+                            &mut self.strings);
+
+                        /* Add resolved mapping to process */
+                        proc.add_mapping(mapping);
+
+                        /* Next mapping */
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    fn os_capture_file_symbol_metadata(&mut self) {
+        self.load_pe_metadata();
+    }
+
+    fn os_resolve_local_file_symbols(&mut self) {
+        /* TODO */
+    }
+
+    fn os_resolve_local_anon_symbols(&mut self) {
+        /* TODO */
+    }
+
+    fn os_add_mmap_exec(
+        &mut self,
+        _pid: u32,
+        _mapping: &mut ExportMapping,
+        _filename: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn os_add_comm_exec(
+        &mut self,
+        _pid: u32,
+        _comm: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
 impl ExportSessionHelp for EtwSession {
     fn build_exporter(
         &mut self,
         settings: ExportSettings) -> anyhow::Result<Writable<ExportMachine>> {
-        let exporter = ExportMachine::new(settings);
-
-        exporter.hook_to_session(self)
+        OSExportMachine::hook_to_etw_session(
+            ExportMachine::new(settings),
+            self)
     }
 }
 

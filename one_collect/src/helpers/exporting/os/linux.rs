@@ -424,7 +424,7 @@ pub(crate) fn default_export_settings() -> ExportSettings {
         ExportSettings::new(helper)
 }
 
-pub(crate) struct OSExportSettings {
+pub struct OSExportSettings {
     process_fs: bool,
 }
 
@@ -516,270 +516,30 @@ impl OSExportMachine {
             path_buf: Writable::new(PathBuf::new()),
         }
     }
-}
-
-struct ExportDevNodeLookup {
-    fds: HashMap<ExportDevNode, DupFd>,
-}
-
-impl ExportDevNodeLookup {
-    pub fn new() -> Self {
-        Self {
-            fds: HashMap::new(),
-        }
-    }
-
-    fn contains(
-        &self,
-        key: &ExportDevNode) -> bool {
-        self.fds.contains_key(key)
-    }
-
-    fn entry(
-        &mut self,
-        key: ExportDevNode) -> Entry<'_, ExportDevNode, DupFd> {
-        self.fds.entry(key)
-    }
-
-    pub fn open(
-        &self,
-        node: &ExportDevNode) -> Option<File> {
-        match self.fds.get(node) {
-            Some(fd) => { fd.open() },
-            None => { None },
-        }
-    }
-}
-
-impl ModuleAccessor for ExportDevNodeLookup {
-    fn open(
-        &self,
-        key: &ExportDevNode) -> Option<File> {
-        self.open(key)
-    }
-}
-
-impl ExportMachine {
-    pub fn resolve_perf_map_symbols(
-        &mut self) {
-        let mut frames = Vec::new();
-        let mut addrs = HashSet::new();
-
-        let mut path_buf = self.os.path_buf.borrow_mut();
-        path_buf.clear();
-        path_buf.push("/tmp");
-
-        for proc in self.procs.values_mut() {
-            if !proc.has_anon_mappings() {
-                continue;
-            }
-
-            let ns_pid = proc.ns_pid();
-
-            if ns_pid.is_none() {
-                continue;
-            }
-
-            path_buf.push(format!("perf-{}.map", ns_pid.unwrap()));
-            let file = proc.open_file(&path_buf);
-            path_buf.pop();
-
-            if file.is_err() {
-                continue;
-            }
-
-            let mut sym_reader = PerfMapSymbolReader::new(file.unwrap());
-
-            proc.add_matching_anon_symbols(
-                &mut addrs,
-                &mut frames,
-                &mut sym_reader,
-                &self.callstacks,
-                &mut self.strings);
-        }
-    }
-
-    pub(crate) fn os_add_kernel_mappings_with(
-        &mut self,
-        kernel_symbols: &mut impl ExportSymbolReader) {
-        let mut frames = Vec::new();
-        let mut addrs = HashSet::new();
-
-        for proc in self.procs.values_mut() {
-            proc.get_unique_kernel_ips(
-                &mut addrs,
-                &mut frames,
-                &self.callstacks);
-
-            if addrs.is_empty() {
-                continue;
-            }
-
-            let mut kernel = ExportMapping::new(
-                0,
-                self.strings.to_id("vmlinux"),
-                KERNEL_START,
-                KERNEL_END,
-                0,
-                false,
-                self.map_index);
-
-            self.map_index += 1;
-
-            frames.clear();
-
-            for addr in &addrs {
-                frames.push(*addr);
-            }
-
-            kernel.add_matching_symbols(
-                &mut frames,
-                kernel_symbols,
-                &mut self.strings);
-
-            proc.add_mapping(kernel);
-        }
-    }
-
-    pub fn resolve_elf_symbols(
-        &mut self) {
-        let mut frames = Vec::new();
-        let mut addrs = HashSet::new();
-
-        for proc in self.procs.values_mut() {
-            proc.add_matching_elf_symbols(
-                &self.module_metadata,
-                &mut addrs,
-                &mut frames,
-                &self.callstacks,
-                &mut self.strings);
-        }
-    }
-
-    pub fn load_elf_metadata(
-        &mut self) {
-
-        for proc in self.procs.values() {
-            for map in proc.mappings() {
-                if let Some(key) = map.node() {
-
-                    // Handle each binary exactly once, regardless of of it's loaded into multiple processes.
-                    if self.module_metadata.contains(key) {
-                        continue;
-                    }
-
-                    // Skip anonymous mappings.
-                    if map.anon() {
-                        continue;
-                    }
-
-                    if let Ok(filename) = self.strings.from_id(map.filename_id()) {
-                        if let Ok(file) = proc.open_file(Path::new(filename)) {
-                            let mut reader = BufReader::new(file);
-                            let mut sections = Vec::new();
-                            let mut section_offsets = Vec::new();
-
-                            if is_elf_file(&mut reader).unwrap_or(false) {
-                                if let ModuleMetadata::Elf(elf_metadata) = self.module_metadata.entry(*key)
-                                    .or_insert(ModuleMetadata::Elf(ElfModuleMetadata::new())) {
-
-                                    if get_section_offsets(&mut reader, None, &mut section_offsets).is_err() {
-                                        continue;
-                                    }
-
-                                    if get_section_metadata(&mut reader, None, SHT_NOTE, &mut sections).is_err() {
-                                        continue;
-                                    }
-
-                                    let mut build_id: [u8; 20] = [0; 20];
-                                    if let Ok(id) = read_build_id(&mut reader, &sections, &section_offsets, &mut build_id) {
-                                        elf_metadata.set_build_id(id);
-                                    }
-
-                                    sections.clear();
-                                    if get_section_metadata(&mut reader, None, SHT_PROGBITS, &mut sections).is_err() {
-                                        continue;
-                                    }
-
-                                    let mut debug_link_buf: [u8; 1024] = [0; 1024];
-                                    if let Ok(Some(debug_link)) = read_debug_link(&mut reader, &sections, &section_offsets, &mut debug_link_buf) {
-                                        let str_val = get_str(debug_link);
-                                        if let Ok(string_val) = String::from_str(str_val) {
-                                            elf_metadata.set_debug_link(Some(string_val), &mut self.strings);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    pub(crate) fn os_add_mmap_exec(
-        &mut self,
-        pid: u32,
-        mapping: &mut ExportMapping,
-        filename: &str) -> anyhow::Result<()> {
-        match mapping.node() {
-            Some(node) => {
-                if !self.os.dev_nodes.contains(node) {
-                    if let Some(process) = self.find_process(pid) {
-                        if let Ok(file) = process.open_file(Path::new(filename)) {
-                            if let Vacant(entry) = self.os.dev_nodes.entry(*node) {
-                                entry.insert(DupFd::new(file));
-                            }
-                        }
-                    }
-                }
-            },
-            None => {}
-        }
-
-        Ok(())
-    }
-
-    pub(crate) fn os_add_comm_exec(
-        &mut self,
-        pid: u32,
-        _comm: &str) -> anyhow::Result<()> {
-        let path_buf = self.os.path_buf.clone();
-        let fs = self.settings.os.process_fs;
-
-        let proc = self.process_mut(pid);
-        proc.add_ns_pid(&mut path_buf.borrow_mut());
-
-        if fs {
-            proc.add_root_fs(&mut path_buf.borrow_mut())?;
-        }
-
-        Ok(())
-    }
 
     fn fork_exec(
-        &mut self,
+        machine: &mut ExportMachine,
         pid: u32,
         ppid: u32) -> anyhow::Result<()> {
-        let fork = self.process_mut(ppid).fork(pid);
-        self.procs.insert(pid, fork);
+        let fork = machine.process_mut(ppid).fork(pid);
+        machine.procs.insert(pid, fork);
 
         Ok(())
     }
 
-    pub fn hook_to_session(
-        mut self,
+    fn hook_to_perf_session(
+        mut machine: ExportMachine,
         session: &mut PerfSession) -> anyhow::Result<Writable<ExportMachine>> {
-        let cpu_profiling = self.settings.cpu_profiling;
-        let cswitches = self.settings.cswitches;
-        let events = self.settings.events.take();
+        let cpu_profiling = machine.settings.cpu_profiling;
+        let cswitches = machine.settings.cswitches;
+        let events = machine.settings.events.take();
 
-        let callstack_reader = match self.settings.callstack_helper.take() {
+        let callstack_reader = match machine.settings.callstack_helper.take() {
             Some(callstack_helper) => { callstack_helper.to_reader() },
             None => { anyhow::bail!("No callstack reader specified."); }
         };
 
-        let machine = Writable::new(self);
+        let machine = Writable::new(machine);
 
         let callstack_machine = machine.clone();
 
@@ -1089,12 +849,265 @@ impl ExportMachine {
                 return Ok(());
             }
 
-            event_machine.borrow_mut().fork_exec(
+            Self::fork_exec(
+                &mut event_machine.borrow_mut(),
                 pid,
                 fmt.get_u32(ppid, data)?)
         });
 
         Ok(machine)
+    }
+
+    fn resolve_perf_map_symbols(
+        machine: &mut ExportMachine) {
+        let mut frames = Vec::new();
+        let mut addrs = HashSet::new();
+
+        let mut path_buf = machine.os.path_buf.borrow_mut();
+        path_buf.clear();
+        path_buf.push("/tmp");
+
+        for proc in machine.procs.values_mut() {
+            if !proc.has_anon_mappings() {
+                continue;
+            }
+
+            let ns_pid = proc.ns_pid();
+
+            if ns_pid.is_none() {
+                continue;
+            }
+
+            path_buf.push(format!("perf-{}.map", ns_pid.unwrap()));
+            let file = proc.open_file(&path_buf);
+            path_buf.pop();
+
+            if file.is_err() {
+                continue;
+            }
+
+            let mut sym_reader = PerfMapSymbolReader::new(file.unwrap());
+
+            proc.add_matching_anon_symbols(
+                &mut addrs,
+                &mut frames,
+                &mut sym_reader,
+                &machine.callstacks,
+                &mut machine.strings);
+        }
+    }
+
+    fn resolve_elf_symbols(
+        machine: &mut ExportMachine) {
+        let mut frames = Vec::new();
+        let mut addrs = HashSet::new();
+
+        for proc in machine.procs.values_mut() {
+            proc.add_matching_elf_symbols(
+                &machine.module_metadata,
+                &mut addrs,
+                &mut frames,
+                &machine.callstacks,
+                &mut machine.strings);
+        }
+    }
+
+    fn load_elf_metadata(
+        machine: &mut ExportMachine) {
+        for proc in machine.procs.values() {
+            for map in proc.mappings() {
+                if let Some(key) = map.node() {
+
+                    // Handle each binary exactly once, regardless of of it's loaded into multiple processes.
+                    if machine.module_metadata.contains(key) {
+                        continue;
+                    }
+
+                    // Skip anonymous mappings.
+                    if map.anon() {
+                        continue;
+                    }
+
+                    if let Ok(filename) = machine.strings.from_id(map.filename_id()) {
+                        if let Ok(file) = proc.open_file(Path::new(filename)) {
+                            let mut reader = BufReader::new(file);
+                            let mut sections = Vec::new();
+                            let mut section_offsets = Vec::new();
+
+                            if is_elf_file(&mut reader).unwrap_or(false) {
+                                if let ModuleMetadata::Elf(elf_metadata) = machine.module_metadata.entry(*key)
+                                    .or_insert(ModuleMetadata::Elf(ElfModuleMetadata::new())) {
+
+                                    if get_section_offsets(&mut reader, None, &mut section_offsets).is_err() {
+                                        continue;
+                                    }
+
+                                    if get_section_metadata(&mut reader, None, SHT_NOTE, &mut sections).is_err() {
+                                        continue;
+                                    }
+
+                                    let mut build_id: [u8; 20] = [0; 20];
+                                    if let Ok(id) = read_build_id(&mut reader, &sections, &section_offsets, &mut build_id) {
+                                        elf_metadata.set_build_id(id);
+                                    }
+
+                                    sections.clear();
+                                    if get_section_metadata(&mut reader, None, SHT_PROGBITS, &mut sections).is_err() {
+                                        continue;
+                                    }
+
+                                    let mut debug_link_buf: [u8; 1024] = [0; 1024];
+                                    if let Ok(Some(debug_link)) = read_debug_link(&mut reader, &sections, &section_offsets, &mut debug_link_buf) {
+                                        let str_val = get_str(debug_link);
+                                        if let Ok(string_val) = String::from_str(str_val) {
+                                            elf_metadata.set_debug_link(Some(string_val), &mut machine.strings);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct ExportDevNodeLookup {
+    fds: HashMap<ExportDevNode, DupFd>,
+}
+
+impl ExportDevNodeLookup {
+    pub fn new() -> Self {
+        Self {
+            fds: HashMap::new(),
+        }
+    }
+
+    fn contains(
+        &self,
+        key: &ExportDevNode) -> bool {
+        self.fds.contains_key(key)
+    }
+
+    fn entry(
+        &mut self,
+        key: ExportDevNode) -> Entry<'_, ExportDevNode, DupFd> {
+        self.fds.entry(key)
+    }
+
+    pub fn open(
+        &self,
+        node: &ExportDevNode) -> Option<File> {
+        match self.fds.get(node) {
+            Some(fd) => { fd.open() },
+            None => { None },
+        }
+    }
+}
+
+impl ModuleAccessor for ExportDevNodeLookup {
+    fn open(
+        &self,
+        key: &ExportDevNode) -> Option<File> {
+        self.open(key)
+    }
+}
+
+impl ExportMachineOSHooks for ExportMachine {
+    fn os_add_kernel_mappings_with(
+        &mut self,
+        kernel_symbols: &mut impl ExportSymbolReader) {
+        let mut frames = Vec::new();
+        let mut addrs = HashSet::new();
+
+        for proc in self.procs.values_mut() {
+            proc.get_unique_kernel_ips(
+                &mut addrs,
+                &mut frames,
+                &self.callstacks);
+
+            if addrs.is_empty() {
+                continue;
+            }
+
+            let mut kernel = ExportMapping::new(
+                0,
+                self.strings.to_id("vmlinux"),
+                KERNEL_START,
+                KERNEL_END,
+                0,
+                false,
+                self.map_index);
+
+            self.map_index += 1;
+
+            frames.clear();
+
+            for addr in &addrs {
+                frames.push(*addr);
+            }
+
+            kernel.add_matching_symbols(
+                &mut frames,
+                kernel_symbols,
+                &mut self.strings);
+
+            proc.add_mapping(kernel);
+        }
+    }
+
+    fn os_add_mmap_exec(
+        &mut self,
+        pid: u32,
+        mapping: &mut ExportMapping,
+        filename: &str) -> anyhow::Result<()> {
+        match mapping.node() {
+            Some(node) => {
+                if !self.os.dev_nodes.contains(node) {
+                    if let Some(process) = self.find_process(pid) {
+                        if let Ok(file) = process.open_file(Path::new(filename)) {
+                            if let Vacant(entry) = self.os.dev_nodes.entry(*node) {
+                                entry.insert(DupFd::new(file));
+                            }
+                        }
+                    }
+                }
+            },
+            None => {}
+        }
+
+        Ok(())
+    }
+
+    fn os_add_comm_exec(
+        &mut self,
+        pid: u32,
+        _comm: &str) -> anyhow::Result<()> {
+        let path_buf = self.os.path_buf.clone();
+        let fs = self.settings.os.process_fs;
+
+        let proc = self.process_mut(pid);
+        proc.add_ns_pid(&mut path_buf.borrow_mut());
+
+        if fs {
+            proc.add_root_fs(&mut path_buf.borrow_mut())?;
+        }
+
+        Ok(())
+    }
+
+    fn os_capture_file_symbol_metadata(&mut self) {
+        OSExportMachine::load_elf_metadata(self);
+        self.load_pe_metadata();
+    }
+
+    fn os_resolve_local_file_symbols(&mut self) {
+        OSExportMachine::resolve_elf_symbols(self);
+    }
+
+    fn os_resolve_local_anon_symbols(&mut self) {
+        OSExportMachine::resolve_perf_map_symbols(self);
     }
 }
 
@@ -1143,9 +1156,9 @@ impl ExportSessionHelp for PerfSession {
     fn build_exporter(
         &mut self,
         settings: ExportSettings) -> anyhow::Result<Writable<ExportMachine>> {
-        let exporter = ExportMachine::new(settings);
-
-        exporter.hook_to_session(self)
+        OSExportMachine::hook_to_perf_session(
+            ExportMachine::new(settings),
+            self)
     }
 }
 
