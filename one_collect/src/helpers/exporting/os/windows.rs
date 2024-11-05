@@ -1,5 +1,7 @@
 use std::collections::hash_map::Entry::Occupied;
 
+use std::fs::File;
+
 use super::*;
 use crate::{ReadOnly, Writable};
 use crate::etw::*;
@@ -50,6 +52,13 @@ impl ExportProcess {
         &mut self,
         pid: u32) {
         self.ns_pid_mut().replace(pid);
+    }
+
+    pub fn open_file(
+        &self,
+        path: &Path) -> anyhow::Result<File> {
+        let file = File::open(path)?;
+        Ok(file)
     }
 }
 

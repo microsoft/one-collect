@@ -6,6 +6,8 @@ use std::slice;
 use cpp_demangle::{DemangleOptions, Symbol};
 use rustc_demangle::try_demangle;
 
+pub const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
+
 pub const SHT_PROGBITS: ElfWord = 1;
 pub const SHT_SYMTAB: ElfWord = 2;
 pub const SHT_NOTE: ElfWord = 7;
@@ -242,6 +244,14 @@ impl<'a> ElfSymbolIterator<'a> {
             }
         }
     }
+}
+
+pub fn is_elf_file(
+    reader: &mut (impl Read + Seek)) -> std::io::Result<bool> {
+    let mut buf: [u8; 4] = [0; 4];
+    reader.seek(SeekFrom::Start(0))?;
+    reader.read_exact(&mut buf)?;
+    Ok(buf == ELF_MAGIC)
 }
 
 pub fn get_str(

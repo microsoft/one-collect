@@ -1,54 +1,132 @@
 use std::io::{Read, Seek, SeekFrom};
 use std::fs::File;
-use std::error::Error;
 use std::mem::{zeroed, size_of};
 use std::string::{FromUtf8Error, FromUtf16Error};
 use std::slice;
 
-#[derive(Default)]
-pub struct PEModuleInfo {
-    pub machine: u16,
-    pub date_time: u32,
-    pub symbol_name: Option<String>,
-    pub symbol_age: u32,
-    pub symbol_sig: [u8; 16],
-    pub version_name: Option<String>,
-    pub perfmap_sig: [u8; 16],
-    pub perfmap_ver: u32,
-    pub perfmap_name: Option<String>,
+use crate::intern::InternedStrings;
+
+pub struct PEModuleMetadata {
+    machine: u16,
+    date_time: u32,
+    symbol_name_id: usize,
+    symbol_age: u32,
+    symbol_sig: [u8; 16],
+    version_name_id: usize,
+    perfmap_sig: [u8; 16],
+    perfmap_version: u32,
+    perfmap_name_id: usize,
 }
 
-impl PEModuleInfo {
-    pub fn reset(
-        &mut self) {
-        self.machine = 0;
-        self.date_time = 0;
-        self.symbol_name = None;
-        self.symbol_age = 0;
-        self.symbol_sig = [0; 16];
-        self.version_name = None;
-        self.perfmap_sig = [0; 16];
-        self.perfmap_ver = 0;
-        self.perfmap_name = None;
+impl Default for PEModuleMetadata {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PEModuleMetadata {
+    pub fn new() -> Self {
+        Self {
+            machine: 0,
+            date_time: 0,
+            symbol_name_id: 0,
+            symbol_age: 0,
+            symbol_sig: [0; 16],
+            version_name_id: 0,
+            perfmap_sig: [0; 16],
+            perfmap_version: 0,
+            perfmap_name_id: 0,
+        }
     }
 
-    pub fn get_info(
+    pub fn get_metadata(
         &mut self,
-        path: &str) -> anyhow::Result<()> {
+        path: &str,
+        strings: &mut InternedStrings) -> anyhow::Result<()> {
         let file = File::open(path)?;
-        self.get_info_direct(
-            file)
+        self.get_metadata_direct(
+            file,
+            strings)
     }
 
-    pub fn get_info_direct(
+    pub fn get_metadata_direct(
         &mut self,
-        mut file: File) -> anyhow::Result<()> {
-        get_pe_info(&mut file, self)?;
+        mut file: File,
+        strings: &mut InternedStrings) -> anyhow::Result<()> {
+        get_pe_info(&mut file, self, strings)?;
 
         Ok(())
     }
-}
 
+    pub fn reset(&mut self) {
+        self.machine = 0;
+        self.date_time = 0;
+        self.symbol_name_id = 0;
+        self.symbol_age = 0;
+        self.symbol_sig = [0; 16];
+        self.version_name_id = 0;
+        self.perfmap_sig = [0; 16];
+        self.perfmap_version = 0;
+        self.perfmap_name_id = 0;
+    }
+
+    pub fn machine(&self) -> u16 {
+        self.machine
+    }
+
+    pub fn date_time(&self) -> u32 {
+        self.date_time
+    }
+
+    pub fn symbol_name_id(&self) -> usize {
+        self.symbol_name_id
+    }
+
+    pub fn symbol_name<'a>(&self, strings: &'a InternedStrings) -> Option<&'a str> {
+        match strings.from_id(self.symbol_name_id) {
+            Ok(name) => Some(name),
+            Err(_) => None
+        }
+    }
+
+    pub fn symbol_age(&self) -> u32 {
+        self.symbol_age
+    }
+
+    pub fn symbol_sig(&self) -> &[u8; 16] {
+        &self.symbol_sig
+    }
+
+    pub fn version_name_id(&self) -> usize {
+        self.version_name_id
+    }
+
+    pub fn version_name<'a>(&self, strings: &'a InternedStrings) -> Option<&'a str> {
+        match strings.from_id(self.version_name_id) {
+            Ok(name) => Some(name),
+            Err(_) => None
+        }
+    }
+
+    pub fn perfmap_sig(&self) -> &[u8; 16] {
+        &self.perfmap_sig
+    }
+
+    pub fn perfmap_version(&self) -> u32 {
+        self.perfmap_version
+    }
+
+    pub fn perfmap_name_id(&self) -> usize {
+        self.perfmap_name_id
+    }
+
+    pub fn perfmap_name<'a>(&self, strings: &'a InternedStrings) -> Option<&'a str> {
+        match strings.from_id(self.perfmap_name_id) {
+            Ok(name) => Some(name),
+            Err(_) => None
+        }
+    }
+}
 
 #[repr(C)]
 struct PEHeader {
@@ -445,7 +523,8 @@ fn get_string(
 
 fn get_pe_info(
     reader: &mut (impl Read + Seek),
-    module: &mut PEModuleInfo) -> anyhow::Result<()> {
+    module: &mut PEModuleMetadata,
+    strings: &mut InternedStrings) -> anyhow::Result<()> {
     let dbg_offset: u64;
     let dbg_size: u64;
     let res_offset: u64;
@@ -454,10 +533,10 @@ fn get_pe_info(
 
     module.machine = 0;
     module.date_time = 0;
-    module.symbol_name = None;
+    module.symbol_name_id = 0;
     module.symbol_age = 0;
     module.symbol_sig = [0; 16];
-    module.version_name = None;
+    module.version_name_id = 0;
 
     get_pe_header(reader, &mut pe_header, &mut pe_offset)?;
     module.machine = pe_header.machine;
@@ -486,14 +565,14 @@ fn get_pe_info(
                     read_cv_nb10(reader, &mut cv)?;
                     module.symbol_age = cv.pdb_age;
                     module.symbol_sig[0..4].clone_from_slice(&cv.pdb_sig);
-                    module.symbol_name = Some(get_string(&cv.pdb_name)?);
+                    module.symbol_name_id = strings.to_id(get_string(&cv.pdb_name)?.as_str());
                 } else if cv_type == 0x53445352 {
                     /* RSDS */
                     let mut cv: CodeViewRsds = unsafe { zeroed() };
                     read_cv_rsds(reader, &mut cv)?;
                     module.symbol_age = cv.pdb_age;
                     module.symbol_sig[0..16].clone_from_slice(&cv.pdb_sig);
-                    module.symbol_name = Some(get_string(&cv.pdb_name)?);
+                    module.symbol_name_id = strings.to_id(get_string(&cv.pdb_name)?.as_str());
                 }
             }
             /* PerfMap */
@@ -504,8 +583,8 @@ fn get_pe_info(
                 read_cv_perfmap(reader, &mut cv)?;
                 if cv.perfmap_magic == PERFMAP_MAGIC {
                     module.perfmap_sig[0..16].clone_from_slice(&cv.perfmap_sig);
-                    module.perfmap_ver = cv.perfmap_ver;
-                    module.perfmap_name = Some(get_string(&cv.perfmap_name)?);
+                    module.perfmap_version = cv.perfmap_ver;
+                    module.perfmap_name_id = strings.to_id(get_string(&cv.perfmap_name)?.as_str());
                 }
             }
         }
@@ -625,13 +704,13 @@ fn get_pe_info(
                     if file_desc.is_some() {
                         /* Prefer product version to file version */
                         if product.is_some() {
-                            module.version_name = Some(format!("{}, {}",
+                            module.version_name_id = strings.to_id(format!("{}, {}",
                                 product.unwrap(),
-                                file_desc.unwrap()));
+                                file_desc.unwrap()).as_str());
                         } else if file_ver.is_some() {
-                            module.version_name = Some(format!("{}, {}",
+                            module.version_name_id = strings.to_id(format!("{}, {}",
                                 file_ver.unwrap(),
-                                file_desc.unwrap()));
+                                file_desc.unwrap()).as_str());
                         }
                     }
                 }
@@ -650,13 +729,14 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn get_details() {
-        let mut m = PEModuleInfo::default();
+        let mut strings = InternedStrings::new(8);
+        let mut m = PEModuleMetadata::default();
 
         let windir = env::var("WINDIR").unwrap();
         let ntdll_path = format!("{}\\System32\\ntdll.dll", windir);
         for _i in 0..1024 {
             let mut f = File::open(&ntdll_path).unwrap();
-            get_pe_info(&mut f, &mut m).unwrap();
+            get_pe_info(&mut f, &mut m, &mut strings).unwrap();
         }
     }
 }
