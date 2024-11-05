@@ -419,6 +419,8 @@ impl R2RMapSymbolReader {
                 break;
             }
 
+            // The pseudo RVA 0xFFFFFFFF contains the perfmap signature.
+            // It is part of the perfmap header that is composed of a few pseudo RVAs at the beginning of the file.
             if self.start_ip == 0xFFFFFFFF {
                 if Self::read_signature(self.name.as_str(), &mut self.signature).is_err() {
                     // If there was a failure reading the signature, reset to zero.
