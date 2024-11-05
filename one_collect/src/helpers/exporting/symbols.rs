@@ -300,8 +300,7 @@ impl PerfMapSymbolReader {
                     0 => {
                         if part.starts_with("0x") || part.starts_with("0X") {
                             self.start_ip = u64::from_str_radix(&part[2..], 16).unwrap();
-                        }
-                        else {
+                        } else {
                             self.start_ip = u64::from_str_radix(part, 16).unwrap();
                         }
                     },
@@ -468,8 +467,7 @@ impl R2RMapSymbolReader {
                     0 => {
                         if part.starts_with("0x") || part.starts_with("0X") {
                             self.start_ip = u64::from_str_radix(&part[2..], 16).unwrap();
-                        }
-                        else {
+                        } else {
                             self.start_ip = u64::from_str_radix(part, 16).unwrap();
                         }
                     },
