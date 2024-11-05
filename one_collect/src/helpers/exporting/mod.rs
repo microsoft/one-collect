@@ -591,7 +591,7 @@ impl ExportMachine {
 
                                 if let Ok(file) = proc.open_file(Path::new(filename)) {
                                     // Ignore failures for now, but ideally, we log these failures.
-                                    let _ = pe_metadata.get_metadata_direct(file);
+                                    let _ = pe_metadata.get_metadata_direct(file, &mut self.strings);
                                 }
                             }
                         }
