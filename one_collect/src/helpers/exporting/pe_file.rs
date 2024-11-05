@@ -78,6 +78,10 @@ impl PEModuleMetadata {
         self.date_time
     }
 
+    pub fn symbol_name_index(&self) -> usize {
+        self.symbol_name_index
+    }
+
     pub fn symbol_name<'a>(&self, strings: &'a InternedStrings) -> Option<&'a str> {
         match strings.from_id(self.symbol_name_index) {
             Ok(name) => Some(name),
@@ -93,6 +97,10 @@ impl PEModuleMetadata {
         &self.symbol_sig
     }
 
+    pub fn version_name_index(&self) -> usize {
+        self.version_name_index
+    }
+
     pub fn version_name<'a>(&self, strings: &'a InternedStrings) -> Option<&'a str> {
         match strings.from_id(self.version_name_index) {
             Ok(name) => Some(name),
@@ -106,6 +114,10 @@ impl PEModuleMetadata {
 
     pub fn perfmap_version(&self) -> u32 {
         self.perfmap_version
+    }
+
+    pub fn perfmap_name_index(&self) -> usize {
+        self.perfmap_name_index
     }
 
     pub fn perfmap_name<'a>(&self, strings: &'a InternedStrings) -> Option<&'a str> {
