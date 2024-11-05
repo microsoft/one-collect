@@ -9,13 +9,13 @@ use crate::intern::InternedStrings;
 pub struct PEModuleMetadata {
     machine: u16,
     date_time: u32,
-    symbol_name_index: usize,
+    symbol_name_id: usize,
     symbol_age: u32,
     symbol_sig: [u8; 16],
-    version_name_index: usize,
+    version_name_id: usize,
     perfmap_sig: [u8; 16],
     perfmap_version: u32,
-    perfmap_name_index: usize,
+    perfmap_name_id: usize,
 }
 
 impl Default for PEModuleMetadata {
@@ -29,13 +29,13 @@ impl PEModuleMetadata {
         Self {
             machine: 0,
             date_time: 0,
-            symbol_name_index: 0,
+            symbol_name_id: 0,
             symbol_age: 0,
             symbol_sig: [0; 16],
-            version_name_index: 0,
+            version_name_id: 0,
             perfmap_sig: [0; 16],
             perfmap_version: 0,
-            perfmap_name_index: 0,
+            perfmap_name_id: 0,
         }
     }
 
@@ -61,13 +61,13 @@ impl PEModuleMetadata {
     pub fn reset(&mut self) {
         self.machine = 0;
         self.date_time = 0;
-        self.symbol_name_index = 0;
+        self.symbol_name_id = 0;
         self.symbol_age = 0;
         self.symbol_sig = [0; 16];
-        self.version_name_index = 0;
+        self.version_name_id = 0;
         self.perfmap_sig = [0; 16];
         self.perfmap_version = 0;
-        self.perfmap_name_index = 0;
+        self.perfmap_name_id = 0;
     }
 
     pub fn machine(&self) -> u16 {
@@ -78,12 +78,12 @@ impl PEModuleMetadata {
         self.date_time
     }
 
-    pub fn symbol_name_index(&self) -> usize {
-        self.symbol_name_index
+    pub fn symbol_name_id(&self) -> usize {
+        self.symbol_name_id
     }
 
     pub fn symbol_name<'a>(&self, strings: &'a InternedStrings) -> Option<&'a str> {
-        match strings.from_id(self.symbol_name_index) {
+        match strings.from_id(self.symbol_name_id) {
             Ok(name) => Some(name),
             Err(_) => None
         }
@@ -97,12 +97,12 @@ impl PEModuleMetadata {
         &self.symbol_sig
     }
 
-    pub fn version_name_index(&self) -> usize {
-        self.version_name_index
+    pub fn version_name_id(&self) -> usize {
+        self.version_name_id
     }
 
     pub fn version_name<'a>(&self, strings: &'a InternedStrings) -> Option<&'a str> {
-        match strings.from_id(self.version_name_index) {
+        match strings.from_id(self.version_name_id) {
             Ok(name) => Some(name),
             Err(_) => None
         }
@@ -116,12 +116,12 @@ impl PEModuleMetadata {
         self.perfmap_version
     }
 
-    pub fn perfmap_name_index(&self) -> usize {
-        self.perfmap_name_index
+    pub fn perfmap_name_id(&self) -> usize {
+        self.perfmap_name_id
     }
 
     pub fn perfmap_name<'a>(&self, strings: &'a InternedStrings) -> Option<&'a str> {
-        match strings.from_id(self.perfmap_name_index) {
+        match strings.from_id(self.perfmap_name_id) {
             Ok(name) => Some(name),
             Err(_) => None
         }
@@ -533,10 +533,10 @@ fn get_pe_info(
 
     module.machine = 0;
     module.date_time = 0;
-    module.symbol_name_index = 0;
+    module.symbol_name_id = 0;
     module.symbol_age = 0;
     module.symbol_sig = [0; 16];
-    module.version_name_index = 0;
+    module.version_name_id = 0;
 
     get_pe_header(reader, &mut pe_header, &mut pe_offset)?;
     module.machine = pe_header.machine;
@@ -565,14 +565,14 @@ fn get_pe_info(
                     read_cv_nb10(reader, &mut cv)?;
                     module.symbol_age = cv.pdb_age;
                     module.symbol_sig[0..4].clone_from_slice(&cv.pdb_sig);
-                    module.symbol_name_index = strings.to_id(get_string(&cv.pdb_name)?.as_str());
+                    module.symbol_name_id = strings.to_id(get_string(&cv.pdb_name)?.as_str());
                 } else if cv_type == 0x53445352 {
                     /* RSDS */
                     let mut cv: CodeViewRsds = unsafe { zeroed() };
                     read_cv_rsds(reader, &mut cv)?;
                     module.symbol_age = cv.pdb_age;
                     module.symbol_sig[0..16].clone_from_slice(&cv.pdb_sig);
-                    module.symbol_name_index = strings.to_id(get_string(&cv.pdb_name)?.as_str());
+                    module.symbol_name_id = strings.to_id(get_string(&cv.pdb_name)?.as_str());
                 }
             }
             /* PerfMap */
@@ -584,7 +584,7 @@ fn get_pe_info(
                 if cv.perfmap_magic == PERFMAP_MAGIC {
                     module.perfmap_sig[0..16].clone_from_slice(&cv.perfmap_sig);
                     module.perfmap_version = cv.perfmap_ver;
-                    module.perfmap_name_index = strings.to_id(get_string(&cv.perfmap_name)?.as_str());
+                    module.perfmap_name_id = strings.to_id(get_string(&cv.perfmap_name)?.as_str());
                 }
             }
         }
@@ -704,11 +704,11 @@ fn get_pe_info(
                     if file_desc.is_some() {
                         /* Prefer product version to file version */
                         if product.is_some() {
-                            module.version_name_index = strings.to_id(format!("{}, {}",
+                            module.version_name_id = strings.to_id(format!("{}, {}",
                                 product.unwrap(),
                                 file_desc.unwrap()).as_str());
                         } else if file_ver.is_some() {
-                            module.version_name_index = strings.to_id(format!("{}, {}",
+                            module.version_name_id = strings.to_id(format!("{}, {}",
                                 file_ver.unwrap(),
                                 file_desc.unwrap()).as_str());
                         }
