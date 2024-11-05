@@ -9,7 +9,7 @@ use crate::intern::{InternedStrings, InternedCallstacks};
 use crate::helpers::callstack::CallstackHelper;
 
 use modulemetadata::ModuleMetadata;
-use crate::helpers::modules::pe_file::PEModuleMetadata;
+use pe_file::PEModuleMetadata;
 
 mod lookup;
 
@@ -27,6 +27,7 @@ pub type ExportDevNode = ruwind::ModuleKey;
 pub mod graph;
 pub mod formats;
 pub mod modulemetadata;
+pub mod pe_file;
 
 pub mod universal;
 use modulemetadata::ModuleMetadataLookup;

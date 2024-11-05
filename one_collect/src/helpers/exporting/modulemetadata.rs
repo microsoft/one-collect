@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use crate::helpers::exporting::ExportDevNode;
-use crate::helpers::modules::pe_file::PEModuleMetadata;
+use super::pe_file::PEModuleMetadata;
 
 pub enum ModuleMetadata {
     Elf(ElfModuleMetadata),
