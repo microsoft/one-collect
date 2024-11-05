@@ -729,13 +729,14 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn get_details() {
+        let mut strings = InternedStrings::new(8);
         let mut m = PEModuleMetadata::default();
 
         let windir = env::var("WINDIR").unwrap();
         let ntdll_path = format!("{}\\System32\\ntdll.dll", windir);
         for _i in 0..1024 {
             let mut f = File::open(&ntdll_path).unwrap();
-            get_pe_info(&mut f, &mut m).unwrap();
+            get_pe_info(&mut f, &mut m, &mut strings).unwrap();
         }
     }
 }
