@@ -136,7 +136,8 @@ impl ExportProcess {
                 let sym_files = self.find_symbol_files(
                     filename,
                     metadata,
-                    SYMBOL_TYPE_ELF_SYMTAB | SYMBOL_TYPE_ELF_DYNSYM);
+                    SYMBOL_TYPE_ELF_SYMTAB | SYMBOL_TYPE_ELF_DYNSYM,
+                    strings);
 
                 for sym_file in sym_files {
                     let mut sym_reader = ElfSymbolReader::new(sym_file);
@@ -155,7 +156,8 @@ impl ExportProcess {
         &self,
         bin_path: &str,
         metadata: &ElfModuleMetadata,
-        sym_types_requested: u32) -> Vec<File> {
+        sym_types_requested: u32,
+        strings: &InternedStrings) -> Vec<File> {
         let mut symbol_files = Vec::new();
         let mut sym_types_found = 0u32;
 
@@ -200,7 +202,7 @@ impl ExportProcess {
         }
 
         // Debug link.
-        if let Some(debug_link) = metadata.debug_link() {
+        if let Some(debug_link) = metadata.debug_link(strings) {
 
             // Directly open debug_link.
             path_buf.clear();
@@ -703,7 +705,7 @@ impl ExportMachine {
                                     if let Ok(Some(debug_link)) = read_debug_link(&mut reader, &sections, &section_offsets, &mut debug_link_buf) {
                                         let str_val = get_str(debug_link);
                                         if let Ok(string_val) = String::from_str(str_val) {
-                                            elf_metadata.set_debug_link(Some(string_val));
+                                            elf_metadata.set_debug_link(Some(string_val), &mut self.strings);
                                         }
                                     }
                                 }
