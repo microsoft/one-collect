@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use crate::helpers::exporting::ExportDevNode;
+use super::InternedStrings;
 use super::pe_file::PEModuleMetadata;
 
 pub enum ModuleMetadata {
@@ -10,14 +11,14 @@ pub enum ModuleMetadata {
 
 pub struct ElfModuleMetadata {
     build_id: Option<[u8; 20]>,
-    debug_link: Option<String>,
+    debug_link_id: usize,
 }
 
 impl ElfModuleMetadata {
     pub fn new() -> Self {
         Self {
             build_id: None,
-            debug_link: None,
+            debug_link_id: 0,
         }
     }
 
@@ -31,17 +32,25 @@ impl ElfModuleMetadata {
         self.build_id = build_id.copied();
     }
 
-    pub fn debug_link(&self) -> Option<&str> {
-        match &self.debug_link {
-            Some(link) => Some(link.as_str()),
-            None => None,
+    pub fn debug_link_id(&self) -> usize {
+        self.debug_link_id
+    }
+
+    pub fn debug_link<'a>(&self, strings: &'a InternedStrings) -> Option<&'a str> {
+        match strings.from_id(self.debug_link_id) {
+            Ok(link) => Some(link),
+            Err(_) => None,
         }
     }
 
     pub fn set_debug_link(
         &mut self,
-        debug_link: Option<String>) {
-        self.debug_link = debug_link;
+        debug_link: Option<String>,
+        strings: &mut InternedStrings) {
+        match debug_link {
+            Some(link) => { self.debug_link_id = strings.to_id(link.as_str()) },
+            None => { self.debug_link_id = 0 }
+        }
     }
 }
 
@@ -82,6 +91,7 @@ mod tests {
 
     #[test]
     fn elf_module_metadata_lookup() {
+        let mut strings = InternedStrings::new(8);
         let mut metadata_lookup = ModuleMetadataLookup::new();
 
         let dev_node_1 = ExportDevNode::new(1,2);
@@ -91,14 +101,14 @@ mod tests {
 
         let symbol_file_path = "/path/to/symbol/file";
         if let ModuleMetadata::Elf(metadata) = entry {
-            metadata.set_debug_link(Some(String::from_str(symbol_file_path).unwrap()));
+            metadata.set_debug_link(Some(String::from_str(symbol_file_path).unwrap()), &mut strings);
         }
 
         assert!(metadata_lookup.contains(&dev_node_1));
         let result = metadata_lookup.get(&dev_node_1).unwrap();
         match result {
             ModuleMetadata::Elf(metadata) => {
-                match metadata.debug_link() {
+                match metadata.debug_link(&strings) {
                     Some(path) => assert_eq!(path, symbol_file_path),
                     None => assert!(false)
                 }
