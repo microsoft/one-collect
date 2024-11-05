@@ -245,8 +245,10 @@ impl TraceFS {
     /// # Example
     ///
     /// ```
+    /// # #[cfg(target_os = "linux")]
     /// use one_collect::tracefs::TraceFS;
     ///
+    /// # #[cfg(target_os = "linux")]
     /// if let Ok(tracefs) = TraceFS::open() {
     ///     let event = tracefs.find_event("sched", "sched_waking");
     /// }

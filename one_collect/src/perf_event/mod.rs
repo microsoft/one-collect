@@ -1,5 +1,4 @@
 use std::fs::File;
-use std::os::fd::FromRawFd;
 use std::path::PathBuf;
 use std::time::Duration;
 use std::array::TryFromSliceError;
@@ -10,6 +9,9 @@ use super::*;
 use crate::sharing::*;
 use crate::event::*;
 use crate::PathBufInteger;
+
+#[cfg(target_os = "linux")]
+use std::os::fd::FromRawFd;
 
 pub mod abi;
 pub mod rb;

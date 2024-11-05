@@ -2,6 +2,7 @@ use std::marker::PhantomData;
 use std::arch::asm;
 use std::rc::Rc;
 
+#[cfg(target_os = "linux")]
 use libc::*;
 
 use super::abi;

@@ -1,8 +1,15 @@
 use std::fs::File;
 use std::ffi::CString;
 use std::path::Path;
+
+#[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
+#[cfg(target_os = "linux")]
 use std::os::fd::{RawFd, FromRawFd, IntoRawFd};
+
+/* Required for cross-platform docs */
+#[cfg(not(target_os = "linux"))]
+struct RawFd {}
 
 /// `DupFd` is a wrapper around a raw file descriptor.
 ///

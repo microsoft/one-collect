@@ -1,5 +1,6 @@
 use std::mem::size_of;
 
+#[cfg(target_os = "linux")]
 use libc::*;
 use super::*;
 
