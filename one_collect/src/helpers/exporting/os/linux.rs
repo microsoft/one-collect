@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use std::fs::File;
 use std::fmt::Write;
 use std::io::BufReader;
-use std::str::FromStr;
 
 use crate::{ReadOnly, Writable};
 use crate::event::DataFieldRef;
@@ -17,6 +16,7 @@ use crate::perf_event::{AncillaryData, PerfSession};
 use crate::perf_event::{RingBufSessionBuilder, RingBufBuilder};
 use crate::perf_event::abi::PERF_RECORD_MISC_SWITCH_OUT;
 use crate::helpers::callstack::{CallstackHelp, CallstackReader};
+use crate::helpers::exporting::process::ExportProcessOSHooks;
 use crate::helpers::exporting::modulemetadata::{ModuleMetadata, ElfModuleMetadata};
 
 use ruwind::elf::*;
@@ -43,14 +43,34 @@ impl OSExportProcess {
     }
 }
 
-impl ExportProcess {
-    pub fn add_ns_pid(
+trait ExportProcessLinuxExt {
+    fn add_root_fs(
         &mut self,
-        path_buf: &mut PathBuf) {
-        *self.ns_pid_mut() = procfs::ns_pid(path_buf, self.pid());
-    }
+        path_buf: &mut PathBuf) -> anyhow::Result<()>;
 
-    pub fn add_root_fs(
+    fn add_matching_elf_symbols(
+        &mut self,
+        elf_metadata: &ModuleMetadataLookup,
+        addrs: &mut HashSet<u64>,
+        frames: &mut Vec<u64>,
+        callstacks: &InternedCallstacks,
+        strings: &mut InternedStrings);
+
+    fn find_symbol_files(
+        &self,
+        bin_path: &str,
+        metadata: &ElfModuleMetadata,
+        sym_types_requested: u32,
+        strings: &InternedStrings) -> Vec<File>;
+
+    fn check_candidate_symbol_file(
+        &self,
+        binary_build_id: Option<&[u8; 20]>,
+        filename: &PathBuf) -> Option<(File, u32)>;
+}
+
+impl ExportProcessLinuxExt for ExportProcess {
+    fn add_root_fs(
         &mut self,
         path_buf: &mut PathBuf) -> anyhow::Result<()> {
         path_buf.clear();
@@ -66,20 +86,7 @@ impl ExportProcess {
         Ok(())
     }
 
-    pub fn open_file(
-        &self,
-        path: &Path) -> anyhow::Result<File> {
-        match &self.os.root_fs {
-            None => {
-                anyhow::bail!("Root fs is not set or had an error.");
-            },
-            Some(root_fs) => {
-                root_fs.open_file(path)
-            }
-        }
-    }
-
-    pub fn add_matching_elf_symbols(
+    fn add_matching_elf_symbols(
         &mut self,
         elf_metadata: &ModuleMetadataLookup,
         addrs: &mut HashSet<u64>,
@@ -99,7 +106,7 @@ impl ExportProcess {
                 continue;
             }
 
-            Self::get_unique_user_ips(
+            ExportProcess::get_unique_user_ips(
                 &self.samples(),
                 addrs,
                 frames,
@@ -179,11 +186,13 @@ impl ExportProcess {
         // Look next to the binary.
         path_buf.clear();
         path_buf.push(format!("{}.dbg", bin_path));
+
         if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
             metadata.build_id(),
             &path_buf) {
             symbol_files.push(sym_file);
             sym_types_found |= types_found;
+
             if sym_types_found == sym_types_requested {
                 return symbol_files
             }
@@ -191,6 +200,7 @@ impl ExportProcess {
 
         path_buf.clear();
         path_buf.push(format!("{}.debug", bin_path));
+
         if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
             metadata.build_id(),
             &path_buf) {
@@ -203,10 +213,10 @@ impl ExportProcess {
 
         // Debug link.
         if let Some(debug_link) = metadata.debug_link(strings) {
-
             // Directly open debug_link.
             path_buf.clear();
             path_buf.push(debug_link);
+
             if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
                 metadata.build_id(),
                 &path_buf) {
@@ -220,12 +230,14 @@ impl ExportProcess {
             // These lookups require the directory path containing the binary.
             path_buf.clear();
             path_buf.push(bin_path);
+
             if let Some(bin_dir_path) = path_buf.parent() {
                 let mut path_buf = PathBuf::new();
 
                 // Open /path/to/binary/debug_link.
                 path_buf.push(bin_dir_path);
                 path_buf.push(debug_link);
+
                 if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
                     metadata.build_id(),
                     &path_buf) {
@@ -241,6 +253,7 @@ impl ExportProcess {
                 path_buf.push(bin_dir_path);
                 path_buf.push(".debug");
                 path_buf.push(debug_link);
+
                 if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
                     metadata.build_id(),
                     &path_buf) {
@@ -256,6 +269,7 @@ impl ExportProcess {
                 path_buf.push("/usr/lib/debug");
                 path_buf.push(&bin_dir_path.to_str().unwrap()[1..]);
                 path_buf.push(debug_link);
+
                 if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
                     metadata.build_id(),
                     &path_buf) {
@@ -277,12 +291,14 @@ impl ExportProcess {
                     write!(&mut str, "{:02x}", byte).unwrap_or_default();
                     str
                 });
+
             path_buf.clear();
             path_buf.push("/usr/lib/debug/.build-id/");
             path_buf.push(format!("{}/{}.debug",
                 &build_id_string[0..2],
                 &build_id_string[2..]));
-                if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
+
+            if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
                 metadata.build_id(),
                 &path_buf) {
                 symbol_files.push(sym_file);
@@ -298,6 +314,7 @@ impl ExportProcess {
         path_buf.clear();
         path_buf.push("/usr/lib/debug");
         path_buf.push(format!("{}{}", &bin_path[1..], ".debug"));
+
         if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
             metadata.build_id(),
             &path_buf) {
@@ -313,6 +330,7 @@ impl ExportProcess {
         path_buf.clear();
         path_buf.push("/usr/lib/debug");
         path_buf.push(&bin_path[1..]);
+
         if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
             metadata.build_id(),
             &path_buf) {
@@ -329,6 +347,7 @@ impl ExportProcess {
             path_buf.clear();
             path_buf.push("/usr/lib/debug/lib/");
             path_buf.push(&bin_path[9..]);
+
             if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
                 metadata.build_id(),
                 &path_buf) {
@@ -402,6 +421,21 @@ impl ExportProcess {
 
         // If the symbol file cannot be opened, does not match, or does not contain any symbols.
         None
+    }
+}
+
+impl ExportProcessOSHooks for ExportProcess {
+    fn os_open_file(
+        &self,
+        path: &Path) -> anyhow::Result<File> {
+        match &self.os.root_fs {
+            None => {
+                anyhow::bail!("Root fs is not set or had an error.");
+            },
+            Some(root_fs) => {
+                root_fs.open_file(path)
+            }
+        }
     }
 }
 
@@ -959,9 +993,7 @@ impl OSExportMachine {
                                     let mut debug_link_buf: [u8; 1024] = [0; 1024];
                                     if let Ok(Some(debug_link)) = read_debug_link(&mut reader, &sections, &section_offsets, &mut debug_link_buf) {
                                         let str_val = get_str(debug_link);
-                                        if let Ok(string_val) = String::from_str(str_val) {
-                                            elf_metadata.set_debug_link(Some(string_val), &mut machine.strings);
-                                        }
+                                        elf_metadata.set_debug_link(Some(str_val.to_owned()), &mut machine.strings);
                                     }
                                 }
                             }
@@ -1088,10 +1120,12 @@ impl ExportMachineOSHooks for ExportMachine {
         let fs = self.settings.os.process_fs;
 
         let proc = self.process_mut(pid);
-        proc.add_ns_pid(&mut path_buf.borrow_mut());
+        let mut path_buf = path_buf.borrow_mut();
+
+        *proc.ns_pid_mut() = procfs::ns_pid(&mut path_buf, pid);
 
         if fs {
-            proc.add_root_fs(&mut path_buf.borrow_mut())?;
+            proc.add_root_fs(&mut path_buf)?;
         }
 
         Ok(())

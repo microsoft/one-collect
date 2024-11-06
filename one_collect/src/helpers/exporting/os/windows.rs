@@ -5,6 +5,7 @@ use std::fs::File;
 use super::*;
 use crate::{ReadOnly, Writable};
 use crate::etw::*;
+use crate::helpers::exporting::process::ExportProcessOSHooks;
 
 /* OS Specific Session Type */
 pub type Session = EtwSession;
@@ -58,14 +59,8 @@ impl OSExportProcess {
     }
 }
 
-impl ExportProcess {
-    pub fn add_ns_pid(
-        &mut self,
-        pid: u32) {
-        self.ns_pid_mut().replace(pid);
-    }
-
-    pub fn open_file(
+impl ExportProcessOSHooks for ExportProcess {
+    fn os_open_file(
         &self,
         path: &Path) -> anyhow::Result<File> {
         let file = File::open(path)?;
@@ -174,7 +169,7 @@ impl CpuProfileKey {
     }
 }
 
-pub struct OSExportMachine {
+pub(crate) struct OSExportMachine {
     pid_mapping: HashMap<u32, u32>,
     cpu_samples: Option<HashMap<CpuProfileKey, CpuProfile>>,
     pid_index: u32,
@@ -334,7 +329,7 @@ impl OSExportMachine {
                 fmt.get_str(comm, dynamic)?)?;
 
             /* Store the local PID in the ns_pid as on Linux */
-            event_machine.process_mut(global_pid).add_ns_pid(local_pid);
+            *event_machine.process_mut(global_pid).ns_pid_mut() = Some(local_pid);
 
             Ok(())
         });

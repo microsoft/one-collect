@@ -1,8 +1,11 @@
+use std::fs::File;
+
 use crate::intern::InternedCallstacks;
 
 use ruwind::{CodeSection, Unwindable};
 
 use super::*;
+use super::os::OSExportProcess;
 use super::mappings::ExportMappingLookup;
 
 #[derive(Clone, Copy)]
@@ -59,10 +62,16 @@ pub struct ExportProcess {
     pid: u32,
     comm_id: Option<usize>,
     ns_pid: Option<u32>,
-    pub(crate) os: os::OSExportProcess,
+    pub(crate) os: OSExportProcess,
     samples: Vec<ExportProcessSample>,
     mappings: ExportMappingLookup,
     anon_maps: bool,
+}
+
+pub trait ExportProcessOSHooks {
+    fn os_open_file(
+        &self,
+        path: &Path) -> anyhow::Result<File>;
 }
 
 impl Unwindable for ExportProcess {
@@ -79,11 +88,17 @@ impl ExportProcess {
             pid,
             ns_pid: None,
             comm_id: None,
-            os: os::OSExportProcess::new(),
+            os: OSExportProcess::new(),
             samples: Vec::new(),
             mappings: ExportMappingLookup::default(),
             anon_maps: false,
         }
+    }
+
+    pub fn open_file(
+        &self,
+        path: &Path) -> anyhow::Result<File> {
+        self.os_open_file(path)
     }
 
     fn find_section(
