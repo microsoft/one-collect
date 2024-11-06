@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-use ruwind::{CodeSection, ModuleKey};
+use ruwind::{CodeSection, ModuleKey, UnwindType};
 
 use super::*;
 use super::lookup::*;
@@ -14,6 +14,7 @@ pub struct ExportMapping {
     file_offset: u64,
     anon: bool,
     id: usize,
+    unwind_type: UnwindType,
     node: Option<ExportDevNode>,
     symbols: Vec<ExportSymbol>,
 }
@@ -40,6 +41,10 @@ impl Eq for ExportMapping {}
 
 impl CodeSection for ExportMapping {
     fn anon(&self) -> bool { self.anon }
+
+    fn unwind_type(&self) -> UnwindType {
+        self.unwind_type
+    }
 
     fn rva(
         &self,
@@ -71,7 +76,8 @@ impl ExportMapping {
         end: u64,
         file_offset: u64,
         anon: bool,
-        id: usize) -> Self {
+        id: usize,
+        unwind_type: UnwindType) -> Self {
         Self {
             time,
             filename_id,
@@ -80,6 +86,7 @@ impl ExportMapping {
             file_offset,
             anon,
             id,
+            unwind_type,
             node: None,
             symbols: Vec::new(),
         }

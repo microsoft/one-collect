@@ -21,8 +21,8 @@ use crate::helpers::exporting::universal::*;
 use crate::helpers::exporting::modulemetadata::{ModuleMetadata, ElfModuleMetadata};
 
 use ruwind::elf::*;
-use ruwind::ModuleAccessor;
-use symbols::ElfSymbolReader;
+use ruwind::{ModuleAccessor, UnwindType};
+use symbols::{ElfSymbolReader, R2RMapSymbolReader};
 use self::symbols::PerfMapSymbolReader;
 
 /* OS Specific Session Type */
@@ -1075,7 +1075,8 @@ impl ExportMachineOSHooks for ExportMachine {
                 KERNEL_END,
                 0,
                 false,
-                self.map_index);
+                self.map_index,
+                UnwindType::DWARF);
 
             self.map_index += 1;
 

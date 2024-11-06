@@ -156,6 +156,14 @@ impl MachineState {
             }
         }
 
+        // PE files
+        let unwind_type =
+            if filename.ends_with(".dll") || filename.ends_with(".exe") {
+                UnwindType::Prolog
+            } else {
+                UnwindType::DWARF
+            };
+
         /* Always add to the process for unwinding info */
         if let Some(process) = self.machine.find_process(pid) {
             let module: Module;
@@ -168,7 +176,8 @@ impl MachineState {
                     end,
                     offset,
                     dev,
-                    ino);
+                    ino,
+                    unwind_type);
             } else {
                 module = Module::new_anon(
                     start,
