@@ -6,7 +6,7 @@ use crate::Writable;
 use crate::event::{Event, EventData};
 use crate::intern::{InternedStrings, InternedCallstacks};
 
-use crate::helpers::callstack::CallstackHelper;
+use crate::helpers::callstack::{CallstackHelper, CallstackReader};
 
 use modulemetadata::ModuleMetadata;
 use pe_file::PEModuleMetadata;
@@ -17,10 +17,9 @@ mod lookup;
 #[cfg_attr(target_os = "windows", path = "os/windows.rs")]
 pub mod os;
 use os::OSExportMachine;
+use os::OSExportSampler;
 
 pub type OSExportSettings = os::OSExportSettings;
-
-pub type ExportSampler = os::ExportSampler;
 
 pub const KERNEL_START:u64 = 0xFFFF800000000000;
 pub const KERNEL_END:u64 = 0xFFFFFFFFFFFFFFFF;
@@ -63,8 +62,46 @@ struct ExportCSwitch {
     sample: Option<ExportProcessSample>,
 }
 
+struct ExportSampler {
+    exporter: Writable<ExportMachine>,
+    frames: Vec<u64>,
+    os: OSExportSampler,
+}
+
+pub trait ExportSamplerOSHooks {
+    fn os_event_callstack(
+        &mut self,
+        data: &EventData) -> anyhow::Result<()>;
+
+    fn os_event_time(
+        &self,
+        data: &EventData) -> anyhow::Result<u64>;
+
+    fn os_event_pid(
+        &self,
+        data: &EventData) -> anyhow::Result<u32>;
+
+    fn os_event_tid(
+        &self,
+        data: &EventData) -> anyhow::Result<u32>;
+
+    fn os_event_cpu(
+        &self,
+        data: &EventData) -> anyhow::Result<u16>;
+}
+
 impl ExportSampler {
-    pub(crate) fn make_sample(
+    fn new(
+        exporter: &Writable<ExportMachine>,
+        os: OSExportSampler) -> Self {
+        Self {
+            exporter: exporter.clone(),
+            os,
+            frames: Vec::new(),
+        }
+    }
+
+    fn make_sample(
         &mut self,
         data: &EventData,
         value: u64,
@@ -72,25 +109,25 @@ impl ExportSampler {
         self.frames.clear();
 
         /* OS Specific callstack hook */
-        self.callstack(data)?;
+        self.os_event_callstack(data)?;
 
         Ok(self.exporter.borrow_mut().make_sample(
-            self.time(data)?,
+            self.os_event_time(data)?,
             value,
-            self.tid(data)?,
-            self.cpu(),
+            self.os_event_tid(data)?,
+            self.os_event_cpu(data)?,
             kind,
             &self.frames))
     }
 
-    pub(crate) fn add_custom_sample(
+    fn add_custom_sample(
         &mut self,
         pid: u32,
         sample: ExportProcessSample) -> anyhow::Result<()> {
         self.exporter.borrow_mut().add_custom_sample(pid, sample)
     }
 
-    pub(crate) fn add_sample(
+    fn add_sample(
         &mut self,
         data: &EventData,
         value: u64,
@@ -98,14 +135,14 @@ impl ExportSampler {
         self.frames.clear();
 
         /* OS Specific callstack hook */
-        self.callstack(data)?;
+        self.os_event_callstack(data)?;
 
         self.exporter.borrow_mut().add_sample(
-            self.time(data)?,
+            self.os_event_time(data)?,
             value,
-            self.pid(data)?,
-            self.tid(data)?,
-            self.cpu(),
+            self.os_event_pid(data)?,
+            self.os_event_tid(data)?,
+            self.os_event_cpu(data)?,
             kind,
             &self.frames)
     }
@@ -163,18 +200,20 @@ impl<'a> ExportTraceContext<'a> {
 
     pub fn data(&self) -> &'a EventData { self.data }
 
-    pub fn cpu(&self) -> u16 { self.sampler.cpu() }
+    pub fn cpu(&self) -> anyhow::Result<u16> {
+        self.sampler.os_event_cpu(self.data)
+    }
 
     pub fn time(&self) -> anyhow::Result<u64> {
-        self.sampler.time(self.data)
+        self.sampler.os_event_time(self.data)
     }
 
     pub fn pid(&self) -> anyhow::Result<u32> {
-        self.sampler.pid(self.data)
+        self.sampler.os_event_pid(self.data)
     }
 
     pub fn tid(&self) -> anyhow::Result<u32> {
-        self.sampler.tid(self.data)
+        self.sampler.os_event_tid(self.data)
     }
 
     pub fn add_sample_with_kind(
