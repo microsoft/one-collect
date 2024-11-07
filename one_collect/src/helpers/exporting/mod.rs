@@ -344,7 +344,7 @@ pub struct ExportMachine {
     settings: ExportSettings,
     strings: InternedStrings,
     callstacks: InternedCallstacks,
-    os: OSExportMachine,
+    pub(crate) os: OSExportMachine,
     procs: HashMap<u32, ExportProcess>,
     module_metadata: ModuleMetadataLookup,
     cswitches: HashMap<u32, ExportCSwitch>,
