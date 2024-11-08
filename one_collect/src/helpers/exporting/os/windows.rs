@@ -68,36 +68,30 @@ impl ExportProcessOSHooks for ExportProcess {
     }
 }
 
-pub struct ExportSampler {
-    /* Common */
-    pub(crate) exporter: Writable<ExportMachine>,
-    pub(crate) frames: Vec<u64>,
-
-    /* OS Specific */
+pub(crate) struct OSExportSampler {
     ancillary: ReadOnly<AncillaryData>,
 }
 
-impl ExportSampler {
+impl OSExportSampler {
     pub(crate) fn new(
-        exporter: &Writable<ExportMachine>,
         session: &EtwSession) -> Self {
         Self {
-            exporter: exporter.clone(),
             ancillary: session.ancillary_data(),
-            frames: Vec::new(),
         }
     }
+}
 
-    pub(crate) fn time(
+impl ExportSamplerOSHooks for ExportSampler {
+    fn os_event_time(
         &self,
         _data: &EventData) -> anyhow::Result<u64> {
-        Ok(self.ancillary.borrow().time())
+        Ok(self.os.ancillary.borrow().time())
     }
 
-    pub(crate) fn pid(
+    fn os_event_pid(
         &self,
         _data: &EventData) -> anyhow::Result<u32> {
-        let local_pid = self.ancillary.borrow().pid();
+        let local_pid = self.os.ancillary.borrow().pid();
 
         /*
          * We need to convert from local to global PID.
@@ -113,22 +107,24 @@ impl ExportSampler {
             .get_or_alloc_global_pid(local_pid))
     }
 
-    pub(crate) fn tid(
+    fn os_event_tid(
         &self,
         _data: &EventData) -> anyhow::Result<u32> {
-        Ok(self.ancillary.borrow().tid())
+        Ok(self.os.ancillary.borrow().tid())
     }
 
-    pub(crate) fn cpu(&self) -> u16 {
-        self.ancillary.borrow().cpu() as u16
+    fn os_event_cpu(
+        &self,
+        _data: &EventData) -> anyhow::Result<u16> {
+        Ok(self.os.ancillary.borrow().cpu() as u16)
     }
 
-    pub(crate) fn callstack(
+    fn os_event_callstack(
         &mut self,
         _data: &EventData) -> anyhow::Result<()> {
         let mut _match_id = 0u64;
 
-        self.ancillary.borrow().callstack(
+        self.os.ancillary.borrow().callstack(
             &mut self.frames,
             &mut _match_id);
 
@@ -353,7 +349,7 @@ impl OSExportMachine {
             let shared_sampler = Writable::new(
                 ExportSampler::new(
                     &machine,
-                    session));
+                    OSExportSampler::new(session)));
 
             for mut callback in events {
                 if callback.event.is_none() {

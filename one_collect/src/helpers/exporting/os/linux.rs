@@ -15,7 +15,7 @@ use crate::procfs;
 use crate::perf_event::{AncillaryData, PerfSession};
 use crate::perf_event::{RingBufSessionBuilder, RingBufBuilder};
 use crate::perf_event::abi::PERF_RECORD_MISC_SWITCH_OUT;
-use crate::helpers::callstack::{CallstackHelp, CallstackReader};
+use crate::helpers::callstack::CallstackHelp;
 use crate::helpers::exporting::process::ExportProcessOSHooks;
 use crate::helpers::exporting::modulemetadata::{ModuleMetadata, ElfModuleMetadata};
 
@@ -478,61 +478,57 @@ impl ExportSettings {
     }
 }
 
-pub struct ExportSampler {
-    /* Common */
-    pub(crate) exporter: Writable<ExportMachine>,
-    pub(crate) frames: Vec<u64>,
-
-    /* OS Specific */
-    ancillary: ReadOnly<AncillaryData>,
+pub(crate) struct OSExportSampler {
     reader: CallstackReader,
+    ancillary: ReadOnly<AncillaryData>,
     time_field: DataFieldRef,
     pid_field: DataFieldRef,
     tid_field: DataFieldRef,
 }
 
-impl ExportSampler {
-    pub(crate) fn new(
-        exporter: &Writable<ExportMachine>,
-        reader: &CallstackReader,
-        session: &PerfSession) -> Self {
+impl OSExportSampler {
+    fn new(
+        session: &PerfSession,
+        reader: &CallstackReader) -> Self {
         Self {
-            exporter: exporter.clone(),
-            ancillary: session.ancillary_data(),
             reader: reader.clone(),
+            ancillary: session.ancillary_data(),
             time_field: session.time_data_ref(),
             pid_field: session.pid_field_ref(),
             tid_field: session.tid_data_ref(),
-            frames: Vec::new(),
         }
     }
+}
 
-    pub(crate) fn time(
+impl ExportSamplerOSHooks for ExportSampler {
+    fn os_event_time(
         &self,
         data: &EventData) -> anyhow::Result<u64> {
-        self.time_field.get_u64(data.full_data())
+        self.os.time_field.get_u64(data.full_data())
     }
 
-    pub(crate) fn pid(
+    fn os_event_pid(
         &self,
         data: &EventData) -> anyhow::Result<u32> {
-        self.pid_field.get_u32(data.full_data())
+        self.os.pid_field.get_u32(data.full_data())
     }
 
-    pub(crate) fn tid(
+    fn os_event_tid(
         &self,
         data: &EventData) -> anyhow::Result<u32> {
-        self.tid_field.get_u32(data.full_data())
+        self.os.tid_field.get_u32(data.full_data())
     }
 
-    pub(crate) fn cpu(&self) -> u16 {
-        self.ancillary.borrow().cpu() as u16
+    fn os_event_cpu(
+        &self,
+        _data: &EventData) -> anyhow::Result<u16> {
+        Ok(self.os.ancillary.borrow().cpu() as u16)
     }
 
-    pub(crate) fn callstack(
+    fn os_event_callstack(
         &mut self,
         data: &EventData) -> anyhow::Result<()> {
-        Ok(self.reader.read_frames(
+        Ok(self.os.reader.read_frames(
             data.full_data(),
             &mut self.frames))
     }
@@ -592,8 +588,9 @@ impl OSExportMachine {
             let shared_sampler = Writable::new(
                 ExportSampler::new(
                     &machine,
-                    &callstack_reader,
-                    session));
+                    OSExportSampler::new(
+                        session,
+                        &callstack_reader)));
 
             for mut callback in events {
                 if callback.event.is_none() {
