@@ -1,4 +1,3 @@
-use super::*;
 use std::collections::hash_map::Entry;
 use std::collections::hash_map::Entry::{Vacant, Occupied};
 use std::path::{Path, PathBuf};
@@ -16,6 +15,7 @@ use crate::perf_event::{AncillaryData, PerfSession};
 use crate::perf_event::{RingBufSessionBuilder, RingBufBuilder};
 use crate::perf_event::abi::PERF_RECORD_MISC_SWITCH_OUT;
 use crate::helpers::callstack::CallstackHelp;
+use crate::helpers::exporting::*;
 use crate::helpers::exporting::process::ExportProcessOSHooks;
 use crate::helpers::exporting::modulemetadata::{ModuleMetadata, ElfModuleMetadata};
 
@@ -424,6 +424,7 @@ impl ExportProcessLinuxExt for ExportProcess {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl ExportProcessOSHooks for ExportProcess {
     fn os_open_file(
         &self,
@@ -458,7 +459,7 @@ pub(crate) fn default_export_settings() -> ExportSettings {
         ExportSettings::new(helper)
 }
 
-pub struct OSExportSettings {
+pub(crate) struct OSExportSettings {
     process_fs: bool,
 }
 
@@ -470,8 +471,12 @@ impl OSExportSettings {
     }
 }
 
-impl ExportSettings {
-    pub fn without_process_fs(self) -> Self {
+pub trait ExportSettingsLinuxExt {
+    fn without_process_fs(self) -> Self;
+}
+
+impl ExportSettingsLinuxExt for ExportSettings {
+    fn without_process_fs(self) -> Self {
         let mut clone = self;
         clone.os.process_fs = false;
         clone
@@ -500,6 +505,7 @@ impl OSExportSampler {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl ExportSamplerOSHooks for ExportSampler {
     fn os_event_time(
         &self,
@@ -1043,6 +1049,7 @@ impl ModuleAccessor for ExportDevNodeLookup {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl ExportMachineOSHooks for ExportMachine {
     fn os_add_kernel_mappings_with(
         &mut self,

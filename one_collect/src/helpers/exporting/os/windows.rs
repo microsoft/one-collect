@@ -2,9 +2,9 @@ use std::collections::hash_map::Entry::Occupied;
 
 use std::fs::File;
 
-use super::*;
 use crate::{ReadOnly, Writable};
 use crate::etw::*;
+use crate::helpers::exporting::*;
 use crate::helpers::exporting::process::ExportProcessOSHooks;
 
 /* OS Specific Session Type */
@@ -36,7 +36,7 @@ impl PushWide for String {
     }
 }
 
-pub struct OSExportSettings {
+pub(crate) struct OSExportSettings {
     /* Placeholder */
 }
 
@@ -59,6 +59,7 @@ impl OSExportProcess {
     }
 }
 
+#[cfg(target_os = "windows")]
 impl ExportProcessOSHooks for ExportProcess {
     fn os_open_file(
         &self,
@@ -81,6 +82,7 @@ impl OSExportSampler {
     }
 }
 
+#[cfg(target_os = "windows")]
 impl ExportSamplerOSHooks for ExportSampler {
     fn os_event_time(
         &self,
@@ -555,6 +557,7 @@ impl OSExportMachine {
     }
 }
 
+#[cfg(target_os = "windows")]
 impl ExportMachineOSHooks for ExportMachine {
     fn os_add_kernel_mappings_with(
         &mut self,
