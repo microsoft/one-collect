@@ -13,13 +13,14 @@ use pe_file::PEModuleMetadata;
 
 mod lookup;
 
-#[cfg_attr(target_os = "linux", path = "os/linux.rs")]
-#[cfg_attr(target_os = "windows", path = "os/windows.rs")]
 pub mod os;
 use os::OSExportMachine;
 use os::OSExportSampler;
+use os::OSExportSettings;
 
-pub type OSExportSettings = os::OSExportSettings;
+/* Make it easy for callers to use public OS extensions */
+#[cfg(target_os = "linux")]
+pub use os::linux::ExportSettingsLinuxExt;
 
 pub const KERNEL_START:u64 = 0xFFFF800000000000;
 pub const KERNEL_END:u64 = 0xFFFFFFFFFFFFFFFF;
@@ -319,10 +320,6 @@ impl ExportSettings {
             events: None,
         }
     }
-
-    pub fn os_settings(&self) -> &OSExportSettings { &self.os }
-
-    pub fn os_settings_mut(&mut self) -> &mut OSExportSettings { &mut self.os }
 
     pub fn has_unwinder(&self) -> bool { self.unwinder }
 
