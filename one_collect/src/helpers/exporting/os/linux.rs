@@ -68,6 +68,20 @@ trait ExportProcessLinuxExt {
         &self,
         binary_build_id: Option<&[u8; 20]>,
         filename: &PathBuf) -> Option<(File, u32)>;
+
+    fn add_matching_readytorun_symbols(
+        &mut self,
+        pe_metadata: &ModuleMetadataLookup,
+        addrs: &mut HashSet<u64>,
+        frames: &mut Vec<u64>,
+        callstacks: &InternedCallstacks,
+        strings: &mut InternedStrings);
+
+    fn find_readytorun_map_file(
+        &self,
+        bin_path: &str,
+        metadata: &PEModuleMetadata,
+        strings: &InternedStrings) -> Option<R2RMapSymbolReader>;
 }
 
 impl ExportProcessLinuxExt for ExportProcess {
@@ -421,6 +435,101 @@ impl ExportProcessLinuxExt for ExportProcess {
         }
 
         // If the symbol file cannot be opened, does not match, or does not contain any symbols.
+        None
+    }
+
+    fn add_matching_readytorun_symbols(
+        &mut self,
+        pe_metadata: &ModuleMetadataLookup,
+        addrs: &mut HashSet<u64>,
+        frames: &mut Vec<u64>,
+        callstacks: &InternedCallstacks,
+        strings: &mut InternedStrings) {
+        addrs.clear();
+        frames.clear();
+
+        if self.os.root_fs.is_none() {
+            return;
+        }
+
+        for map_index in 0..self.mappings().len() {
+            let map = self.mappings().get(map_index).unwrap();
+            if map.anon() {
+                continue;
+            }
+
+            Self::get_unique_user_ips(
+                &self.samples(),
+                addrs,
+                frames,
+                &callstacks,
+                Some(map));
+
+            if addrs.is_empty() {
+                continue;
+            }
+
+            frames.clear();
+            for addr in addrs.iter() {
+                frames.push(*addr);
+            }
+
+            // Get the file path or continue.
+            let filename = match strings.from_id(map.filename_id()) {
+                Ok(str) => str,
+                Err(_) => continue
+            };
+
+            // Get the dev node or continue.
+            let dev_node = match map.node() {
+                Some(key) => key,
+                None => continue
+            };
+
+            // If there is no metadata, then we can't load symbols.
+            // It's possible that metadata fields are empty, but if there is no metadata entry,
+            // then we should not proceed.
+            if let Some(ModuleMetadata::PE(metadata)) = pe_metadata.get(dev_node) {
+
+                // Find the matching r2rmap file.
+                if let Some(mut sym_reader) = self.find_readytorun_map_file(filename, metadata, strings) {
+                    let map_mut = self.mappings_mut().get_mut(map_index).unwrap();
+                    map_mut.add_matching_symbols(
+                        frames,
+                        &mut sym_reader,
+                        strings);
+                }
+            }
+        }
+    }
+
+    fn find_readytorun_map_file(
+        &self,
+        bin_path: &str,
+        metadata: &PEModuleMetadata,
+        strings: &InternedStrings) -> Option<R2RMapSymbolReader> {
+        let mut path_buf = PathBuf::new();
+
+        // Get the directory containing the binary.
+        path_buf.push(bin_path);
+        path_buf.pop();
+
+        // Concatenate the r2rmap file name onto the binary directory to look for the file next to the binary.
+        if let Some(filename) = metadata.perfmap_name(strings) {
+            path_buf.push(filename);
+
+            if let Ok(file) = self.open_file(&path_buf) {
+                let mut reader = R2RMapSymbolReader::new(file);
+                reader.reset();
+
+                // The signature must be non-zero and match.
+                if *metadata.perfmap_sig() != [0; 16] && metadata.perfmap_sig() == reader.signature() {
+                    return Some(reader);
+                }
+            }
+        }
+
+        // The file could not be opened or the signature does not match.
         None
     }
 }
@@ -935,6 +1044,21 @@ impl OSExportMachine {
         }
     }
 
+    fn resolve_readytorun_symbols(
+        machine: &mut ExportMachine) {
+        let mut frames = Vec::new();
+        let mut addrs = HashSet::new();
+
+        for proc in machine.procs.values_mut() {
+            proc.add_matching_readytorun_symbols(
+                &machine.module_metadata,
+                &mut addrs,
+                &mut frames,
+                &machine.callstacks,
+                &mut machine.strings);
+        }
+    }
+
     fn resolve_elf_symbols(
         machine: &mut ExportMachine) {
         let mut frames = Vec::new();
@@ -1144,6 +1268,7 @@ impl ExportMachineOSHooks for ExportMachine {
 
     fn os_resolve_local_file_symbols(&mut self) {
         OSExportMachine::resolve_elf_symbols(self);
+        OSExportMachine::resolve_readytorun_symbols(self);
     }
 
     fn os_resolve_local_anon_symbols(&mut self) {
