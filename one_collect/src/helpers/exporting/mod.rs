@@ -6,7 +6,7 @@ use crate::Writable;
 use crate::event::{Event, EventData};
 use crate::intern::{InternedStrings, InternedCallstacks};
 
-use crate::helpers::callstack::{CallstackHelper, CallstackReader};
+use crate::helpers::callstack::CallstackHelper;
 
 use modulemetadata::ModuleMetadata;
 use pe_file::PEModuleMetadata;

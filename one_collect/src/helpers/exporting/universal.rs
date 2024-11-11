@@ -26,6 +26,13 @@ pub struct UniversalExporter {
     cpu_buf_bytes: usize,
 }
 
+pub trait UniversalExporterOSHooks {
+    fn os_parse_until(
+        self,
+        name: &str,
+        until: impl Fn() -> bool + Send + 'static) -> anyhow::Result<Writable<ExportMachine>>;
+}
+
 impl UniversalExporter {
     pub fn new(settings: ExportSettings) -> Self {
         let mut cpu_buf_bytes = 64*1024;
@@ -75,7 +82,18 @@ impl UniversalExporter {
             move || { now.elapsed() >= duration })
     }
 
-    fn run_build_hooks(
+    pub fn parse_until(
+        self,
+        name: &str,
+        until: impl Fn() -> bool + Send + 'static) -> anyhow::Result<Writable<ExportMachine>> {
+        self.os_parse_until(
+            name,
+            until)
+    }
+
+    pub(crate) fn cpu_buf_bytes(&self) -> usize { self.cpu_buf_bytes }
+
+    pub(crate) fn run_build_hooks(
         &mut self,
         mut builder: SessionBuilder) -> anyhow::Result<SessionBuilder> {
         let mut context = UniversalBuildSessionContext {
@@ -88,7 +106,7 @@ impl UniversalExporter {
         Ok(builder)
     }
 
-    fn run_parsed_hooks(
+    pub(crate) fn run_parsed_hooks(
         &mut self,
         machine: &Writable<ExportMachine>) -> anyhow::Result<()> {
         let mut context = UniversalParsedContext {
@@ -102,84 +120,11 @@ impl UniversalExporter {
         Ok(())
     }
 
-    fn settings(
+    pub(crate) fn settings(
         &mut self) -> anyhow::Result<ExportSettings> {
         match self.settings.take() {
             Some(settings) => { Ok(settings) },
             None => { anyhow::bail!("No settings.") },
         }
-    }
-
-    pub fn parse_until(
-        self,
-        name: &str,
-        until: impl Fn() -> bool + Send + 'static) -> anyhow::Result<Writable<ExportMachine>> {
-        self.os_parse_until(
-            name,
-            until)
-    }
-
-    #[cfg(target_os = "linux")]
-    fn os_parse_until(
-        mut self,
-        _name: &str,
-        until: impl Fn() -> bool + Send + 'static) -> anyhow::Result<Writable<ExportMachine>> {
-        use crate::perf_event::*;
-
-        let settings = self.settings()?;
-
-        let page_count = self.cpu_buf_bytes / 4096;
-
-        let builder = RingBufSessionBuilder::new()
-            .with_page_count(page_count)
-            .with_exporter_events(&settings);
-
-        let mut builder = self.run_build_hooks(builder)?;
-
-        let mut session = builder.build()?;
-
-        let exporter = session.build_exporter(settings)?;
-
-        session.capture_environment();
-
-        session.enable()?;
-        session.parse_until(until)?;
-        session.disable()?;
-
-        self.run_parsed_hooks(&exporter)?;
-
-        Ok(exporter)
-    }
-
-    #[cfg(target_os = "windows")]
-    fn os_parse_until(
-        mut self,
-        name: &str,
-        until: impl Fn() -> bool + Send + 'static) -> anyhow::Result<Writable<ExportMachine>> {
-        use crate::etw::*;
-        use crate::helpers::callstack::*;
-
-        let settings = self.settings()?;
-
-        let callstack_helper = match settings.callstack_helper.as_ref() {
-            Some(helper) => { helper },
-            None => { anyhow::bail!("CallstackHelper is not set."); },
-        };
-
-        let mut session = EtwSession::new()
-            .with_per_cpu_buffer_bytes(self.cpu_buf_bytes)
-            .with_callstack_help(&callstack_helper);
-
-        session = self.run_build_hooks(session)?;
-
-        let exporter = session.build_exporter(settings)?;
-
-        session.capture_environment();
-
-        session.parse_until(name, until)?;
-
-        self.run_parsed_hooks(&exporter)?;
-
-        Ok(exporter)
     }
 }
