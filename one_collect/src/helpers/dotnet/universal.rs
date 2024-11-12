@@ -4,7 +4,7 @@ use crate::Writable;
 use crate::helpers::exporting::UniversalExporter;
 
 pub struct UniversalDotNetHelper {
-    os: Writable<Option<os::DotNetHelper>>,
+    helper: DotNetHelper,
 }
 
 impl Default for UniversalDotNetHelper {
@@ -13,65 +13,45 @@ impl Default for UniversalDotNetHelper {
     }
 }
 
+pub(crate) trait UniversalDotNetHelperOSHooks {
+    fn os_with_dynamic_symbols(self) -> Self;
+
+    fn os_cleanup_dynamic_symbols(&mut self);
+}
+
 impl UniversalDotNetHelper {
     pub fn new() -> Self {
-        let helper = os::DotNetHelper::new();
-
         Self {
-            os: Writable::new(Some(helper)),
+            helper: DotNetHelper::new(),
         }
     }
 
-    pub fn with_dynamic_symbols(self) -> Self {
-        let os = self.os.borrow_mut().take();
-
-        match os {
-            Some(helper) => {
-                /* OS specific implementation */
-                #[cfg(target_os = "linux")]
-                let helper = helper.with_perf_maps();
-
-                /* Universally replace */
-                self.os.borrow_mut().replace(helper);
-            },
-            None => { /* Nothing */ }
-        }
+    pub fn with_dynamic_symbols(mut self) -> Self {
+        self.helper = self.helper.os_with_dynamic_symbols();
 
         self
-    }
-
-    pub fn cleanup_dynamic_symbols(&mut self) {
-        if let Some(helper) = self.os.borrow_mut().as_mut() {
-            /* OS specific implementation */
-            #[cfg(target_os = "linux")]
-            helper.remove_perf_maps();
-        }
-    }
-
-    pub fn disable_dynamic_symbols(&mut self) {
-        if let Some(helper) = self.os.borrow_mut().as_mut() {
-            /* OS specific implementation */
-            #[cfg(target_os = "linux")]
-            helper.disable_perf_maps();
-        }
     }
 }
 
 impl UniversalDotNetHelp for UniversalExporter {
     fn with_dotnet_help(
         self,
-        helper: &UniversalDotNetHelper) -> Self {
-        let os = helper.os.clone();
+        universal: UniversalDotNetHelper) -> Self {
+        let helper = Writable::new(universal.helper);
+
+        let build_helper = helper.clone();
+        let drop_helper = helper.clone();
 
         self.with_build_hook(move |mut builder, _context| {
-            let mut helper_option = os.borrow_mut();
+            let mut helper = build_helper.borrow_mut();
 
-            /* Hook OS specific details universally */
-            if let Some(helper) = helper_option.as_mut() {
-                builder = builder.with_dotnet_help(helper);
-            }
+            /* Hook SessionBuilder */
+            builder = builder.with_dotnet_help(&mut helper);
 
             Ok(builder)
+        }).with_export_drop_hook(move || {
+            /* Hook OS specific cleanup on ExportMachine drop */
+            drop_helper.borrow_mut().os_cleanup_dynamic_symbols();
         })
     }
 }

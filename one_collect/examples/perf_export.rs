@@ -19,23 +19,19 @@ fn main() {
     let settings = ExportSettings::default()
         .with_cpu_profiling(1000);
 
-    let mut dotnet = UniversalDotNetHelper::default()
+    let dotnet = UniversalDotNetHelper::default()
         .with_dynamic_symbols();
 
     let universal = UniversalExporter::new(settings)
-        .with_dotnet_help(&dotnet);
+        .with_dotnet_help(dotnet);
 
     println!("Capturing...");
     let exporter = universal.parse_for_duration("perf_export", duration)
         .expect("Check permissions.");
 
-    dotnet.disable_dynamic_symbols();
-
     let mut exporter = exporter.borrow_mut();
 
     exporter.capture_and_resolve_symbols();
-
-    dotnet.cleanup_dynamic_symbols();
 
     println!("Exporting...");
 
