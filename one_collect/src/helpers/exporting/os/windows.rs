@@ -6,6 +6,7 @@ use crate::{ReadOnly, Writable};
 use crate::etw::*;
 use crate::helpers::exporting::*;
 use crate::helpers::exporting::process::ExportProcessOSHooks;
+use crate::helpers::exporting::universal::*;
 
 /* OS Specific Session Type */
 pub type Session = EtwSession;
@@ -649,6 +650,39 @@ impl ExportSessionHelp for EtwSession {
         OSExportMachine::hook_to_etw_session(
             ExportMachine::new(settings),
             self)
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl UniversalExporterOSHooks for UniversalExporter {
+    fn os_parse_until(
+        mut self,
+        name: &str,
+        until: impl Fn() -> bool + Send + 'static) -> anyhow::Result<Writable<ExportMachine>> {
+        use crate::helpers::callstack::*;
+
+        let settings = self.settings()?;
+
+        let callstack_helper = match settings.callstack_helper.as_ref() {
+            Some(helper) => { helper },
+            None => { anyhow::bail!("CallstackHelper is not set."); },
+        };
+
+        let mut session = EtwSession::new()
+            .with_per_cpu_buffer_bytes(self.cpu_buf_bytes())
+            .with_callstack_help(&callstack_helper);
+
+        session = self.run_build_hooks(session)?;
+
+        let exporter = session.build_exporter(settings)?;
+
+        session.capture_environment();
+
+        session.parse_until(name, until)?;
+
+        self.run_parsed_hooks(&exporter)?;
+
+        Ok(exporter)
     }
 }
 

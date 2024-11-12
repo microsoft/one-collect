@@ -14,9 +14,10 @@ use crate::procfs;
 use crate::perf_event::{AncillaryData, PerfSession};
 use crate::perf_event::{RingBufSessionBuilder, RingBufBuilder};
 use crate::perf_event::abi::PERF_RECORD_MISC_SWITCH_OUT;
-use crate::helpers::callstack::CallstackHelp;
+use crate::helpers::callstack::{CallstackHelp, CallstackReader};
 use crate::helpers::exporting::*;
 use crate::helpers::exporting::process::ExportProcessOSHooks;
+use crate::helpers::exporting::universal::*;
 use crate::helpers::exporting::modulemetadata::{ModuleMetadata, ElfModuleMetadata};
 
 use ruwind::elf::*;
@@ -1197,6 +1198,40 @@ impl ExportSessionHelp for PerfSession {
         OSExportMachine::hook_to_perf_session(
             ExportMachine::new(settings),
             self)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl UniversalExporterOSHooks for UniversalExporter {
+    fn os_parse_until(
+        mut self,
+        _name: &str,
+        until: impl Fn() -> bool + Send + 'static) -> anyhow::Result<Writable<ExportMachine>> {
+        let settings = self.settings()?;
+
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGE_SIZE) as usize };
+
+        let page_count = self.cpu_buf_bytes() / page_size;
+
+        let builder = RingBufSessionBuilder::new()
+            .with_page_count(page_count)
+            .with_exporter_events(&settings);
+
+        let mut builder = self.run_build_hooks(builder)?;
+
+        let mut session = builder.build()?;
+
+        let exporter = session.build_exporter(settings)?;
+
+        session.capture_environment();
+
+        session.enable()?;
+        session.parse_until(until)?;
+        session.disable()?;
+
+        self.run_parsed_hooks(&exporter)?;
+
+        Ok(exporter)
     }
 }
 
