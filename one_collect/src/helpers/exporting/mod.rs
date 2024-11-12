@@ -515,7 +515,7 @@ impl ExportMachine {
     }
 
     pub fn capture_file_symbol_metadata(&mut self) {
-        self.os_resolve_local_file_symbols();
+        self.os_capture_file_symbol_metadata();
     }
 
     pub fn resolve_local_file_symbols(&mut self) {
