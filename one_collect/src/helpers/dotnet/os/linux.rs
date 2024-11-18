@@ -1,4 +1,9 @@
+#[cfg(target_os = "linux")]
 use std::os::unix::net::UnixStream;
+
+#[cfg(not(target_os = "linux"))]
+struct UnixStream {}
+
 use std::io::{Read, BufRead, BufReader, Write};
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -7,12 +12,19 @@ use std::sync::mpsc::{self, Sender, Receiver};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
-use super::*;
+use crate::helpers::dotnet::*;
+use crate::helpers::dotnet::universal::UniversalDotNetHelperOSHooks;
+
 use crate::perf_event::*;
 use crate::openat::OpenAt;
 use crate::Writable;
 use crate::procfs;
+
+#[cfg(target_os = "linux")]
 use libc::PROT_EXEC;
+
+#[cfg(not(target_os = "linux"))]
+const PROT_EXEC: i32 = 0;
 
 struct PerfMapContext {
     tmp: OpenAt,
@@ -227,40 +239,48 @@ impl PerfMapTracker {
 
 type ArcPerfMapContexts = Arc<Mutex<Vec<PerfMapContext>>>;
 
-pub struct DotNetHelper {
+pub(crate) struct OSDotNetHelper {
     perf_maps: bool,
     perf_map_procs: Option<ArcPerfMapContexts>,
 }
 
-impl DotNetHelper {
+impl OSDotNetHelper {
     pub fn new() -> Self {
         Self {
             perf_maps: false,
             perf_map_procs: None,
         }
     }
+}
 
-    pub fn with_perf_maps(
-        self) -> Self {
-        let mut clone = self;
-        clone.perf_maps = true;
-        clone.perf_map_procs = Some(
+pub trait DotNetHelperLinuxExt {
+    fn with_perf_maps(self) -> Self;
+
+    fn remove_perf_maps(&mut self);
+
+    fn disable_perf_maps(&mut self);
+}
+
+impl DotNetHelperLinuxExt for DotNetHelper {
+    fn with_perf_maps(mut self) -> Self {
+        self.os.perf_maps = true;
+        self.os.perf_map_procs = Some(
             Arc::new(
                 Mutex::new(
                     Vec::new())));
-        clone
+        self
     }
 
-    pub fn remove_perf_maps(&mut self) {
-        if let Some(procs) = &self.perf_map_procs {
+    fn remove_perf_maps(&mut self) {
+        if let Some(procs) = &self.os.perf_map_procs {
             for proc in procs.lock().unwrap().iter() {
                 let _ = proc.remove_perf_map();
             }
         }
     }
 
-    pub fn disable_perf_maps(&mut self) {
-        if let Some(procs) = &self.perf_map_procs {
+    fn disable_perf_maps(&mut self) {
+        if let Some(procs) = &self.os.perf_map_procs {
             for proc in procs.lock().unwrap().iter() {
                 let _ = proc.disable_perf_map();
             }
@@ -268,12 +288,23 @@ impl DotNetHelper {
     }
 }
 
+#[cfg(target_os = "linux")]
+impl UniversalDotNetHelperOSHooks for DotNetHelper {
+    fn os_with_dynamic_symbols(self) -> Self {
+        self.with_perf_maps()
+    }
+
+    fn os_cleanup_dynamic_symbols(&mut self) {
+        self.remove_perf_maps();
+    }
+}
+
 impl DotNetHelp for RingBufSessionBuilder {
     fn with_dotnet_help(
         mut self,
         helper: &mut DotNetHelper) -> Self {
-        let perf_maps = helper.perf_maps;
-        let perf_maps_procs = match helper.perf_map_procs.as_ref() {
+        let perf_maps = helper.os.perf_maps;
+        let perf_maps_procs = match helper.os.perf_map_procs.as_ref() {
             Some(arc) => { Some(arc.clone()) },
             None => { None },
         };

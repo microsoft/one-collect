@@ -386,6 +386,7 @@ pub struct ExportMachine {
     cswitches: HashMap<u32, ExportCSwitch>,
     kinds: Vec<String>,
     map_index: usize,
+    drop_closures: Vec<Box<dyn FnMut()>>,
 }
 
 pub trait ExportMachineSessionHooks {
@@ -435,6 +436,7 @@ impl ExportMachine {
             cswitches: HashMap::new(),
             kinds: Vec::new(),
             map_index: 0,
+            drop_closures: Vec::new(),
         }
     }
 
@@ -686,6 +688,20 @@ impl ExportMachine {
                     }
                 }
             }
+        }
+    }
+
+    pub fn add_drop_closure(
+        &mut self,
+        closure: impl FnMut() + 'static) {
+        self.drop_closures.push(Box::new(closure));
+    }
+}
+
+impl Drop for ExportMachine {
+    fn drop(&mut self) {
+        for closure in &mut self.drop_closures {
+            closure();
         }
     }
 }
