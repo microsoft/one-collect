@@ -22,7 +22,7 @@ use crate::helpers::exporting::modulemetadata::{ModuleMetadata, ElfModuleMetadat
 
 use ruwind::elf::*;
 use ruwind::{ModuleAccessor, UnwindType};
-use symbols::{ElfSymbolReader, R2RMapSymbolReader};
+use symbols::{ElfSymbolReader, R2RLoadedLayoutSymbolTransformer, R2RMapSymbolReader};
 use self::symbols::PerfMapSymbolReader;
 
 /* OS Specific Session Type */
@@ -490,13 +490,13 @@ impl ExportProcessLinuxExt for ExportProcess {
             // It's possible that metadata fields are empty, but if there is no metadata entry,
             // then we should not proceed.
             if let Some(ModuleMetadata::PE(metadata)) = pe_metadata.get(dev_node) {
-
                 // Find the matching r2rmap file.
-                if let Some(mut sym_reader) = self.find_readytorun_map_file(filename, metadata, strings) {
+                if let Some(sym_reader) = self.find_readytorun_map_file(filename, metadata, strings) {
+                    let mut transform_sym_reader = R2RLoadedLayoutSymbolTransformer::new(sym_reader, metadata.text_loaded_layout_offset());
                     let map_mut = self.mappings_mut().get_mut(map_index).unwrap();
                     map_mut.add_matching_symbols(
                         frames,
-                        &mut sym_reader,
+                        &mut transform_sym_reader,
                         strings);
                 }
             }

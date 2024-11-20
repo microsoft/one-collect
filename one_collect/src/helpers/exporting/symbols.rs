@@ -558,6 +558,63 @@ impl ExportSymbolReader for R2RMapSymbolReader {
     }
 }
 
+// This transformer is responsible for reconciling the difference between the expectations in the crossgen2 tool
+// and the representation of the PE image loaded layout as implemented by CoreCLR and seen from the Linux kernel.
+//
+// When a ready to run PE image is loaded by CoreCLR, it loads it via multiple mmap calls, which results in multiple
+// mmap events and multiple ExportMapping objects.  The Linux kernel reports this as:
+//
+// 1. The base mapping that contains the DOS and NT image headers.  This mapping represents the beginning of the PE image,
+//    and its start address represents the base address of the loaded layout.
+// 2. One mapping per section.  For example, there will be one mapping for the .text section.
+//
+// When it's time to calculate RVAs from captured IPs, crossgen2 has generated the symbol file with the assumption that RVAs
+// are calculated by taking the IP and subtracting the base address - the start address of the base mapping, and NOT the start
+// address of the current (e.g. .text section) mapping.  R2RLoadedLayoutSymbolTransformer takes as a parameter, the difference
+// between the current mapping's start address and the base mapping's start address, and uses that offset to compute RVAs that
+// will match crossgen2's view of the world when generating the symbol file.
+pub struct R2RLoadedLayoutSymbolTransformer {
+    sym_reader: R2RMapSymbolReader,
+    offset: u64,
+}
+
+impl R2RLoadedLayoutSymbolTransformer {
+    pub fn new(
+        sym_reader: R2RMapSymbolReader,
+        offset: u64) -> Self {
+        Self {
+            sym_reader,
+            offset,
+        }
+    }
+}
+
+impl ExportSymbolReader for R2RLoadedLayoutSymbolTransformer {
+    fn reset(&mut self) {
+        self.sym_reader.reset()
+    }
+
+    fn next(&mut self) -> bool {
+        self.sym_reader.next()
+    }
+
+    fn start(&self) -> u64 {
+        self.sym_reader.start() - self.offset
+    }
+
+    fn end(&self) -> u64 {
+        self.sym_reader.end() - self.offset
+    }
+
+    fn name(&self) -> &str {
+        self.sym_reader.name()
+    }
+
+    fn demangle(&mut self) -> Option<String> {
+        self.sym_reader.demangle()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

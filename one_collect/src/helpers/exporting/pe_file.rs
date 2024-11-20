@@ -16,6 +16,7 @@ pub struct PEModuleMetadata {
     perfmap_sig: [u8; 16],
     perfmap_version: u32,
     perfmap_name_id: usize,
+    text_loaded_layout_offset: u64,
 }
 
 impl Default for PEModuleMetadata {
@@ -36,6 +37,7 @@ impl PEModuleMetadata {
             perfmap_sig: [0; 16],
             perfmap_version: 0,
             perfmap_name_id: 0,
+            text_loaded_layout_offset: 0,
         }
     }
 
@@ -68,6 +70,7 @@ impl PEModuleMetadata {
         self.perfmap_sig = [0; 16];
         self.perfmap_version = 0;
         self.perfmap_name_id = 0;
+        self.text_loaded_layout_offset = 0;
     }
 
     pub fn machine(&self) -> u16 {
@@ -125,6 +128,10 @@ impl PEModuleMetadata {
             Ok(name) => Some(name),
             Err(_) => None
         }
+    }
+
+    pub fn text_loaded_layout_offset(&self) -> u64 {
+        self.text_loaded_layout_offset
     }
 }
 
@@ -203,7 +210,7 @@ impl PEResEntry {
 
 #[repr(C)]
 struct PESection {
-    name: u64,
+    name: [u8; 8],
     virt_size: u32,
     virt_addr: u32,
     raw_size: u32,
@@ -446,6 +453,30 @@ fn va_to_offset(
     return Ok(None)
 }
 
+const TEXT_SECTION_NAME: &[u8; 8] = b".text\0\0\0";
+
+fn get_text_addresses(
+    reader: &mut (impl Read + Seek),
+    pe_header: &PEHeader,
+    pe_offset: u64) -> anyhow::Result<Option<(u64, u64)>> {
+    /* Read sections */
+    let mut sections_offset: u64 = pe_offset as u64;
+    sections_offset += 24;
+    sections_offset += pe_header.opt_header_size as u64;
+    reader.seek(SeekFrom::Start(sections_offset))?;
+    let mut section: PESection = unsafe { zeroed() };
+
+    for _i in 0 .. pe_header.sec_count {
+        read_section(reader, &mut section)?;
+
+        if section.name == *TEXT_SECTION_NAME {
+            return Ok(Some((section.virt_addr as u64, section.raw_offset as u64)));
+        }
+    }
+
+    return Ok(None)
+}
+
 fn get_directory_data(
     reader: &mut (impl Read + Seek),
     pe_header: &PEHeader,
@@ -541,6 +572,10 @@ fn get_pe_info(
     get_pe_header(reader, &mut pe_header, &mut pe_offset)?;
     module.machine = pe_header.machine;
     module.date_time = pe_header.date_time;
+
+    if let Some((virtual_address, file_offset)) = get_text_addresses(reader, &pe_header, pe_offset)? {
+        module.text_loaded_layout_offset = virtual_address - file_offset;
+    }
 
     (dbg_offset, dbg_size) = get_directory_data(
         reader, &pe_header, pe_offset, 6)?;
