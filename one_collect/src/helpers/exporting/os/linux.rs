@@ -493,6 +493,8 @@ impl ExportProcessLinuxExt for ExportProcess {
                 // Find the matching r2rmap file.
                 if let Some(sym_reader) = self.find_readytorun_map_file(filename, metadata, strings) {
                     let mut transform_sym_reader = R2RLoadedLayoutSymbolTransformer::new(sym_reader, metadata.text_loaded_layout_offset());
+                    // NOTE: Safe to call unwrap here because map_index represents the index into the currently borrowed Vec<ExportMapping>.
+                    // This is simply done to avoid having an immutably-borrowed ExportMapping when we need a mutably-borrowed ExportMapping here.
                     let map_mut = self.mappings_mut().get_mut(map_index).unwrap();
                     map_mut.add_matching_symbols(
                         frames,
