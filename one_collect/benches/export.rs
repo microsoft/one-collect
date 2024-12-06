@@ -7,7 +7,7 @@ fn new_map(
     start: u64,
     end: u64,
     id: usize) -> ExportMapping {
-    ExportMapping::new(time, 0, start, end, 0, false, id)
+    ExportMapping::new(time, 0, start, end, 0, false, id, ruwind::UnwindType::DWARF)
 }
 
 pub fn criterion_benchmark(c: &mut Criterion) {
