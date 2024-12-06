@@ -10,6 +10,7 @@ use crate::helpers::callstack::CallstackHelper;
 
 use modulemetadata::ModuleMetadata;
 use pe_file::PEModuleMetadata;
+use ruwind::UnwindType;
 
 mod lookup;
 
@@ -558,6 +559,13 @@ impl ExportMachine {
             filename.starts_with("/memfd:") ||
             filename.starts_with("//anon");
 
+        let unwind_type =
+            if anon || filename.ends_with(".dll") || filename.ends_with(".exe") {
+                UnwindType::Prolog
+            } else {
+                UnwindType::DWARF
+            };
+
         let mut mapping = ExportMapping::new(
             time,
             self.intern(filename),
@@ -565,7 +573,8 @@ impl ExportMachine {
             addr + len - 1,
             pgoffset,
             anon,
-            self.map_index);
+            self.map_index,
+            unwind_type);
 
         if !anon {
             let node = ExportDevNode::from_parts(maj, min, ino);

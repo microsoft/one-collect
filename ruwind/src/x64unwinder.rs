@@ -279,14 +279,14 @@ impl MachineUnwinder for Unwinder {
         stack_frames: &mut Vec<u64>,
         result: &mut UnwindResult) {
         while let Some(module) = process.find(self.rip) {
-            let ip = if module.anon() {
-                /* Anonymous code, no DWARF */
+            let ip = if module.unwind_type() == UnwindType::Prolog {
+                /* Anonymous and PE */
                 self.unwind_prolog(
                     process,
                     stack_data,
                     result)
             } else {
-                /* File backed code, use DWARF */
+                /* Default to DWARF */
                 let rva = module.rva(self.rip);
 
                 self.unwind_module(

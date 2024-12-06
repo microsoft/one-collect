@@ -288,7 +288,7 @@ mod tests {
         start: u64,
         end: u64,
         id: usize) -> ExportMapping {
-        let mut map = ExportMapping::new(time, 0, start, end, 0, false, id);
+        let mut map = ExportMapping::new(time, 0, start, end, 0, false, id, UnwindType::Prolog);
         map.set_node(ExportDevNode::from_parts(0, 0, id as u64));
         map
     }

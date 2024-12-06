@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-use ruwind::{CodeSection, ModuleKey};
+use ruwind::{CodeSection, ModuleKey, UnwindType};
 
 use super::*;
 use super::lookup::*;
@@ -14,6 +14,7 @@ pub struct ExportMapping {
     file_offset: u64,
     anon: bool,
     id: usize,
+    unwind_type: UnwindType,
     node: Option<ExportDevNode>,
     symbols: Vec<ExportSymbol>,
 }
@@ -40,6 +41,10 @@ impl Eq for ExportMapping {}
 
 impl CodeSection for ExportMapping {
     fn anon(&self) -> bool { self.anon }
+
+    fn unwind_type(&self) -> UnwindType {
+        self.unwind_type
+    }
 
     fn rva(
         &self,
@@ -71,7 +76,8 @@ impl ExportMapping {
         end: u64,
         file_offset: u64,
         anon: bool,
-        id: usize) -> Self {
+        id: usize,
+        unwind_type: UnwindType) -> Self {
         Self {
             time,
             filename_id,
@@ -80,6 +86,7 @@ impl ExportMapping {
             file_offset,
             anon,
             id,
+            unwind_type,
             node: None,
             symbols: Vec::new(),
         }
@@ -342,7 +349,7 @@ mod tests {
         start: u64,
         end: u64,
         id: usize) -> ExportMapping {
-        ExportMapping::new(time, 0, start, end, 0, false, id)
+        ExportMapping::new(time, 0, start, end, 0, false, id, UnwindType::Prolog)
     }
 
     #[test]
@@ -441,7 +448,7 @@ mod tests {
         let end = start + 4096;
         let file_offset = 1024;
 
-        let mapping = ExportMapping::new(0, 0, start, end, file_offset, false, 0);
+        let mapping = ExportMapping::new(0, 0, start, end, file_offset, false, 0, UnwindType::Prolog);
 
         /* Simple in range case: start */
         let va_range = mapping.file_to_va_range(1024, 1096).unwrap();

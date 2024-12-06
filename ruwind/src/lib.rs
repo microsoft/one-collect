@@ -19,6 +19,8 @@ pub trait Unwindable {
 pub trait CodeSection {
     fn anon(&self) -> bool;
 
+    fn unwind_type(&self) -> UnwindType;
+
     fn rva(
         &self,
         ip: u64) -> u64;
@@ -83,6 +85,12 @@ pub trait ModuleAccessor {
         key: &ModuleKey) -> Option<File>;
 }
 
+#[derive(Eq, Clone, Copy, PartialEq)]
+pub enum UnwindType {
+    DWARF,
+    Prolog,
+}
+
 #[derive(Eq, Clone, Copy)]
 pub struct Module {
     start: u64,
@@ -90,6 +98,7 @@ pub struct Module {
     offset: u64,
     key: ModuleKey,
     anon: bool,
+    unwind_type: UnwindType,
 }
 
 #[derive(Default)]
@@ -144,7 +153,7 @@ mod tests {
 
         let accessor = SingleAccessor {};
         let mut proc = Process::new();
-        let module = Module::new(start, end, off, 0, 0);
+        let module = Module::new(start, end, off, 0, 0, UnwindType::DWARF);
         let stack_data = fs::read("test_assets/test.data").unwrap();
         let mut stack_frames: Vec<u64> = Vec::new();
 

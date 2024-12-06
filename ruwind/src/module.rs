@@ -56,6 +56,8 @@ impl PartialEq for ModuleKey {
 impl CodeSection for Module {
     fn anon(&self) -> bool { self.anon }
 
+    fn unwind_type(&self) -> UnwindType { self.unwind_type }
+
     fn rva(
         &self,
         ip: u64) -> u64 {
@@ -71,7 +73,8 @@ impl Module {
         end: u64,
         offset: u64,
         dev: u64,
-        ino: u64) -> Self {
+        ino: u64,
+        unwind_type: UnwindType) -> Self {
         Self {
             start,
             end,
@@ -80,6 +83,7 @@ impl Module {
                 dev,
                 ino),
             anon: false,
+            unwind_type,
         }
     }
 
@@ -94,6 +98,7 @@ impl Module {
                 0,
                 0),
             anon: true,
+            unwind_type: UnwindType::Prolog,
         }
     }
 }
