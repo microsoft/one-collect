@@ -349,7 +349,7 @@ mod tests {
         start: u64,
         end: u64,
         id: usize) -> ExportMapping {
-        ExportMapping::new(time, 0, start, end, 0, false, id)
+        ExportMapping::new(time, 0, start, end, 0, false, id, UnwindType::Prolog)
     }
 
     #[test]
@@ -448,7 +448,7 @@ mod tests {
         let end = start + 4096;
         let file_offset = 1024;
 
-        let mapping = ExportMapping::new(0, 0, start, end, file_offset, false, 0);
+        let mapping = ExportMapping::new(0, 0, start, end, file_offset, false, 0, UnwindType::Prolog);
 
         /* Simple in range case: start */
         let va_range = mapping.file_to_va_range(1024, 1096).unwrap();

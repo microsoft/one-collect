@@ -66,9 +66,9 @@ mod tests {
     #[test]
     fn find() {
         let mut proc = Process::new();
-        let first = Module::new(1, 1024, 0, 1, 0);
-        let second = Module::new(1025, 2048, 0, 2, 0);
-        let third = Module::new(2049, 3072, 0, 3, 0);
+        let first = Module::new(1, 1024, 0, 1, 0, UnwindType::DWARF);
+        let second = Module::new(1025, 2048, 0, 2, 0, UnwindType::DWARF);
+        let third = Module::new(2049, 3072, 0, 3, 0, UnwindType::DWARF);
         proc.add_module(first);
         proc.add_module(second);
         proc.add_module(third);

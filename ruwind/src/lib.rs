@@ -153,7 +153,7 @@ mod tests {
 
         let accessor = SingleAccessor {};
         let mut proc = Process::new();
-        let module = Module::new(start, end, off, 0, 0);
+        let module = Module::new(start, end, off, 0, 0, UnwindType::DWARF);
         let stack_data = fs::read("test_assets/test.data").unwrap();
         let mut stack_frames: Vec<u64> = Vec::new();
 
