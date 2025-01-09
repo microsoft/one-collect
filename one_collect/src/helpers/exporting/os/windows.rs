@@ -168,7 +168,15 @@ impl CpuProfileKey {
     }
 }
 
+#[derive(Default)]
+struct WinCSwitch {
+    cpu: u32,
+    start_time: u64,
+    end_time: u64,
+}
+
 pub(crate) struct OSExportMachine {
+    cswitches: HashMap<u32, WinCSwitch>,
     pid_mapping: HashMap<u32, u32>,
     cpu_samples: Option<HashMap<CpuProfileKey, CpuProfile>>,
     pid_index: u32,
@@ -177,6 +185,7 @@ pub(crate) struct OSExportMachine {
 impl OSExportMachine {
     pub fn new() -> Self {
         Self {
+            cswitches: HashMap::new(),
             pid_mapping: HashMap::new(),
             cpu_samples: Some(HashMap::new()),
             pid_index: 0,
@@ -531,7 +540,92 @@ impl OSExportMachine {
         }
 
         if cswitches {
-            /* TODO */
+            /* Get sample kind for cswitch */
+            let kind = machine.borrow_mut().sample_kind("cswitch");
+
+            let ancillary = session.ancillary_data();
+
+            let cswitch_event = session.cswitch_event(Some(PROPERTY_STACK_TRACE));
+            let fmt = cswitch_event.format();
+            let new_tid = fmt.get_field_ref_unchecked("NewThreadId");
+            let old_tid = fmt.get_field_ref_unchecked("OldThreadId");
+
+            /* ETW callstacks come via its own event, link them to cswitches */
+            let event_machine = machine.clone();
+
+            callstack_reader.add_async_frames_callback(move |callstack| {
+                let mut machine = event_machine.borrow_mut();
+
+                let tid = callstack.tid();
+
+                let info = match machine.os.cswitches.entry(tid) {
+                    Occupied(entry) => {
+                        let info = entry.get();
+
+                        /* Time must match to ensure correct stack */
+                        if info.end_time == callstack.time() {
+                            Some(entry.remove())
+                        } else {
+                            None
+                        }
+                    },
+                    _ => { None },
+                };
+
+                if let Some(info) = info {
+                    let local_pid = callstack.pid();
+                    let global_pid = machine.os.get_or_alloc_global_pid(local_pid);
+
+                    if info.end_time > info.start_time {
+                        let duration = info.end_time - info.start_time;
+
+                        let sample = machine.make_sample(
+                            info.start_time,
+                            duration,
+                            tid,
+                            info.cpu as u16,
+                            kind,
+                            callstack.frames());
+
+                        machine.process_mut(global_pid).add_sample(sample);
+                    }
+                }
+            });
+
+            /* Handle actual cswitch event */
+            let event_machine = machine.clone();
+            let event_ancillary = ancillary.clone();
+
+            cswitch_event.add_callback(move |data| {
+                let fmt = data.format();
+                let data = data.event_data();
+
+                let new_tid = fmt.get_u32(new_tid, data)?;
+                let old_tid = fmt.get_u32(old_tid, data)?;
+
+                let mut machine = event_machine.borrow_mut();
+                let ancillary = event_ancillary.borrow();
+
+                /* Ignore swapping to idle thread */
+                if new_tid != 0 {
+                    /* Mark when thread got running again only if we have data for it */
+                    if let Occupied(mut entry) = machine.os.cswitches.entry(new_tid) {
+                        entry.get_mut().end_time = ancillary.time();
+                    }
+                }
+
+                /* Ignore swapping from idle thread */
+                if old_tid != 0 {
+                    /* Mark when thread got interrupted and on what CPU */
+                    let info = machine.os.cswitches.entry(old_tid).or_default();
+
+                    info.cpu = ancillary.cpu();
+                    info.start_time = ancillary.time();
+                    info.end_time = 0;
+                }
+
+                Ok(())
+            });
         }
 
         /* Hook mmap records */

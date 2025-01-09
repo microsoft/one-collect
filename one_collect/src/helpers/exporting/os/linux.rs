@@ -653,6 +653,7 @@ impl ExportSamplerOSHooks for ExportSampler {
 }
 
 pub(crate) struct OSExportMachine {
+    cswitches: HashMap<u32, ExportCSwitch>,
     dev_nodes: ExportDevNodeLookup,
     path_buf: Writable<PathBuf>,
 }
@@ -660,6 +661,7 @@ pub(crate) struct OSExportMachine {
 impl OSExportMachine {
     pub fn new() -> Self {
         Self {
+            cswitches: HashMap::new(),
             dev_nodes: ExportDevNodeLookup::new(),
             path_buf: Writable::new(PathBuf::new()),
         }
@@ -838,7 +840,7 @@ impl OSExportMachine {
                     &frames);
 
                 /* Stash away the sample until switch-in */
-                machine.cswitches.entry(tid).or_default().sample = Some(sample);
+                machine.os.cswitches.entry(tid).or_default().sample = Some(sample);
 
                 Ok(())
             });
@@ -867,7 +869,7 @@ impl OSExportMachine {
 
                 let mut machine = event_machine.borrow_mut();
 
-                match machine.cswitches.entry(tid) {
+                match machine.os.cswitches.entry(tid) {
                     Occupied(mut entry) => {
                         let entry = entry.get_mut();
 
