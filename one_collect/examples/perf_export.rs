@@ -17,7 +17,8 @@ fn main() {
     let duration = std::time::Duration::from_secs(5);
 
     let settings = ExportSettings::default()
-        .with_cpu_profiling(1000);
+        .with_cpu_profiling(1000)
+        .with_cswitches();
 
     let dotnet = UniversalDotNetHelper::default()
         .with_dynamic_symbols();
@@ -39,6 +40,7 @@ fn main() {
     let comm_map = exporter.split_processes_by_comm();
 
     let cpu = exporter.find_sample_kind("cpu").expect("CPU sample kind should be known.");
+    let cswitch = exporter.find_sample_kind("cswitch").expect("CSwitch sample kind should be known.");
 
     let mut graph = ExportGraph::new();
     let mut buf: String;
@@ -47,33 +49,30 @@ fn main() {
         match comm_id {
             None => {
                 for pid in pids {
-                    /* Merge by Unknown PID */
-                    graph.reset();
+                    let single_pid = vec![pid];
 
-                    let process = exporter.find_process(pid).expect("PID should be found.");
+                    let path = format!("{}/t.Unknown.{}.CPU.PerfView.xml", out_dir, pid);
 
-                    graph.add_samples(
+                    export_pids(
                         &exporter,
-                        process,
-                        cpu);
+                        &mut graph,
+                        &single_pid,
+                        cpu,
+                        &path,
+                        "CPU Samples");
 
-                    let total = graph.nodes()[graph.root_node()].total();
+                    let path = format!("{}/t.Unknown.{}.CSwitch.PerfView.xml", out_dir, pid);
 
-                    if total == 0 {
-                        continue;
-                    }
-
-                    /* Save as Unknown PID */
-                    let path = format!("{}/t.Unknown.{}.PerfView.xml", out_dir, pid);
-
-                    graph.to_perf_view_xml(&path).expect("Export should work.");
-
-                    println!("{}: {} Samples", path, total);
+                    export_pids(
+                        &exporter,
+                        &mut graph,
+                        &single_pid,
+                        cswitch,
+                        &path,
+                        "Wait Time");
                 }
             },
             Some(comm_id) => {
-                graph.reset();
-
                 /* Merge by name */
                 let comm = match exporter.strings().from_id(comm_id) {
                     Ok(comm) => {
@@ -87,27 +86,53 @@ fn main() {
                     Err(_) => { "Unknown" },
                 };
 
-                for pid in pids {
-                    let process = exporter.find_process(pid).expect("PID should be found.");
-                    graph.add_samples(
-                        &exporter,
-                        process,
-                        cpu);
-                }
+                let path = format!("{}/t.{}.CPU.PerfView.xml", out_dir, comm);
 
-                let total = graph.nodes()[graph.root_node()].total();
+                export_pids(
+                    &exporter,
+                    &mut graph,
+                    &pids,
+                    cpu,
+                    &path,
+                    "CPU Samples");
 
-                if total == 0 {
-                    continue;
-                }
+                let path = format!("{}/t.{}.CSwitch.PerfView.xml", out_dir, comm);
 
-                /* Save as name */
-                let path = format!("{}/t.{}.PerfView.xml", out_dir, comm);
-
-                graph.to_perf_view_xml(&path).expect("Export should work.");
-
-                println!("{}: {} Samples", path, total);
+                export_pids(
+                    &exporter,
+                    &mut graph,
+                    &pids,
+                    cswitch,
+                    &path,
+                    "Wait Time");
             }
         }
+    }
+}
+
+fn export_pids(
+    exporter: &ExportMachine,
+    graph: &mut ExportGraph,
+    pids: &[u32],
+    kind: u16,
+    path: &str,
+    sample_desc: &str) {
+    graph.reset();
+
+    for pid in pids {
+        let process = exporter.find_process(*pid).expect("PID should be found.");
+
+        graph.add_samples(
+            &exporter,
+            process,
+            kind);
+    }
+
+    let total = graph.nodes()[graph.root_node()].total();
+
+    if total != 0 {
+        graph.to_perf_view_xml(path).expect("Export should work.");
+
+        println!("{}: {} {}", path, total, sample_desc);
     }
 }
