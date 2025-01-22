@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::collections::hash_map::{Values, ValuesMut};
+use std::time::Duration;
 use std::path::Path;
 
 use crate::Writable;
@@ -11,6 +12,7 @@ use crate::helpers::callstack::CallstackHelper;
 use modulemetadata::ModuleMetadata;
 use pe_file::PEModuleMetadata;
 use ruwind::UnwindType;
+use chrono::{DateTime, Utc};
 
 mod lookup;
 
@@ -387,6 +389,9 @@ pub struct ExportMachine {
     kinds: Vec<String>,
     map_index: usize,
     drop_closures: Vec<Box<dyn FnMut()>>,
+    start_date: Option<DateTime<Utc>>,
+    start_qpc: Option<u64>,
+    duration: Option<Duration>,
 }
 
 pub trait ExportMachineSessionHooks {
@@ -415,6 +420,10 @@ pub trait ExportMachineOSHooks {
         &mut self,
         pid: u32,
         comm: &str) -> anyhow::Result<()>;
+
+    fn os_qpc_time(&self) -> u64;
+
+    fn os_qpc_freq(&self) -> u64;
 }
 
 pub type CommMap = HashMap<Option<usize>, Vec<u32>>;
@@ -436,6 +445,32 @@ impl ExportMachine {
             kinds: Vec::new(),
             map_index: 0,
             drop_closures: Vec::new(),
+            start_date: None,
+            start_qpc: None,
+            duration: None,
+        }
+    }
+
+    pub fn start_date(&self) -> Option<DateTime<Utc>> { self.start_date }
+
+    pub fn start_qpc(&self) -> Option<u64> { self.start_qpc }
+
+    pub fn duration(&self) -> Option<Duration> { self.duration }
+
+    pub fn mark_start(&mut self) {
+        self.start_date = Some(Utc::now());
+        self.start_qpc = Some(self.os_qpc_time());
+    }
+
+    pub fn mark_end(&mut self) {
+        if let Some(start_qpc) = self.start_qpc {
+            let end_qpc = self.os_qpc_time();
+            let qpc_freq = self.os_qpc_freq();
+
+            let qpc_duration = end_qpc - start_qpc;
+            let micros = (qpc_duration * 1000000u64) / qpc_freq;
+
+            self.duration = Some(Duration::from_micros(micros));
         }
     }
 

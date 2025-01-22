@@ -1278,6 +1278,36 @@ impl ExportMachineOSHooks for ExportMachine {
     fn os_resolve_local_anon_symbols(&mut self) {
         OSExportMachine::resolve_perf_map_symbols(self);
     }
+
+    fn os_qpc_time(&self) -> u64 {
+        let mut t = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+
+        unsafe {
+            libc::clock_gettime(
+                libc::CLOCK_MONOTONIC_RAW,
+                &mut t);
+        }
+
+        ((t.tv_sec * 1000000000) + t.tv_nsec) as u64
+    }
+
+    fn os_qpc_freq(&self) -> u64 {
+        let mut t = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+
+        unsafe {
+            libc::clock_getres(
+                libc::CLOCK_MONOTONIC_RAW,
+                &mut t);
+        }
+
+        (1000000000 / t.tv_nsec) as u64
+    }
 }
 
 impl ExportBuilderHelp for RingBufSessionBuilder {
@@ -1355,9 +1385,11 @@ impl UniversalExporterOSHooks for UniversalExporter {
 
         session.capture_environment();
 
+        exporter.borrow_mut().mark_start();
         session.enable()?;
         session.parse_until(until)?;
         session.disable()?;
+        exporter.borrow_mut().mark_end();
 
         self.run_parsed_hooks(&exporter)?;
 

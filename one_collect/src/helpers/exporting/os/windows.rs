@@ -652,6 +652,15 @@ impl OSExportMachine {
     }
 }
 
+#[link(name = "kernel32")]
+extern "system" {
+    fn QueryPerformanceCounter(
+        time: *mut u64) -> u32;
+
+    fn QueryPerformanceFrequency(
+        freq: *mut u64) -> u32;
+}
+
 #[cfg(target_os = "windows")]
 impl ExportMachineOSHooks for ExportMachine {
     fn os_add_kernel_mappings_with(
@@ -735,6 +744,26 @@ impl ExportMachineOSHooks for ExportMachine {
         _comm: &str) -> anyhow::Result<()> {
         Ok(())
     }
+
+    fn os_qpc_time(&self) -> u64 {
+        let mut t = 0u64;
+
+        unsafe {
+            QueryPerformanceCounter(&mut t);
+        }
+
+        t
+    }
+
+    fn os_qpc_freq(&self) -> u64 {
+        let mut t = 0u64;
+
+        unsafe {
+            QueryPerformanceFrequency(&mut t);
+        }
+
+        t
+    }
 }
 
 impl ExportSessionHelp for EtwSession {
@@ -772,7 +801,9 @@ impl UniversalExporterOSHooks for UniversalExporter {
 
         session.capture_environment();
 
+        exporter.borrow_mut().mark_start();
         session.parse_until(name, until)?;
+        exporter.borrow_mut().mark_end();
 
         self.run_parsed_hooks(&exporter)?;
 
