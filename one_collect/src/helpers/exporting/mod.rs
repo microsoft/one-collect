@@ -457,6 +457,18 @@ impl ExportMachine {
 
     pub fn duration(&self) -> Option<Duration> { self.duration }
 
+    pub fn sort_samples_by_time(
+        &mut self,
+        predicate: impl Fn(&ExportProcess) -> bool) {
+        for process in self.processes_mut() {
+            if !predicate(process) {
+                continue;
+            }
+
+            process.sort_samples_by_time();
+        }
+    }
+
     pub fn mark_start(&mut self) {
         self.start_date = Some(Utc::now());
         self.start_qpc = Some(self.os_qpc_time());
@@ -758,4 +770,52 @@ pub trait ExportSessionHelp {
     fn build_exporter(
         &mut self,
         settings: ExportSettings) -> anyhow::Result<Writable<ExportMachine>>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sort_samples_by_time() {
+        let mut machine = ExportMachine::new(ExportSettings::default());
+        let proc = machine.process_mut(1);
+
+        let first = ExportProcessSample::new(0, 0, 0, 0, 0, 0, 0);
+        let second = ExportProcessSample::new(1, 0, 0, 0, 0, 0, 0);
+        let third = ExportProcessSample::new(2, 0, 0, 0, 0, 0, 0);
+        let forth = ExportProcessSample::new(3, 0, 0, 0, 0, 0, 0);
+
+        proc.add_sample(forth);
+        proc.add_sample(second);
+        proc.add_sample(first);
+        proc.add_sample(third);
+
+        let proc = machine.process_mut(2);
+
+        let first = ExportProcessSample::new(0, 0, 0, 0, 0, 0, 0);
+        let second = ExportProcessSample::new(1, 0, 0, 0, 0, 0, 0);
+        let third = ExportProcessSample::new(2, 0, 0, 0, 0, 0, 0);
+        let forth = ExportProcessSample::new(3, 0, 0, 0, 0, 0, 0);
+
+        proc.add_sample(forth);
+        proc.add_sample(second);
+        proc.add_sample(first);
+        proc.add_sample(third);
+
+        /* Only sort pid 1 */
+        machine.sort_samples_by_time(|proc| proc.pid() == 1);
+
+        /* Ensure pid 1 is sorted */
+        let proc = machine.find_process(1).expect("Should find process 1.");
+
+        for (i,sample) in proc.samples().iter().enumerate() {
+            assert_eq!(i as u64, sample.time());
+        }
+
+        /* Ensure pid 2 is NOT sorted */
+        let proc = machine.find_process(2).expect("Should find process 2.");
+
+        assert_eq!(3, proc.samples().first().expect("Should have a sample").time());
+    }
 }

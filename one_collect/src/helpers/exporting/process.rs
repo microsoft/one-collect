@@ -139,6 +139,10 @@ impl ExportProcess {
         self.comm_id = Some(comm_id);
     }
 
+    pub fn sort_samples_by_time(&mut self) {
+        self.samples.sort_by(|a, b| a.time.cmp(&b.time));
+    }
+
     pub fn pid(&self) -> u32 { self.pid }
 
     pub fn ns_pid(&self) -> Option<u32> { self.ns_pid }
@@ -433,5 +437,26 @@ mod tests {
         assert!(found.is_some());
         let found = found.unwrap();
         assert_eq!(6, found.key().ino);
+    }
+
+    #[test]
+    fn sort_samples_by_time() {
+        let mut proc = ExportProcess::new(1);
+
+        let first = ExportProcessSample::new(0, 0, 0, 0, 0, 0, 0);
+        let second = ExportProcessSample::new(1, 0, 0, 0, 0, 0, 0);
+        let third = ExportProcessSample::new(2, 0, 0, 0, 0, 0, 0);
+        let forth = ExportProcessSample::new(3, 0, 0, 0, 0, 0, 0);
+
+        proc.add_sample(forth);
+        proc.add_sample(second);
+        proc.add_sample(first);
+        proc.add_sample(third);
+
+        proc.sort_samples_by_time();
+
+        for (i,sample) in proc.samples().iter().enumerate() {
+            assert_eq!(i as u64, sample.time());
+        }
     }
 }
