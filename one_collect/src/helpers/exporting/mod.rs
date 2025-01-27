@@ -642,16 +642,27 @@ impl ExportMachine {
     pub fn add_comm_exec(
         &mut self,
         pid: u32,
-        comm: &str) -> anyhow::Result<()> {
+        comm: &str,
+        time_qpc: u64) -> anyhow::Result<()> {
         let comm_id = self.intern(comm);
 
         let proc = self.process_mut(pid);
 
         proc.set_comm_id(comm_id);
+        proc.set_create_time_qpc(time_qpc);
 
         self.os_add_comm_exec(
             pid,
             comm)
+    }
+
+    pub fn add_comm_exit(
+        &mut self,
+        pid: u32,
+        time_qpc: u64) -> anyhow::Result<()> {
+        self.process_mut(pid).set_exit_time_qpc(time_qpc);
+
+        Ok(())
     }
 
     pub fn make_sample(

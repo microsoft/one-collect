@@ -66,6 +66,8 @@ pub struct ExportProcess {
     samples: Vec<ExportProcessSample>,
     mappings: ExportMappingLookup,
     anon_maps: bool,
+    create_time_qpc: Option<u64>,
+    exit_time_qpc: Option<u64>,
 }
 
 pub trait ExportProcessOSHooks {
@@ -92,6 +94,8 @@ impl ExportProcess {
             samples: Vec::new(),
             mappings: ExportMappingLookup::default(),
             anon_maps: false,
+            create_time_qpc: None,
+            exit_time_qpc: None,
         }
     }
 
@@ -139,6 +143,18 @@ impl ExportProcess {
         self.comm_id = Some(comm_id);
     }
 
+    pub fn set_create_time_qpc(
+        &mut self,
+        qpc: u64) {
+        self.create_time_qpc = Some(qpc);
+    }
+
+    pub fn set_exit_time_qpc(
+        &mut self,
+        qpc: u64) {
+        self.exit_time_qpc = Some(qpc);
+    }
+
     pub fn sort_samples_by_time(&mut self) {
         self.samples.sort_by(|a, b| a.time.cmp(&b.time));
     }
@@ -150,6 +166,10 @@ impl ExportProcess {
     pub fn ns_pid_mut(&mut self) -> &mut Option<u32> { &mut self.ns_pid }
 
     pub fn comm_id(&self) -> Option<usize> { self.comm_id }
+
+    pub fn create_time_qpc(&self) -> Option<u64> { self.create_time_qpc }
+
+    pub fn exit_time_qpc(&self) -> Option<u64> { self.exit_time_qpc }
 
     pub fn samples(&self) -> &Vec<ExportProcessSample> { &self.samples }
 

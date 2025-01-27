@@ -304,6 +304,7 @@ impl OSExportMachine {
     }
 
     fn hook_comm_event(
+        ancillary: ReadOnly<AncillaryData>,
         event: &mut Event,
         event_machine: Writable<ExportMachine>) {
         let fmt = event.format();
@@ -334,7 +335,8 @@ impl OSExportMachine {
              */
             event_machine.add_comm_exec(
                 global_pid,
-                fmt.get_str(comm, dynamic)?)?;
+                fmt.get_str(comm, dynamic)?,
+                ancillary.borrow().time())?;
 
             /* Store the local PID in the ns_pid as on Linux */
             *event_machine.process_mut(global_pid).ns_pid_mut() = Some(local_pid);
@@ -519,7 +521,8 @@ impl OSExportMachine {
 
                         let _ = event_machine.add_comm_exec(
                             global_pid,
-                            "Unknown");
+                            "Unknown",
+                            0);
 
                         for (key, value) in samples.drain() {
                             /* Update single frame array */
@@ -639,14 +642,38 @@ impl OSExportMachine {
             session.mmap_load_capture_start_event(),
             machine.clone());
 
-        /* Hook comm records */
+        /* Hook comm exec records */
         Self::hook_comm_event(
+            session.ancillary_data(),
             session.comm_start_event(),
             machine.clone());
 
         Self::hook_comm_event(
+            session.ancillary_data(),
             session.comm_start_capture_event(),
             machine.clone());
+
+        /* Hook comm exit record */
+        let event_ancillary = session.ancillary_data();
+        let event_machine = machine.clone();
+        let event = session.comm_end_event();
+        let fmt = event.format();
+        let pid = fmt.get_field_ref_unchecked("ProcessId");
+
+        event.add_callback(move |data| {
+            let fmt = data.format();
+            let data = data.event_data();
+
+            let mut machine = event_machine.borrow_mut();
+            let ancillary = event_ancillary.borrow();
+
+            let local_pid = fmt.get_u32(pid, data)?;
+            let global_pid = machine.os.get_or_alloc_global_pid(local_pid);
+
+            machine.add_comm_exit(
+                global_pid,
+                ancillary.time())
+        });
 
         Ok(machine)
     }

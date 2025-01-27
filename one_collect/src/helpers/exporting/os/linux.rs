@@ -958,6 +958,7 @@ impl OSExportMachine {
         });
 
         /* Hook comm records */
+        let time_field = session.time_data_ref();
         let event = session.comm_event();
         let event_machine = machine.clone();
         let fmt = event.format();
@@ -967,6 +968,7 @@ impl OSExportMachine {
 
         event.add_callback(move |data| {
             let fmt = data.format();
+            let full_data = data.full_data();
             let data = data.event_data();
 
             let pid = fmt.get_u32(pid, data)?;
@@ -978,7 +980,27 @@ impl OSExportMachine {
 
             event_machine.borrow_mut().add_comm_exec(
                 pid,
-                fmt.get_str(comm, data)?)
+                fmt.get_str(comm, data)?,
+                time_field.get_u64(full_data)?)
+        });
+
+        /* Hook exit records */
+        let time_field = session.time_data_ref();
+        let event = session.exit_event();
+        let event_machine = machine.clone();
+        let fmt = event.format();
+        let pid = fmt.get_field_ref_unchecked("pid");
+
+        event.add_callback(move |data| {
+            let fmt = data.format();
+            let full_data = data.full_data();
+            let data = data.event_data();
+
+            let pid = fmt.get_u32(pid, data)?;
+
+            event_machine.borrow_mut().add_comm_exit(
+                pid,
+                time_field.get_u64(full_data)?)
         });
 
         /* Hook fork records */

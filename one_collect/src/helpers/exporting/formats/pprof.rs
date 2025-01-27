@@ -400,7 +400,7 @@ mod tests {
 
         let mut exporter = ExportMachine::new(settings);
 
-        exporter.add_comm_exec(1, "test").unwrap();
+        exporter.add_comm_exec(1, "test", 0).unwrap();
 
         let mut frames = Vec::new();
 
