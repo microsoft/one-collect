@@ -66,6 +66,8 @@ pub struct ExportProcess {
     samples: Vec<ExportProcessSample>,
     mappings: ExportMappingLookup,
     anon_maps: bool,
+    create_time_qpc: Option<u64>,
+    exit_time_qpc: Option<u64>,
 }
 
 pub trait ExportProcessOSHooks {
@@ -92,6 +94,8 @@ impl ExportProcess {
             samples: Vec::new(),
             mappings: ExportMappingLookup::default(),
             anon_maps: false,
+            create_time_qpc: None,
+            exit_time_qpc: None,
         }
     }
 
@@ -139,6 +143,22 @@ impl ExportProcess {
         self.comm_id = Some(comm_id);
     }
 
+    pub fn set_create_time_qpc(
+        &mut self,
+        qpc: u64) {
+        self.create_time_qpc = Some(qpc);
+    }
+
+    pub fn set_exit_time_qpc(
+        &mut self,
+        qpc: u64) {
+        self.exit_time_qpc = Some(qpc);
+    }
+
+    pub fn sort_samples_by_time(&mut self) {
+        self.samples.sort_by(|a, b| a.time.cmp(&b.time));
+    }
+
     pub fn pid(&self) -> u32 { self.pid }
 
     pub fn ns_pid(&self) -> Option<u32> { self.ns_pid }
@@ -146,6 +166,10 @@ impl ExportProcess {
     pub fn ns_pid_mut(&mut self) -> &mut Option<u32> { &mut self.ns_pid }
 
     pub fn comm_id(&self) -> Option<usize> { self.comm_id }
+
+    pub fn create_time_qpc(&self) -> Option<u64> { self.create_time_qpc }
+
+    pub fn exit_time_qpc(&self) -> Option<u64> { self.exit_time_qpc }
 
     pub fn samples(&self) -> &Vec<ExportProcessSample> { &self.samples }
 
@@ -433,5 +457,26 @@ mod tests {
         assert!(found.is_some());
         let found = found.unwrap();
         assert_eq!(6, found.key().ino);
+    }
+
+    #[test]
+    fn sort_samples_by_time() {
+        let mut proc = ExportProcess::new(1);
+
+        let first = ExportProcessSample::new(0, 0, 0, 0, 0, 0, 0);
+        let second = ExportProcessSample::new(1, 0, 0, 0, 0, 0, 0);
+        let third = ExportProcessSample::new(2, 0, 0, 0, 0, 0, 0);
+        let forth = ExportProcessSample::new(3, 0, 0, 0, 0, 0, 0);
+
+        proc.add_sample(forth);
+        proc.add_sample(second);
+        proc.add_sample(first);
+        proc.add_sample(third);
+
+        proc.sort_samples_by_time();
+
+        for (i,sample) in proc.samples().iter().enumerate() {
+            assert_eq!(i as u64, sample.time());
+        }
     }
 }
