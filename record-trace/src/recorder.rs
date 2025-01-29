@@ -30,6 +30,13 @@ impl Recorder {
             settings = settings.with_cpu_profiling(DEFAULT_CPU_FREQUENCY);
         }
 
+        // Filter pids.
+        if let Some(target_pids) = self.args.target_pids() {
+            for target_pid in target_pids {
+                settings = settings.with_target_pid(*target_pid);
+            }
+        }
+
         let dotnet = UniversalDotNetHelper::default()
             .with_dynamic_symbols();
 

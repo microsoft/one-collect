@@ -296,6 +296,7 @@ pub struct ExportSettings {
     callstack_helper: Option<CallstackHelper>,
     os: OSExportSettings,
     events: Option<Vec<ExportEventCallback>>,
+    target_pids: Option<Vec<i32>>,
 }
 
 impl Default for ExportSettings {
@@ -319,6 +320,7 @@ impl ExportSettings {
             unwinder,
             os: OSExportSettings::new(),
             events: None,
+            target_pids: None,
         }
     }
 
@@ -373,6 +375,19 @@ impl ExportSettings {
     pub fn with_cswitches(self) -> Self {
         let mut clone = self;
         clone.cswitches = true;
+        clone
+    }
+
+    pub fn with_target_pid(
+        self,
+        pid: i32) -> Self {
+        let mut clone = self;
+
+        match clone.target_pids.as_mut() {
+            Some(pids) => { pids.push(pid); },
+            None => { clone.target_pids = Some(vec![pid]); }
+        }
+
         clone
     }
 }

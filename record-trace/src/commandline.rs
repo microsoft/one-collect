@@ -11,12 +11,16 @@ struct Args {
 
     #[arg(long)]
     on_cpu: bool,
+
+    #[arg(long = "pid")]
+    target_pids: Option<Vec<i32>>,
 }
 
 #[derive(Debug)]
 pub (crate) struct RecordArgs {
     output_path: PathBuf,
     on_cpu: bool,
+    target_pids: Option<Vec<i32>>,
 }
 
 impl RecordArgs {
@@ -46,9 +50,10 @@ impl RecordArgs {
             }
         };
 
-        let args =Self {
+        let args = Self {
             output_path: output_path,
             on_cpu: command_args.on_cpu,
+            target_pids: command_args.target_pids,
         };
 
         // Cross-argument validation.
@@ -66,5 +71,9 @@ impl RecordArgs {
 
     pub (crate) fn on_cpu(&self) -> bool {
         self.on_cpu
+    }
+
+    pub (crate) fn target_pids(&self) -> &Option<Vec<i32>> {
+        &self.target_pids
     }
 }
