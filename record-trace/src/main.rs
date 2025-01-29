@@ -1,4 +1,5 @@
 mod commandline;
+mod export;
 mod recorder;
 
 use commandline::RecordArgs;
