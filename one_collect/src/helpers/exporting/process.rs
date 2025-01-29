@@ -58,6 +58,147 @@ impl ExportProcessSample {
     pub fn callstack_id(&self) -> usize { self.callstack_id }
 }
 
+const EXPORT_PROCESS_FLAG_CREATED: u8 = 1 << 0;
+const EXPORT_PROCESS_FLAG_EXITED: u8 = 1 << 1;
+
+pub struct ExportProcessReplay<'a> {
+    process: &'a ExportProcess,
+    current_time: u64,
+    sample_index: usize,
+    mapping_index: usize,
+    flags: u8,
+}
+
+impl<'a> ExportProcessReplay<'a> {
+    fn new(process: &'a ExportProcess) -> Self {
+        let mut replay = Self {
+            process,
+            current_time: u64::MAX,
+            sample_index: 0,
+            mapping_index: 0,
+            flags: 0,
+        };
+
+        /* Pre-advance to ensure accurate state */
+        replay.advance();
+
+        replay
+    }
+
+    pub fn process(&self) -> &'a ExportProcess { self.process }
+
+    pub fn time(&self) -> u64 { self.current_time }
+
+    pub fn created_event(&self) -> bool {
+        if let Some(time) = self.process.create_time_qpc {
+            if time == self.current_time {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    pub fn exited_event(&self) -> bool {
+        if let Some(time) = self.process.exit_time_qpc {
+            if time == self.current_time {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    pub fn sample_event(&self) -> Option<&'a ExportProcessSample> {
+        if let Some(sample) = self.try_get_sample() {
+            if sample.time() == self.current_time {
+                return Some(sample);
+            }
+        }
+
+        None
+    }
+
+    pub fn mapping_event(&self) -> Option<&'a ExportMapping> {
+        if let Some(mapping) = self.try_get_mapping() {
+            if mapping.time() == self.current_time {
+                return Some(mapping);
+            }
+        }
+
+        None
+    }
+
+    pub(crate) fn try_get_sample(&self) -> Option<&'a ExportProcessSample> {
+        self.process.samples().get(self.sample_index)
+    }
+
+    pub(crate) fn try_get_mapping(&self) -> Option<&'a ExportMapping> {
+        self.process.mappings().get(self.mapping_index)
+    }
+
+    pub(crate) fn done(&self) -> bool { self.current_time == u64::MAX }
+
+    pub(crate) fn advance(&mut self) {
+        /* Advance index by time */
+        if self.sample_event().is_some() {
+            self.sample_index += 1;
+        }
+
+        if self.mapping_event().is_some() {
+            self.mapping_index += 1;
+        }
+
+        /* Reset to find the earliest time */
+        self.current_time = u64::MAX;
+
+        /* Advance current time to earliest event */
+        if let Some(sample) = self.try_get_sample() {
+            if sample.time() < self.current_time {
+                self.current_time = sample.time();
+            }
+        }
+
+        if let Some(mapping) = self.try_get_mapping() {
+            if mapping.time() < self.current_time {
+                self.current_time = mapping.time();
+            }
+        }
+
+        /* Take into account process states */
+        if self.flags & EXPORT_PROCESS_FLAG_CREATED == 0 {
+            if let Some(time) = self.process.create_time_qpc {
+                if time < self.current_time {
+                    self.current_time = time;
+                }
+            } else {
+                /* No time, so just set flags */
+                self.flags |= EXPORT_PROCESS_FLAG_CREATED;
+            }
+        }
+
+        if self.flags & EXPORT_PROCESS_FLAG_EXITED == 0 {
+            if let Some(time) = self.process.exit_time_qpc {
+                if time < self.current_time {
+                    self.current_time = time;
+                }
+            } else {
+                /* No time, so just set flags */
+                self.flags |= EXPORT_PROCESS_FLAG_EXITED;
+            }
+        }
+
+        /* Update flags (Must be done later to allow exit/create inversion) */
+        if self.created_event() {
+            self.flags |= EXPORT_PROCESS_FLAG_CREATED;
+        }
+
+        if self.exited_event() {
+            self.flags |= EXPORT_PROCESS_FLAG_EXITED;
+        }
+    }
+}
+
 pub struct ExportProcess {
     pid: u32,
     comm_id: Option<usize>,
@@ -97,6 +238,18 @@ impl ExportProcess {
             create_time_qpc: None,
             exit_time_qpc: None,
         }
+    }
+
+    /*
+     * Need to keep this crate local, since we need to ensure things
+     * are properly sorted before calling this method. Rust doesn't
+     * seem to have a &mut self that can be later changed to &self
+     * from within a method. We need to find a better pattern if there
+     * is a need to call this directly on a single process instead
+     * of using ExportMachine::replay_by_time().
+     */
+    pub(crate) fn to_replay(&self) -> ExportProcessReplay {
+        ExportProcessReplay::new(&self)
     }
 
     pub fn open_file(
@@ -157,6 +310,10 @@ impl ExportProcess {
 
     pub fn sort_samples_by_time(&mut self) {
         self.samples.sort_by(|a, b| a.time.cmp(&b.time));
+    }
+
+    pub fn sort_mappings_by_time(&mut self) {
+        self.mappings.sort_mappings_by_time();
     }
 
     pub fn pid(&self) -> u32 { self.pid }
@@ -478,5 +635,248 @@ mod tests {
         for (i,sample) in proc.samples().iter().enumerate() {
             assert_eq!(i as u64, sample.time());
         }
+    }
+
+    #[test]
+    fn to_replay() {
+        let mut proc = ExportProcess::new(1);
+
+        proc.set_create_time_qpc(0);
+
+        proc.add_mapping(new_mapping(10, 10, 19, 1));
+        let first = ExportProcessSample::new(11, 0, 0, 0, 0, 0, 0);
+
+        proc.add_mapping(new_mapping(20, 20, 29, 2));
+        let second = ExportProcessSample::new(21, 0, 0, 0, 0, 0, 0);
+
+        let third = ExportProcessSample::new(29, 0, 0, 0, 0, 0, 0);
+        proc.add_mapping(new_mapping(30, 30, 39, 3));
+        let forth = ExportProcessSample::new(35, 0, 0, 0, 0, 0, 0);
+
+        proc.set_exit_time_qpc(40);
+
+        proc.add_sample(forth);
+        proc.add_sample(second);
+        proc.add_sample(first);
+        proc.add_sample(third);
+
+        proc.sort_samples_by_time();
+        proc.sort_mappings_by_time();
+
+        /*
+         * Perfect case: Expected order of create, etc.
+         */
+        let mut replay = proc.to_replay();
+
+        /* Time: 0 */
+        assert!(!replay.done());
+        assert_eq!(0, replay.time());
+        assert!(replay.created_event());
+        assert!(!replay.exited_event());
+        assert!(replay.sample_event().is_none());
+        assert!(replay.mapping_event().is_none());
+        replay.advance();
+
+        /* Time: 10 */
+        assert!(!replay.done());
+        assert_eq!(10, replay.time());
+        assert!(!replay.created_event());
+        assert!(!replay.exited_event());
+        assert!(replay.sample_event().is_none());
+        assert!(replay.mapping_event().is_some());
+        replay.advance();
+
+        /* Time: 11 */
+        assert!(!replay.done());
+        assert_eq!(11, replay.time());
+        assert!(!replay.created_event());
+        assert!(!replay.exited_event());
+        assert!(replay.sample_event().is_some());
+        assert!(replay.mapping_event().is_none());
+        replay.advance();
+
+        /* Time: 20 */
+        assert!(!replay.done());
+        assert_eq!(20, replay.time());
+        assert!(!replay.created_event());
+        assert!(!replay.exited_event());
+        assert!(replay.sample_event().is_none());
+        assert!(replay.mapping_event().is_some());
+        replay.advance();
+
+        /* Time: 21 */
+        assert!(!replay.done());
+        assert_eq!(21, replay.time());
+        assert!(!replay.created_event());
+        assert!(!replay.exited_event());
+        assert!(replay.sample_event().is_some());
+        assert!(replay.mapping_event().is_none());
+        replay.advance();
+
+        /* Time: 29 */
+        assert!(!replay.done());
+        assert_eq!(29, replay.time());
+        assert!(!replay.created_event());
+        assert!(!replay.exited_event());
+        assert!(replay.sample_event().is_some());
+        assert!(replay.mapping_event().is_none());
+        replay.advance();
+
+        /* Time: 30 */
+        assert!(!replay.done());
+        assert_eq!(30, replay.time());
+        assert!(!replay.created_event());
+        assert!(!replay.exited_event());
+        assert!(replay.sample_event().is_none());
+        assert!(replay.mapping_event().is_some());
+        replay.advance();
+
+        /* Time: 35 */
+        assert!(!replay.done());
+        assert_eq!(35, replay.time());
+        assert!(!replay.created_event());
+        assert!(!replay.exited_event());
+        assert!(replay.sample_event().is_some());
+        assert!(replay.mapping_event().is_none());
+        replay.advance();
+
+        /* Time: 40 */
+        assert!(!replay.done());
+        assert_eq!(40, replay.time());
+        assert!(!replay.created_event());
+        assert!(replay.exited_event());
+        assert!(replay.sample_event().is_none());
+        assert!(replay.mapping_event().is_none());
+        replay.advance();
+
+        /* Time: 41 + */
+        assert!(replay.done());
+
+        /*
+         * Unexpected case: Samples, create, exit, mappings
+         */
+        let mut proc = ExportProcess::new(1);
+
+        proc.add_mapping(new_mapping(0, 10, 19, 1));
+        let first = ExportProcessSample::new(1, 0, 0, 0, 0, 0, 0);
+        proc.add_sample(first);
+
+        proc.set_create_time_qpc(10);
+
+        let second = ExportProcessSample::new(11, 0, 0, 0, 0, 0, 0);
+        proc.add_sample(second);
+
+        proc.set_exit_time_qpc(40);
+
+        let third = ExportProcessSample::new(41, 0, 0, 0, 0, 0, 0);
+        proc.add_sample(third);
+
+        proc.sort_samples_by_time();
+        proc.sort_mappings_by_time();
+
+        let mut replay = proc.to_replay();
+
+        /* Time: 0 */
+        assert!(!replay.done());
+        assert_eq!(0, replay.time());
+        assert!(!replay.created_event());
+        assert!(!replay.exited_event());
+        assert!(replay.sample_event().is_none());
+        assert!(replay.mapping_event().is_some());
+        replay.advance();
+
+        /* Time: 1 */
+        assert!(!replay.done());
+        assert_eq!(1, replay.time());
+        assert!(!replay.created_event());
+        assert!(!replay.exited_event());
+        assert!(replay.sample_event().is_some());
+        assert!(replay.mapping_event().is_none());
+        replay.advance();
+
+        /* Time: 10 */
+        assert!(!replay.done());
+        assert_eq!(10, replay.time());
+        assert!(replay.created_event());
+        assert!(!replay.exited_event());
+        assert!(replay.sample_event().is_none());
+        assert!(replay.mapping_event().is_none());
+        replay.advance();
+
+        /* Time: 11 */
+        assert!(!replay.done());
+        assert_eq!(11, replay.time());
+        assert!(!replay.created_event());
+        assert!(!replay.exited_event());
+        assert!(replay.sample_event().is_some());
+        assert!(replay.mapping_event().is_none());
+        replay.advance();
+
+        /* Time: 40 */
+        assert!(!replay.done());
+        assert_eq!(40, replay.time());
+        assert!(!replay.created_event());
+        assert!(replay.exited_event());
+        assert!(replay.sample_event().is_none());
+        assert!(replay.mapping_event().is_none());
+        replay.advance();
+
+        /* Time: 41 */
+        assert!(!replay.done());
+        assert_eq!(41, replay.time());
+        assert!(!replay.created_event());
+        assert!(!replay.exited_event());
+        assert!(replay.sample_event().is_some());
+        assert!(replay.mapping_event().is_none());
+        replay.advance();
+
+        /* Time: 42 + */
+        assert!(replay.done());
+
+        /*
+         * Weird case: exit, create, sample
+         */
+        let mut proc = ExportProcess::new(1);
+
+        proc.set_exit_time_qpc(0);
+        proc.set_create_time_qpc(10);
+
+        let first = ExportProcessSample::new(11, 0, 0, 0, 0, 0, 0);
+        proc.add_sample(first);
+
+        proc.sort_samples_by_time();
+        proc.sort_mappings_by_time();
+
+        let mut replay = proc.to_replay();
+
+        /* Time: 0 */
+        assert!(!replay.done());
+        assert_eq!(0, replay.time());
+        assert!(!replay.created_event());
+        assert!(replay.exited_event());
+        assert!(replay.sample_event().is_none());
+        assert!(replay.mapping_event().is_none());
+        replay.advance();
+
+        /* Time: 10 */
+        assert!(!replay.done());
+        assert_eq!(10, replay.time());
+        assert!(replay.created_event());
+        assert!(!replay.exited_event());
+        assert!(replay.sample_event().is_none());
+        assert!(replay.mapping_event().is_none());
+        replay.advance();
+
+        /* Time: 11 */
+        assert!(!replay.done());
+        assert_eq!(11, replay.time());
+        assert!(!replay.created_event());
+        assert!(!replay.exited_event());
+        assert!(replay.sample_event().is_some());
+        assert!(replay.mapping_event().is_none());
+        replay.advance();
+
+        /* Time: 12 + */
+        assert!(replay.done());
     }
 }

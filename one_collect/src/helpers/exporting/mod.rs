@@ -53,6 +53,7 @@ pub mod process;
 pub use process::{
     ExportProcess,
     ExportProcessSample,
+    ExportProcessReplay,
 };
 
 pub mod mappings;
@@ -457,15 +458,58 @@ impl ExportMachine {
 
     pub fn duration(&self) -> Option<Duration> { self.duration }
 
-    pub fn sort_samples_by_time(
+    pub fn replay_by_time(
         &mut self,
-        predicate: impl Fn(&ExportProcess) -> bool) {
+        predicate: impl Fn(&ExportProcess) -> bool,
+        mut callback: impl FnMut(&ExportProcessReplay)) {
+        let mut replay_procs = Vec::new();
+
         for process in self.processes_mut() {
             if !predicate(process) {
                 continue;
             }
 
+            /* Sort */
             process.sort_samples_by_time();
+            process.sort_mappings_by_time();
+
+            /* Allocate details for replaying */
+            replay_procs.push(process.to_replay());
+        }
+
+        loop {
+            let mut earliest = u64::MAX;
+
+            /* Find earliest */
+            for replay in &replay_procs {
+                if replay.done() {
+                    continue;
+                }
+
+                let time = replay.time();
+
+                if time < earliest {
+                    earliest = time;
+                }
+            }
+
+            /* No more */
+            if earliest == u64::MAX {
+                break;
+            }
+
+            /* Emit and advance */
+            for replay in &mut replay_procs {
+                if replay.done() {
+                    continue;
+                }
+
+                if replay.time() == earliest {
+                    (callback)(replay);
+
+                    replay.advance();
+                }
+            }
         }
     }
 
@@ -788,14 +832,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sort_samples_by_time() {
+    fn replay_by_time() {
         let mut machine = ExportMachine::new(ExportSettings::default());
         let proc = machine.process_mut(1);
 
-        let first = ExportProcessSample::new(0, 0, 0, 0, 0, 0, 0);
-        let second = ExportProcessSample::new(1, 0, 0, 0, 0, 0, 0);
-        let third = ExportProcessSample::new(2, 0, 0, 0, 0, 0, 0);
-        let forth = ExportProcessSample::new(3, 0, 0, 0, 0, 0, 0);
+        let first = ExportProcessSample::new(1, 0, 0, 0, 0, 0, 0);
+        let second = ExportProcessSample::new(3, 0, 0, 0, 0, 0, 0);
+        let third = ExportProcessSample::new(5, 0, 0, 0, 0, 0, 0);
+        let forth = ExportProcessSample::new(7, 0, 0, 0, 0, 0, 0);
 
         proc.add_sample(forth);
         proc.add_sample(second);
@@ -804,29 +848,30 @@ mod tests {
 
         let proc = machine.process_mut(2);
 
-        let first = ExportProcessSample::new(0, 0, 0, 0, 0, 0, 0);
-        let second = ExportProcessSample::new(1, 0, 0, 0, 0, 0, 0);
-        let third = ExportProcessSample::new(2, 0, 0, 0, 0, 0, 0);
-        let forth = ExportProcessSample::new(3, 0, 0, 0, 0, 0, 0);
+        let first = ExportProcessSample::new(2, 0, 0, 0, 0, 0, 0);
+        let second = ExportProcessSample::new(4, 0, 0, 0, 0, 0, 0);
+        let third = ExportProcessSample::new(6, 0, 0, 0, 0, 0, 0);
+        let forth = ExportProcessSample::new(8, 0, 0, 0, 0, 0, 0);
 
         proc.add_sample(forth);
         proc.add_sample(second);
         proc.add_sample(first);
         proc.add_sample(third);
 
-        /* Only sort pid 1 */
-        machine.sort_samples_by_time(|proc| proc.pid() == 1);
+        let mut time = 0;
 
-        /* Ensure pid 1 is sorted */
-        let proc = machine.find_process(1).expect("Should find process 1.");
+        machine.replay_by_time(
+            |_process| true,
+            |event| {
+                if event.time() % 2 == 0 {
+                    assert_eq!(2, event.process().pid());
+                } else {
+                    assert_eq!(1, event.process().pid());
+                }
 
-        for (i,sample) in proc.samples().iter().enumerate() {
-            assert_eq!(i as u64, sample.time());
-        }
+                assert_eq!(event.time() - 1, time);
 
-        /* Ensure pid 2 is NOT sorted */
-        let proc = machine.find_process(2).expect("Should find process 2.");
-
-        assert_eq!(3, proc.samples().first().expect("Should have a sample").time());
+                time = event.time();
+            });
     }
 }
