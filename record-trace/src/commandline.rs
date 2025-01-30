@@ -6,13 +6,13 @@ use std::process;
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Args {
-    #[arg(long)]
+    #[arg(long, help = "Output directory")]
     out: Option<String>,
 
-    #[arg(long)]
+    #[arg(long, help = "Enable capture of CPU samples")]
     on_cpu: bool,
 
-    #[arg(long = "pid")]
+    #[arg(long = "pid", help = "Capture data for the specified process ID.  Multiple pids can be specified, one per usage of --pid")]
     target_pids: Option<Vec<i32>>,
 }
 
