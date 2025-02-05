@@ -1330,6 +1330,12 @@ impl ExportMachineOSHooks for ExportMachine {
 
         (1000000000 / t.tv_nsec) as u64
     }
+
+    fn os_cpu_count(&self) -> u32 {
+        unsafe {
+            libc::sysconf(libc::_SC_NPROCESSORS_ONLN) as u32
+        }
+    }
 }
 
 impl ExportBuilderHelp for RingBufSessionBuilder {

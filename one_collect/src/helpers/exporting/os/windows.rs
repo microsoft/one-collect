@@ -686,6 +686,9 @@ extern "system" {
 
     fn QueryPerformanceFrequency(
         freq: *mut u64) -> u32;
+
+    fn GetActiveProcessorCount(
+        group: u16) -> u32;
 }
 
 #[cfg(target_os = "windows")]
@@ -790,6 +793,12 @@ impl ExportMachineOSHooks for ExportMachine {
         }
 
         t
+    }
+
+    fn os_cpu_count(&self) -> u32 {
+        unsafe {
+            GetActiveProcessorCount(0xFFFF)
+        }
     }
 }
 

@@ -393,6 +393,7 @@ impl ExportSettings {
 
         clone
     }
+    pub fn cpu_freq(&self) -> u64 { self.cpu_freq }
 }
 
 pub struct ExportMachine {
@@ -440,6 +441,8 @@ pub trait ExportMachineOSHooks {
     fn os_qpc_time(&self) -> u64;
 
     fn os_qpc_freq(&self) -> u64;
+
+    fn os_cpu_count(&self) -> u32;
 }
 
 pub type CommMap = HashMap<Option<usize>, Vec<u32>>;
@@ -473,12 +476,19 @@ impl ExportMachine {
 
     pub fn duration(&self) -> Option<Duration> { self.duration }
 
+    pub fn settings(&self) -> &ExportSettings { &self.settings }
+
+    pub fn qpc_freq(&self) -> u64 { self.os_qpc_freq() }
+
+    pub fn cpu_count(&self) -> u32 { self.os_cpu_count() }
+
     pub fn replay_by_time(
         &mut self,
         predicate: impl Fn(&ExportProcess) -> bool,
-        mut callback: impl FnMut(&ExportProcessReplay)) {
+        mut callback: impl FnMut(&ExportMachine, &ExportProcessReplay) -> anyhow::Result<()>) -> anyhow::Result<()> {
         let mut replay_procs = Vec::new();
 
+        /* Need to do sorting as mut */
         for process in self.processes_mut() {
             if !predicate(process) {
                 continue;
@@ -487,6 +497,13 @@ impl ExportMachine {
             /* Sort */
             process.sort_samples_by_time();
             process.sort_mappings_by_time();
+        }
+
+        /* Replays are immutable refs */
+        for process in self.processes() {
+            if !predicate(process) {
+                continue;
+            }
 
             /* Allocate details for replaying */
             replay_procs.push(process.to_replay());
@@ -520,12 +537,14 @@ impl ExportMachine {
                 }
 
                 if replay.time() == earliest {
-                    (callback)(replay);
+                    (callback)(&self, replay)?;
 
                     replay.advance();
                 }
             }
         }
+
+        Ok(())
     }
 
     pub fn mark_start(&mut self) {
@@ -877,7 +896,7 @@ mod tests {
 
         machine.replay_by_time(
             |_process| true,
-            |event| {
+            |_machine, event| {
                 if event.time() % 2 == 0 {
                     assert_eq!(2, event.process().pid());
                 } else {
@@ -887,6 +906,8 @@ mod tests {
                 assert_eq!(event.time() - 1, time);
 
                 time = event.time();
-            });
+
+                Ok(())
+            }).expect("Should work");
     }
 }
