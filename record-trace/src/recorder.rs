@@ -30,6 +30,11 @@ impl Recorder {
             settings = settings.with_cpu_profiling(DEFAULT_CPU_FREQUENCY);
         }
 
+        // Context switches.
+        if self.args.off_cpu() {
+            settings = settings.with_cswitches();
+        }
+
         // Filter pids.
         if let Some(target_pids) = self.args.target_pids() {
             for target_pid in target_pids {
@@ -53,6 +58,7 @@ impl Recorder {
         
         // Start recording.
         let print_banner = Arc::new(AtomicBool::new(true));
+
         let exporter = match universal.parse_until("record-trace", move || {
             
             // Print the banner telling the user that recording has started.

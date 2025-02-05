@@ -9,8 +9,11 @@ struct Args {
     #[arg(long, help = "Output directory")]
     out: Option<String>,
 
-    #[arg(long, help = "Enable capture of CPU samples")]
+    #[arg(long, help = "Capture CPU samples")]
     on_cpu: bool,
+
+    #[arg(long, help = "Capture context switches")]
+    off_cpu: bool,
 
     #[arg(long = "pid", help = "Capture data for the specified process ID.  Multiple pids can be specified, one per usage of --pid")]
     target_pids: Option<Vec<i32>>,
@@ -20,6 +23,7 @@ struct Args {
 pub (crate) struct RecordArgs {
     output_path: PathBuf,
     on_cpu: bool,
+    off_cpu: bool,
     target_pids: Option<Vec<i32>>,
 }
 
@@ -53,6 +57,7 @@ impl RecordArgs {
         let args = Self {
             output_path: output_path,
             on_cpu: command_args.on_cpu,
+            off_cpu: command_args.off_cpu,
             target_pids: command_args.target_pids,
         };
 
@@ -71,6 +76,10 @@ impl RecordArgs {
 
     pub (crate) fn on_cpu(&self) -> bool {
         self.on_cpu
+    }
+
+    pub (crate) fn off_cpu(&self) -> bool {
+        self.off_cpu
     }
 
     pub (crate) fn target_pids(&self) -> &Option<Vec<i32>> {
