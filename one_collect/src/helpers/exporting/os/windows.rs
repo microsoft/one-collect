@@ -168,7 +168,15 @@ impl CpuProfileKey {
     }
 }
 
+#[derive(Default)]
+struct WinCSwitch {
+    cpu: u32,
+    start_time: u64,
+    end_time: u64,
+}
+
 pub(crate) struct OSExportMachine {
+    cswitches: HashMap<u32, WinCSwitch>,
     pid_mapping: HashMap<u32, u32>,
     cpu_samples: Option<HashMap<CpuProfileKey, CpuProfile>>,
     pid_index: u32,
@@ -177,6 +185,7 @@ pub(crate) struct OSExportMachine {
 impl OSExportMachine {
     pub fn new() -> Self {
         Self {
+            cswitches: HashMap::new(),
             pid_mapping: HashMap::new(),
             cpu_samples: Some(HashMap::new()),
             pid_index: 0,
@@ -295,6 +304,7 @@ impl OSExportMachine {
     }
 
     fn hook_comm_event(
+        ancillary: ReadOnly<AncillaryData>,
         event: &mut Event,
         event_machine: Writable<ExportMachine>) {
         let fmt = event.format();
@@ -325,7 +335,8 @@ impl OSExportMachine {
              */
             event_machine.add_comm_exec(
                 global_pid,
-                fmt.get_str(comm, dynamic)?)?;
+                fmt.get_str(comm, dynamic)?,
+                ancillary.borrow().time())?;
 
             /* Store the local PID in the ns_pid as on Linux */
             *event_machine.process_mut(global_pid).ns_pid_mut() = Some(local_pid);
@@ -510,7 +521,8 @@ impl OSExportMachine {
 
                         let _ = event_machine.add_comm_exec(
                             global_pid,
-                            "Unknown");
+                            "Unknown",
+                            0);
 
                         for (key, value) in samples.drain() {
                             /* Update single frame array */
@@ -531,7 +543,92 @@ impl OSExportMachine {
         }
 
         if cswitches {
-            /* TODO */
+            /* Get sample kind for cswitch */
+            let kind = machine.borrow_mut().sample_kind("cswitch");
+
+            let ancillary = session.ancillary_data();
+
+            let cswitch_event = session.cswitch_event(Some(PROPERTY_STACK_TRACE));
+            let fmt = cswitch_event.format();
+            let new_tid = fmt.get_field_ref_unchecked("NewThreadId");
+            let old_tid = fmt.get_field_ref_unchecked("OldThreadId");
+
+            /* ETW callstacks come via its own event, link them to cswitches */
+            let event_machine = machine.clone();
+
+            callstack_reader.add_async_frames_callback(move |callstack| {
+                let mut machine = event_machine.borrow_mut();
+
+                let tid = callstack.tid();
+
+                let info = match machine.os.cswitches.entry(tid) {
+                    Occupied(entry) => {
+                        let info = entry.get();
+
+                        /* Time must match to ensure correct stack */
+                        if info.end_time == callstack.time() {
+                            Some(entry.remove())
+                        } else {
+                            None
+                        }
+                    },
+                    _ => { None },
+                };
+
+                if let Some(info) = info {
+                    let local_pid = callstack.pid();
+                    let global_pid = machine.os.get_or_alloc_global_pid(local_pid);
+
+                    if info.end_time > info.start_time {
+                        let duration = info.end_time - info.start_time;
+
+                        let sample = machine.make_sample(
+                            info.start_time,
+                            duration,
+                            tid,
+                            info.cpu as u16,
+                            kind,
+                            callstack.frames());
+
+                        machine.process_mut(global_pid).add_sample(sample);
+                    }
+                }
+            });
+
+            /* Handle actual cswitch event */
+            let event_machine = machine.clone();
+            let event_ancillary = ancillary.clone();
+
+            cswitch_event.add_callback(move |data| {
+                let fmt = data.format();
+                let data = data.event_data();
+
+                let new_tid = fmt.get_u32(new_tid, data)?;
+                let old_tid = fmt.get_u32(old_tid, data)?;
+
+                let mut machine = event_machine.borrow_mut();
+                let ancillary = event_ancillary.borrow();
+
+                /* Ignore swapping to idle thread */
+                if new_tid != 0 {
+                    /* Mark when thread got running again only if we have data for it */
+                    if let Occupied(mut entry) = machine.os.cswitches.entry(new_tid) {
+                        entry.get_mut().end_time = ancillary.time();
+                    }
+                }
+
+                /* Ignore swapping from idle thread */
+                if old_tid != 0 {
+                    /* Mark when thread got interrupted and on what CPU */
+                    let info = machine.os.cswitches.entry(old_tid).or_default();
+
+                    info.cpu = ancillary.cpu();
+                    info.start_time = ancillary.time();
+                    info.end_time = 0;
+                }
+
+                Ok(())
+            });
         }
 
         /* Hook mmap records */
@@ -545,17 +642,50 @@ impl OSExportMachine {
             session.mmap_load_capture_start_event(),
             machine.clone());
 
-        /* Hook comm records */
+        /* Hook comm exec records */
         Self::hook_comm_event(
+            session.ancillary_data(),
             session.comm_start_event(),
             machine.clone());
 
         Self::hook_comm_event(
+            session.ancillary_data(),
             session.comm_start_capture_event(),
             machine.clone());
 
+        /* Hook comm exit record */
+        let event_ancillary = session.ancillary_data();
+        let event_machine = machine.clone();
+        let event = session.comm_end_event();
+        let fmt = event.format();
+        let pid = fmt.get_field_ref_unchecked("ProcessId");
+
+        event.add_callback(move |data| {
+            let fmt = data.format();
+            let data = data.event_data();
+
+            let mut machine = event_machine.borrow_mut();
+            let ancillary = event_ancillary.borrow();
+
+            let local_pid = fmt.get_u32(pid, data)?;
+            let global_pid = machine.os.get_or_alloc_global_pid(local_pid);
+
+            machine.add_comm_exit(
+                global_pid,
+                ancillary.time())
+        });
+
         Ok(machine)
     }
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn QueryPerformanceCounter(
+        time: *mut u64) -> u32;
+
+    fn QueryPerformanceFrequency(
+        freq: *mut u64) -> u32;
 }
 
 #[cfg(target_os = "windows")]
@@ -641,6 +771,26 @@ impl ExportMachineOSHooks for ExportMachine {
         _comm: &str) -> anyhow::Result<()> {
         Ok(())
     }
+
+    fn os_qpc_time(&self) -> u64 {
+        let mut t = 0u64;
+
+        unsafe {
+            QueryPerformanceCounter(&mut t);
+        }
+
+        t
+    }
+
+    fn os_qpc_freq(&self) -> u64 {
+        let mut t = 0u64;
+
+        unsafe {
+            QueryPerformanceFrequency(&mut t);
+        }
+
+        t
+    }
 }
 
 impl ExportSessionHelp for EtwSession {
@@ -678,7 +828,9 @@ impl UniversalExporterOSHooks for UniversalExporter {
 
         session.capture_environment();
 
+        exporter.borrow_mut().mark_start();
         session.parse_until(name, until)?;
+        exporter.borrow_mut().mark_end();
 
         self.run_parsed_hooks(&exporter)?;
 

@@ -264,6 +264,10 @@ impl ExportMappingLookup {
         &mut self.mappings
     }
 
+    pub fn sort_mappings_by_time(&mut self) {
+        self.mappings_mut().sort_by(|a, b| a.time.cmp(&b.time));
+    }
+
     pub fn mappings(&self) -> &Vec<ExportMapping> { &self.mappings }
 
     fn build_lookup(&self) {

@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::collections::hash_map::{Values, ValuesMut};
+use std::time::Duration;
 use std::path::Path;
 
 use crate::Writable;
@@ -11,6 +12,7 @@ use crate::helpers::callstack::CallstackHelper;
 use modulemetadata::ModuleMetadata;
 use pe_file::PEModuleMetadata;
 use ruwind::UnwindType;
+use chrono::{DateTime, Utc};
 
 mod lookup;
 
@@ -51,6 +53,7 @@ pub mod process;
 pub use process::{
     ExportProcess,
     ExportProcessSample,
+    ExportProcessReplay,
 };
 
 pub mod mappings;
@@ -399,10 +402,12 @@ pub struct ExportMachine {
     pub(crate) os: OSExportMachine,
     procs: HashMap<u32, ExportProcess>,
     module_metadata: ModuleMetadataLookup,
-    cswitches: HashMap<u32, ExportCSwitch>,
     kinds: Vec<String>,
     map_index: usize,
     drop_closures: Vec<Box<dyn FnMut()>>,
+    start_date: Option<DateTime<Utc>>,
+    start_qpc: Option<u64>,
+    duration: Option<Duration>,
 }
 
 pub trait ExportMachineSessionHooks {
@@ -431,6 +436,10 @@ pub trait ExportMachineOSHooks {
         &mut self,
         pid: u32,
         comm: &str) -> anyhow::Result<()>;
+
+    fn os_qpc_time(&self) -> u64;
+
+    fn os_qpc_freq(&self) -> u64;
 }
 
 pub type CommMap = HashMap<Option<usize>, Vec<u32>>;
@@ -449,10 +458,90 @@ impl ExportMachine {
             os: OSExportMachine::new(),
             procs: HashMap::new(),
             module_metadata: ModuleMetadataLookup::new(),
-            cswitches: HashMap::new(),
             kinds: Vec::new(),
             map_index: 0,
             drop_closures: Vec::new(),
+            start_date: None,
+            start_qpc: None,
+            duration: None,
+        }
+    }
+
+    pub fn start_date(&self) -> Option<DateTime<Utc>> { self.start_date }
+
+    pub fn start_qpc(&self) -> Option<u64> { self.start_qpc }
+
+    pub fn duration(&self) -> Option<Duration> { self.duration }
+
+    pub fn replay_by_time(
+        &mut self,
+        predicate: impl Fn(&ExportProcess) -> bool,
+        mut callback: impl FnMut(&ExportProcessReplay)) {
+        let mut replay_procs = Vec::new();
+
+        for process in self.processes_mut() {
+            if !predicate(process) {
+                continue;
+            }
+
+            /* Sort */
+            process.sort_samples_by_time();
+            process.sort_mappings_by_time();
+
+            /* Allocate details for replaying */
+            replay_procs.push(process.to_replay());
+        }
+
+        loop {
+            let mut earliest = u64::MAX;
+
+            /* Find earliest */
+            for replay in &replay_procs {
+                if replay.done() {
+                    continue;
+                }
+
+                let time = replay.time();
+
+                if time < earliest {
+                    earliest = time;
+                }
+            }
+
+            /* No more */
+            if earliest == u64::MAX {
+                break;
+            }
+
+            /* Emit and advance */
+            for replay in &mut replay_procs {
+                if replay.done() {
+                    continue;
+                }
+
+                if replay.time() == earliest {
+                    (callback)(replay);
+
+                    replay.advance();
+                }
+            }
+        }
+    }
+
+    pub fn mark_start(&mut self) {
+        self.start_date = Some(Utc::now());
+        self.start_qpc = Some(self.os_qpc_time());
+    }
+
+    pub fn mark_end(&mut self) {
+        if let Some(start_qpc) = self.start_qpc {
+            let end_qpc = self.os_qpc_time();
+            let qpc_freq = self.os_qpc_freq();
+
+            let qpc_duration = end_qpc - start_qpc;
+            let micros = (qpc_duration * 1000000u64) / qpc_freq;
+
+            self.duration = Some(Duration::from_micros(micros));
         }
     }
 
@@ -612,16 +701,27 @@ impl ExportMachine {
     pub fn add_comm_exec(
         &mut self,
         pid: u32,
-        comm: &str) -> anyhow::Result<()> {
+        comm: &str,
+        time_qpc: u64) -> anyhow::Result<()> {
         let comm_id = self.intern(comm);
 
         let proc = self.process_mut(pid);
 
         proc.set_comm_id(comm_id);
+        proc.set_create_time_qpc(time_qpc);
 
         self.os_add_comm_exec(
             pid,
             comm)
+    }
+
+    pub fn add_comm_exit(
+        &mut self,
+        pid: u32,
+        time_qpc: u64) -> anyhow::Result<()> {
+        self.process_mut(pid).set_exit_time_qpc(time_qpc);
+
+        Ok(())
     }
 
     pub fn make_sample(
@@ -740,4 +840,53 @@ pub trait ExportSessionHelp {
     fn build_exporter(
         &mut self,
         settings: ExportSettings) -> anyhow::Result<Writable<ExportMachine>>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replay_by_time() {
+        let mut machine = ExportMachine::new(ExportSettings::default());
+        let proc = machine.process_mut(1);
+
+        let first = ExportProcessSample::new(1, 0, 0, 0, 0, 0, 0);
+        let second = ExportProcessSample::new(3, 0, 0, 0, 0, 0, 0);
+        let third = ExportProcessSample::new(5, 0, 0, 0, 0, 0, 0);
+        let forth = ExportProcessSample::new(7, 0, 0, 0, 0, 0, 0);
+
+        proc.add_sample(forth);
+        proc.add_sample(second);
+        proc.add_sample(first);
+        proc.add_sample(third);
+
+        let proc = machine.process_mut(2);
+
+        let first = ExportProcessSample::new(2, 0, 0, 0, 0, 0, 0);
+        let second = ExportProcessSample::new(4, 0, 0, 0, 0, 0, 0);
+        let third = ExportProcessSample::new(6, 0, 0, 0, 0, 0, 0);
+        let forth = ExportProcessSample::new(8, 0, 0, 0, 0, 0, 0);
+
+        proc.add_sample(forth);
+        proc.add_sample(second);
+        proc.add_sample(first);
+        proc.add_sample(third);
+
+        let mut time = 0;
+
+        machine.replay_by_time(
+            |_process| true,
+            |event| {
+                if event.time() % 2 == 0 {
+                    assert_eq!(2, event.process().pid());
+                } else {
+                    assert_eq!(1, event.process().pid());
+                }
+
+                assert_eq!(event.time() - 1, time);
+
+                time = event.time();
+            });
+    }
 }
