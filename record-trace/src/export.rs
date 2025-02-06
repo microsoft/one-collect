@@ -35,7 +35,7 @@ impl Exporter for PerfViewExporter {
                         let path = format!("{}/t.Unknown.{}.CPU.PerfView.xml", args.output_path().display(), pid);
 
                         Self::export_pids(
-                            &machine,
+                            machine,
                             &mut graph,
                             &single_pid,
                             cpu,
@@ -45,7 +45,7 @@ impl Exporter for PerfViewExporter {
                         let path = format!("{}/t.Unknown.{}.CSwitch.PerfView.xml", args.output_path().display(), pid);
 
                         Self::export_pids(
-                            &machine,
+                            machine,
                             &mut graph,
                             &single_pid,
                             cswitch,
@@ -70,7 +70,7 @@ impl Exporter for PerfViewExporter {
                     let path = format!("{}/t.{}.CPU.PerfView.xml", args.output_path().display(), comm);
 
                     Self::export_pids(
-                        &machine,
+                        machine,
                         &mut graph,
                         &pids,
                         cpu,
@@ -80,7 +80,7 @@ impl Exporter for PerfViewExporter {
                     let path = format!("{}/t.{}.CSwitch.PerfView.xml", args.output_path().display(), comm);
 
                     Self::export_pids(
-                        &machine,
+                        machine,
                         &mut graph,
                         &pids,
                         cswitch,
@@ -107,7 +107,7 @@ impl PerfViewExporter {
             let process = exporter.find_process(*pid).expect("PID should be found.");
 
             graph.add_samples(
-                &exporter,
+                exporter,
                 process,
                 kind);
         }

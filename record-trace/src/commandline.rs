@@ -55,7 +55,7 @@ impl RecordArgs {
         };
 
         let args = Self {
-            output_path: output_path,
+            output_path,
             on_cpu: command_args.on_cpu,
             off_cpu: command_args.off_cpu,
             target_pids: command_args.target_pids,

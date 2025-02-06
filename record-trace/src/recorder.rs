@@ -6,7 +6,6 @@ use one_collect::helpers::exporting::universal::UniversalExporter;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use ctrlc;
 use std::process;
 
 const DEFAULT_CPU_FREQUENCY: u64 = 1000;
@@ -59,7 +58,7 @@ impl Recorder {
         // Start recording.
         let print_banner = Arc::new(AtomicBool::new(true));
 
-        let exporter = match universal.parse_until("record-trace", move || {
+        let parse_result = universal.parse_until("record-trace", move || {
             
             // Print the banner telling the user that recording has started.
             if print_banner.load(Ordering::SeqCst) {
@@ -69,7 +68,9 @@ impl Recorder {
 
             // When the user hits CTRL+C this will flip to true.
             !continue_recording.load(Ordering::SeqCst)
-        }) {
+        });
+
+        let exporter = match parse_result {
             Ok(exporter) => exporter,
             Err(e) => {
                 eprintln!("Error: {}", e);
