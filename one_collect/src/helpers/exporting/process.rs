@@ -9,9 +9,16 @@ use super::os::OSExportProcess;
 use super::mappings::ExportMappingLookup;
 
 #[derive(Clone, Copy)]
+pub enum MetricValue {
+    Count(u64),
+    Time(u64),
+    Bytes(u64),
+}
+
+#[derive(Clone, Copy)]
 pub struct ExportProcessSample {
     time: u64,
-    value: u64,
+    value: MetricValue,
     cpu: u16,
     kind: u16,
     tid: u32,
@@ -22,7 +29,7 @@ pub struct ExportProcessSample {
 impl ExportProcessSample {
     pub fn new(
         time: u64,
-        value: u64,
+        value: MetricValue,
         cpu: u16,
         kind: u16,
         tid: u32,
@@ -41,11 +48,11 @@ impl ExportProcessSample {
 
     pub fn time_mut(&mut self) -> &mut u64 { &mut self.time }
 
-    pub fn value_mut(&mut self) -> &mut u64 { &mut self.value }
+    pub fn value_mut(&mut self) -> &mut MetricValue { &mut self.value }
 
     pub fn time(&self) -> u64 { self.time }
 
-    pub fn value(&self) -> u64 { self.value }
+    pub fn value(&self) -> MetricValue { self.value }
 
     pub fn cpu(&self) -> u16 { self.cpu }
 
@@ -620,10 +627,10 @@ mod tests {
     fn sort_samples_by_time() {
         let mut proc = ExportProcess::new(1);
 
-        let first = ExportProcessSample::new(0, 0, 0, 0, 0, 0, 0);
-        let second = ExportProcessSample::new(1, 0, 0, 0, 0, 0, 0);
-        let third = ExportProcessSample::new(2, 0, 0, 0, 0, 0, 0);
-        let forth = ExportProcessSample::new(3, 0, 0, 0, 0, 0, 0);
+        let first = ExportProcessSample::new(0, MetricValue::Count(0), 0, 0, 0, 0, 0);
+        let second = ExportProcessSample::new(1, MetricValue::Count(0), 0, 0, 0, 0, 0);
+        let third = ExportProcessSample::new(2, MetricValue::Count(0), 0, 0, 0, 0, 0);
+        let forth = ExportProcessSample::new(3, MetricValue::Count(0), 0, 0, 0, 0, 0);
 
         proc.add_sample(forth);
         proc.add_sample(second);
@@ -644,14 +651,14 @@ mod tests {
         proc.set_create_time_qpc(0);
 
         proc.add_mapping(new_mapping(10, 10, 19, 1));
-        let first = ExportProcessSample::new(11, 0, 0, 0, 0, 0, 0);
+        let first = ExportProcessSample::new(11, MetricValue::Count(0), 0, 0, 0, 0, 0);
 
         proc.add_mapping(new_mapping(20, 20, 29, 2));
-        let second = ExportProcessSample::new(21, 0, 0, 0, 0, 0, 0);
+        let second = ExportProcessSample::new(21, MetricValue::Count(0), 0, 0, 0, 0, 0);
 
-        let third = ExportProcessSample::new(29, 0, 0, 0, 0, 0, 0);
+        let third = ExportProcessSample::new(29, MetricValue::Count(0), 0, 0, 0, 0, 0);
         proc.add_mapping(new_mapping(30, 30, 39, 3));
-        let forth = ExportProcessSample::new(35, 0, 0, 0, 0, 0, 0);
+        let forth = ExportProcessSample::new(35, MetricValue::Count(0), 0, 0, 0, 0, 0);
 
         proc.set_exit_time_qpc(40);
 
@@ -758,17 +765,17 @@ mod tests {
         let mut proc = ExportProcess::new(1);
 
         proc.add_mapping(new_mapping(0, 10, 19, 1));
-        let first = ExportProcessSample::new(1, 0, 0, 0, 0, 0, 0);
+        let first = ExportProcessSample::new(1, MetricValue::Count(0), 0, 0, 0, 0, 0);
         proc.add_sample(first);
 
         proc.set_create_time_qpc(10);
 
-        let second = ExportProcessSample::new(11, 0, 0, 0, 0, 0, 0);
+        let second = ExportProcessSample::new(11, MetricValue::Count(0), 0, 0, 0, 0, 0);
         proc.add_sample(second);
 
         proc.set_exit_time_qpc(40);
 
-        let third = ExportProcessSample::new(41, 0, 0, 0, 0, 0, 0);
+        let third = ExportProcessSample::new(41, MetricValue::Count(0), 0, 0, 0, 0, 0);
         proc.add_sample(third);
 
         proc.sort_samples_by_time();
@@ -841,7 +848,7 @@ mod tests {
         proc.set_exit_time_qpc(0);
         proc.set_create_time_qpc(10);
 
-        let first = ExportProcessSample::new(11, 0, 0, 0, 0, 0, 0);
+        let first = ExportProcessSample::new(11, MetricValue::Count(0), 0, 0, 0, 0, 0);
         proc.add_sample(first);
 
         proc.sort_samples_by_time();
