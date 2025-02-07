@@ -468,6 +468,15 @@ impl ExportMachine {
 
     pub fn cpu_count(&self) -> u32 { self.os_cpu_count() }
 
+    pub fn get_mapping_metadata(
+        &self,
+        mapping: &ExportMapping) -> Option<&ModuleMetadata> {
+        match mapping.node() {
+            Some(node) => { self.module_metadata.get(node) },
+            None => { None }
+        }
+    }
+
     pub fn replay_by_time(
         &mut self,
         predicate: impl Fn(&ExportProcess) -> bool,
