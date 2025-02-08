@@ -484,7 +484,7 @@ impl OSExportMachine {
                             /* Add sample to the process */
                             let _ = event_machine.add_sample(
                                 key.time,
-                                1,
+                                MetricValue::Count(1),
                                 global_pid,
                                 key.tid,
                                 value.cpu as u16,
@@ -531,7 +531,7 @@ impl OSExportMachine {
                             /* Add sample to the process */
                             let _ = event_machine.add_sample(
                                 key.time,
-                                1,
+                                MetricValue::Count(1),
                                 global_pid,
                                 key.tid,
                                 value.cpu as u16,
@@ -584,7 +584,7 @@ impl OSExportMachine {
 
                         let sample = machine.make_sample(
                             info.start_time,
-                            duration,
+                            MetricValue::Time(duration),
                             tid,
                             info.cpu as u16,
                             kind,
