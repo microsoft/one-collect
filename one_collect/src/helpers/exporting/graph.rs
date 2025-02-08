@@ -291,9 +291,10 @@ impl ExportGraph {
         value_converter: Option<&dyn ExportGraphMetricValueConverter>) {
         let mut callstack_id_to_node: HashMap<usize, usize> = HashMap::new();
 
+        let default_converter = DefaultExportGraphMetricValueConverter::default();
         let converter = match value_converter {
             Some(converter) => { converter },
-            None => { &DefaultExportGraphMetricValueConverter::default() },
+            None => { &default_converter },
         };
 
         for sample in process.samples() {
