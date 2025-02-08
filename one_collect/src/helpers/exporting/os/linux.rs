@@ -1401,9 +1401,15 @@ impl UniversalExporterOSHooks for UniversalExporter {
 
         let page_count = self.cpu_buf_bytes() / page_size;
 
-        let builder = RingBufSessionBuilder::new()
+        let mut builder = RingBufSessionBuilder::new()
             .with_page_count(page_count)
             .with_exporter_events(&settings);
+
+        if let Some(target_pids) = &settings.target_pids {
+            for pid in target_pids {
+                builder = builder.with_target_pid(*pid);
+            }
+        }
 
         let mut builder = self.run_build_hooks(builder)?;
 
