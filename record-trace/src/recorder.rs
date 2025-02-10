@@ -1,5 +1,4 @@
 use crate::commandline::RecordArgs;
-use crate::export::{Exporter, PerfViewExporter};
 use one_collect::helpers::dotnet::UniversalDotNetHelp;
 use one_collect::helpers::{dotnet::universal::UniversalDotNetHelper, exporting::ExportSettings};
 use one_collect::helpers::exporting::universal::UniversalExporter;
@@ -85,7 +84,7 @@ impl Recorder {
         println!("Resolving symbols.");
         exporter.capture_and_resolve_symbols();
 
-        PerfViewExporter::run(&exporter, &self.args);
+        self.args.format().run(&mut exporter, &self.args);
 
         println!("Finished recording trace.");
         println!("Trace written to {}", self.args.output_path().display());

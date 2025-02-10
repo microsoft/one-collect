@@ -1,4 +1,5 @@
 use one_collect::helpers::exporting::ExportMachine;
+use one_collect::helpers::exporting::formats::nettrace::*;
 use one_collect::helpers::exporting::formats::perf_view::*;
 use one_collect::helpers::exporting::graph::ExportGraph;
 
@@ -6,16 +7,25 @@ use crate::commandline::RecordArgs;
 
 pub (crate) trait Exporter {
     fn run(
-        machine: &ExportMachine,
+        &self,
+        machine: &mut ExportMachine,
         args: &RecordArgs) -> bool;
 }
 
 pub (crate) struct PerfViewExporter {
 }
 
+impl PerfViewExporter {
+    pub fn new() -> Self {
+        Self {
+        }
+    }
+}
+
 impl Exporter for PerfViewExporter {
     fn run(
-        machine: &ExportMachine,
+        &self,
+        machine: &mut ExportMachine,
         args: &RecordArgs) -> bool {
         /* Split by comm name */
         let comm_map = machine.split_processes_by_comm();
@@ -119,5 +129,28 @@ impl PerfViewExporter {
 
             println!("{}: {} {}", path, total, sample_desc);
         }
+    }
+}
+
+pub (crate) struct NetTraceExporter {
+}
+
+impl NetTraceExporter {
+    pub fn new() -> Self {
+        Self {
+        }
+    }
+}
+
+impl Exporter for NetTraceExporter {
+    fn run(
+        &self,
+        machine: &mut ExportMachine,
+        args: &RecordArgs) -> bool {
+
+        let path = format!("{}/trace.nettrace", args.output_path().display());
+        let _ = machine.to_net_trace(|_proc| { true }, &path);
+
+    true
     }
 }
