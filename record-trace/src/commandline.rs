@@ -55,19 +55,7 @@ impl RecordArgs {
         
         // If --out isn't specified, default to the current working directory.
         let output_path = match command_args.out {
-            Some(path) => {
-                let path = PathBuf::from(path);
-                if path.exists() && !path.is_dir() {
-                    eprintln!("{} is not a directory.", path.display());
-                    process::exit(1);
-                }
-                else if !path.exists() {
-                    eprintln!("{} does not exist.", path.display());
-                    process::exit(1);
-                }
-
-                path
-            },
+            Some(path) => { PathBuf::from(path) },
             None => {
                 match env::current_dir() {
                     Ok(current_dir) => current_dir,
@@ -85,7 +73,7 @@ impl RecordArgs {
         };
 
         // Cross-argument validation.
-        if !args.on_cpu {
+        if !args.on_cpu && !args.off_cpu {
             eprintln!("No events selected. Exiting.");
             process::exit(1);
         }
