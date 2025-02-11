@@ -409,6 +409,7 @@ pub struct ExportMachine {
     drop_closures: Vec<Box<dyn FnMut()>>,
     start_date: Option<DateTime<Utc>>,
     start_qpc: Option<u64>,
+    end_qpc: Option<u64>,
     duration: Option<Duration>,
 }
 
@@ -467,6 +468,7 @@ impl ExportMachine {
             drop_closures: Vec::new(),
             start_date: None,
             start_qpc: None,
+            end_qpc: None,
             duration: None,
         }
     }
@@ -474,6 +476,8 @@ impl ExportMachine {
     pub fn start_date(&self) -> Option<DateTime<Utc>> { self.start_date }
 
     pub fn start_qpc(&self) -> Option<u64> { self.start_qpc }
+
+    pub fn end_qpc(&self) -> Option<u64> { self.end_qpc }
 
     pub fn duration(&self) -> Option<Duration> { self.duration }
 
@@ -570,6 +574,7 @@ impl ExportMachine {
             let qpc_duration = end_qpc - start_qpc;
             let micros = (qpc_duration * 1000000u64) / qpc_freq;
 
+            self.end_qpc = Some(end_qpc);
             self.duration = Some(Duration::from_micros(micros));
         }
     }
