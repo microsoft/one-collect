@@ -11,7 +11,7 @@ use super::mappings::ExportMappingLookup;
 #[derive(Clone, Copy)]
 pub enum MetricValue {
     Count(u64),
-    Time(u64),
+    Duration(u64),
     Bytes(u64),
 }
 

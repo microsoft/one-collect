@@ -74,7 +74,7 @@ impl ExportGraphMetricValueConverter for DefaultExportGraphMetricValueConverter 
         match value {
             MetricValue::Count(value) => { value },
             MetricValue::Bytes(value) => { value },
-            MetricValue::Time(value) => { value },
+            MetricValue::Duration(value) => { value },
         }
     }
 }

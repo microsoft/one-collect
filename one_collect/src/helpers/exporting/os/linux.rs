@@ -833,7 +833,7 @@ impl OSExportMachine {
 
                 let sample = machine.make_sample(
                     time,
-                    MetricValue::Time(0),
+                    MetricValue::Duration(0),
                     tid,
                     cpu,
                     kind,
@@ -899,7 +899,7 @@ impl OSExportMachine {
                                  * delay period (value) until now.
                                  */
                                 *sample.time_mut() = start_time;
-                                *sample.value_mut() = MetricValue::Time(duration);
+                                *sample.value_mut() = MetricValue::Duration(duration);
 
                                 machine.process_mut(pid).add_sample(sample);
                             }
