@@ -584,7 +584,7 @@ impl OSExportMachine {
 
                         let sample = machine.make_sample(
                             info.start_time,
-                            MetricValue::Time(duration),
+                            MetricValue::Duration(duration),
                             tid,
                             info.cpu as u16,
                             kind,
