@@ -19,7 +19,7 @@ impl ExportGraphMetricValueConverter for PerfViewExportGraphMetricValueConverter
     fn convert(&self, value: MetricValue) -> u64 {
         match value {
             MetricValue::Count(count) => count,
-            MetricValue::Time(qpc_time) => { ((qpc_time as f64 * 1000.0) / self.qpc_freq as f64) as u64 },
+            MetricValue::Duration(qpc_time) => { ((qpc_time as f64 * 1000.0) / self.qpc_freq as f64) as u64 },
             MetricValue::Bytes(bytes) => bytes,
         }
     }
