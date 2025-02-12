@@ -4,6 +4,8 @@ use std::collections::hash_map::Entry::{Vacant, Occupied};
 use crate::intern::InternedStrings;
 use crate::helpers::exporting::{*};
 
+use super::process::MetricValue;
+
 #[derive(Default, Hash, Eq, PartialEq)]
 pub struct Resolvable {
     name_id: usize,
@@ -58,6 +60,29 @@ impl Node {
     pub fn exclusive(&self) -> u64 { self.exclusive }
 
     pub fn total(&self) -> u64 { self.total }
+}
+
+pub trait ExportGraphMetricValueConverter {
+    fn convert(&self, value: MetricValue) -> u64;
+}
+
+pub struct DefaultExportGraphMetricValueConverter {
+}
+
+impl ExportGraphMetricValueConverter for DefaultExportGraphMetricValueConverter {
+    fn convert(&self, value: MetricValue) -> u64 {
+        match value {
+            MetricValue::Count(value) => { value },
+            MetricValue::Bytes(value) => { value },
+            MetricValue::Duration(value) => { value },
+        }
+    }
+}
+
+impl Default for DefaultExportGraphMetricValueConverter {
+    fn default() -> Self {
+        Self {}
+    }
 }
 
 pub struct ExportGraph {
@@ -262,8 +287,15 @@ impl ExportGraph {
         &mut self,
         exporter: &ExportMachine,
         process: &ExportProcess,
-        kind: u16) {
+        kind: u16,
+        value_converter: Option<&dyn ExportGraphMetricValueConverter>) {
         let mut callstack_id_to_node: HashMap<usize, usize> = HashMap::new();
+
+        let default_converter = DefaultExportGraphMetricValueConverter::default();
+        let converter = match value_converter {
+            Some(converter) => { converter },
+            None => { &default_converter },
+        };
 
         for sample in process.samples() {
             if sample.kind() != kind {
@@ -271,7 +303,7 @@ impl ExportGraph {
             }
 
             let callstack_id = sample.callstack_id();
-            let value = sample.value();
+            let value = converter.convert(sample.value());
             let time = sample.time();
 
             /* Import common frames, if not already */
@@ -382,7 +414,7 @@ mod tests {
         for i in 0..16 {
             exporter.add_sample(
                 0,
-                1,
+                MetricValue::Count(1),
                 1,
                 1,
                 0,
@@ -400,7 +432,8 @@ mod tests {
         graph.add_samples(
             &exporter,
             &process,
-            cpu);
+            cpu,
+            None);
 
         /* Should have 16 nodes + root */
         assert_eq!(17, graph.nodes().len());

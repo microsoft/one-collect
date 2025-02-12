@@ -125,7 +125,8 @@ fn export_pids(
         graph.add_samples(
             &exporter,
             process,
-            kind);
+            kind,
+            None);
     }
 
     let total = graph.nodes()[graph.root_node()].total();

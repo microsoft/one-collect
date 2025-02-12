@@ -436,7 +436,7 @@ mod tests {
         for i in 0..16 {
             exporter.add_sample(
                 0,
-                1,
+                MetricValue::Count(1),
                 1,
                 1,
                 0,
@@ -456,7 +456,8 @@ mod tests {
         graph.add_samples(
             &exporter,
             &process,
-            cpu);
+            cpu,
+            None);
 
         graph.to_pprof_file(
             type_id,

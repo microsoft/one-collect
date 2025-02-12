@@ -11,6 +11,7 @@ use crate::helpers::callstack::CallstackHelper;
 
 use modulemetadata::ModuleMetadata;
 use pe_file::PEModuleMetadata;
+use process::MetricValue;
 use ruwind::UnwindType;
 use chrono::{DateTime, Utc};
 
@@ -109,7 +110,7 @@ impl ExportSampler {
     fn make_sample(
         &mut self,
         data: &EventData,
-        value: u64,
+        value: MetricValue,
         kind: u16) -> anyhow::Result<ExportProcessSample> {
         self.frames.clear();
 
@@ -135,7 +136,7 @@ impl ExportSampler {
     fn add_sample(
         &mut self,
         data: &EventData,
-        value: u64,
+        value: MetricValue,
         kind: u16) -> anyhow::Result<()> {
         self.frames.clear();
 
@@ -223,7 +224,7 @@ impl<'a> ExportTraceContext<'a> {
 
     pub fn add_sample_with_kind(
         &mut self,
-        value: u64,
+        value: MetricValue,
         kind: u16) -> anyhow::Result<()> {
         self.sampler.add_sample(
             self.data,
@@ -233,7 +234,7 @@ impl<'a> ExportTraceContext<'a> {
 
     pub fn make_sample_with_kind(
         &mut self,
-        value: u64,
+        value: MetricValue,
         kind: u16) -> anyhow::Result<ExportProcessSample> {
         self.sampler.make_sample(
             self.data,
@@ -243,7 +244,7 @@ impl<'a> ExportTraceContext<'a> {
 
     pub fn make_sample(
         &mut self,
-        value: u64) -> anyhow::Result<ExportProcessSample> {
+        value: MetricValue) -> anyhow::Result<ExportProcessSample> {
         self.make_sample_with_kind(
             value,
             self.sample_kind)
@@ -260,7 +261,7 @@ impl<'a> ExportTraceContext<'a> {
 
     pub fn add_sample(
         &mut self,
-        value: u64) -> anyhow::Result<()> {
+        value: MetricValue) -> anyhow::Result<()> {
         self.add_sample_with_kind(
             value,
             self.sample_kind)
@@ -755,7 +756,7 @@ impl ExportMachine {
     pub fn make_sample(
         &mut self,
         time: u64,
-        value: u64,
+        value: MetricValue,
         tid: u32,
         cpu: u16,
         kind: u16,
@@ -782,7 +783,7 @@ impl ExportMachine {
     pub fn add_sample(
         &mut self,
         time: u64,
-        value: u64,
+        value: MetricValue,
         pid: u32,
         tid: u32,
         cpu: u16,
@@ -879,10 +880,10 @@ mod tests {
         let mut machine = ExportMachine::new(ExportSettings::default());
         let proc = machine.process_mut(1);
 
-        let first = ExportProcessSample::new(1, 0, 0, 0, 0, 0, 0);
-        let second = ExportProcessSample::new(3, 0, 0, 0, 0, 0, 0);
-        let third = ExportProcessSample::new(5, 0, 0, 0, 0, 0, 0);
-        let forth = ExportProcessSample::new(7, 0, 0, 0, 0, 0, 0);
+        let first = ExportProcessSample::new(1, MetricValue::Count(0), 0, 0, 0, 0, 0);
+        let second = ExportProcessSample::new(3, MetricValue::Count(0), 0, 0, 0, 0, 0);
+        let third = ExportProcessSample::new(5, MetricValue::Count(0), 0, 0, 0, 0, 0);
+        let forth = ExportProcessSample::new(7, MetricValue::Count(0), 0, 0, 0, 0, 0);
 
         proc.add_sample(forth);
         proc.add_sample(second);
@@ -891,10 +892,10 @@ mod tests {
 
         let proc = machine.process_mut(2);
 
-        let first = ExportProcessSample::new(2, 0, 0, 0, 0, 0, 0);
-        let second = ExportProcessSample::new(4, 0, 0, 0, 0, 0, 0);
-        let third = ExportProcessSample::new(6, 0, 0, 0, 0, 0, 0);
-        let forth = ExportProcessSample::new(8, 0, 0, 0, 0, 0, 0);
+        let first = ExportProcessSample::new(2, MetricValue::Count(0), 0, 0, 0, 0, 0);
+        let second = ExportProcessSample::new(4, MetricValue::Count(0), 0, 0, 0, 0, 0);
+        let third = ExportProcessSample::new(6, MetricValue::Count(0), 0, 0, 0, 0, 0);
+        let forth = ExportProcessSample::new(8, MetricValue::Count(0), 0, 0, 0, 0, 0);
 
         proc.add_sample(forth);
         proc.add_sample(second);

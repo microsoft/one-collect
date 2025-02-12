@@ -1,7 +1,8 @@
 use one_collect::helpers::exporting::ExportMachine;
 use one_collect::helpers::exporting::formats::nettrace::*;
 use one_collect::helpers::exporting::formats::perf_view::*;
-use one_collect::helpers::exporting::graph::ExportGraph;
+use one_collect::helpers::exporting::graph::{ExportGraph, ExportGraphMetricValueConverter};
+use one_collect::helpers::exporting::process::MetricValue;
 
 use crate::commandline::RecordArgs;
 use anyhow::anyhow;
@@ -16,6 +17,28 @@ pub (crate) trait Exporter {
         &self,
         machine: &mut ExportMachine,
         args: &RecordArgs) -> anyhow::Result<()>;
+}
+
+struct PerfViewExportGraphMetricValueConverter {
+    qpc_freq: u64,
+}
+
+impl ExportGraphMetricValueConverter for PerfViewExportGraphMetricValueConverter {
+    fn convert(&self, value: MetricValue) -> u64 {
+        match value {
+            MetricValue::Count(count) => count,
+            MetricValue::Duration(qpc_time) => { ((qpc_time as f64 * 1000.0) / self.qpc_freq as f64) as u64 },
+            MetricValue::Bytes(bytes) => bytes,
+        }
+    }
+}
+
+impl PerfViewExportGraphMetricValueConverter {
+    fn new(qpc_freq: u64) -> Self {
+        Self {
+            qpc_freq,
+        }
+    }
 }
 
 pub (crate) struct PerfViewExporter {
@@ -47,6 +70,8 @@ impl Exporter for PerfViewExporter {
         &self,
         machine: &mut ExportMachine,
         args: &RecordArgs) -> anyhow::Result<()> {
+        
+        let converter = PerfViewExportGraphMetricValueConverter::new(machine.qpc_freq());
 
         /* Split by comm name */
         let comm_map = machine.split_processes_by_comm();
@@ -88,6 +113,7 @@ impl Exporter for PerfViewExporter {
                             Self::export_pids(
                                 machine,
                                 &mut graph,
+                                &converter,
                                 &single_pid,
                                 cpu,
                                 &path,
@@ -100,6 +126,7 @@ impl Exporter for PerfViewExporter {
                             Self::export_pids(
                                 machine,
                                 &mut graph,
+                                &converter,
                                 &single_pid,
                                 cswitch,
                                 &path,
@@ -127,6 +154,7 @@ impl Exporter for PerfViewExporter {
                         Self::export_pids(
                             machine,
                             &mut graph,
+                            &converter,
                             &pids,
                             cpu,
                             &path,
@@ -139,6 +167,7 @@ impl Exporter for PerfViewExporter {
                         Self::export_pids(
                             machine,
                             &mut graph,
+                            &converter,
                             &pids,
                             cswitch,
                             &path,
@@ -155,6 +184,7 @@ impl PerfViewExporter {
     fn export_pids(
         exporter: &ExportMachine,
         graph: &mut ExportGraph,
+        converter: &PerfViewExportGraphMetricValueConverter,
         pids: &[u32],
         kind: u16,
         path: &str,
@@ -167,7 +197,8 @@ impl PerfViewExporter {
             graph.add_samples(
                 exporter,
                 process,
-                kind);
+                kind,
+                Some(converter));
         }
 
         let total = graph.nodes()[graph.root_node()].total();

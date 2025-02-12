@@ -16,7 +16,7 @@ use crate::perf_event::{RingBufSessionBuilder, RingBufBuilder};
 use crate::perf_event::abi::PERF_RECORD_MISC_SWITCH_OUT;
 use crate::helpers::callstack::{CallstackHelp, CallstackReader};
 use crate::helpers::exporting::*;
-use crate::helpers::exporting::process::ExportProcessOSHooks;
+use crate::helpers::exporting::process::{ExportProcessOSHooks, MetricValue};
 use crate::helpers::exporting::universal::*;
 use crate::helpers::exporting::modulemetadata::{ModuleMetadata, ElfModuleMetadata};
 
@@ -784,7 +784,7 @@ impl OSExportMachine {
 
                 event_machine.borrow_mut().add_sample(
                     time,
-                    1,
+                    MetricValue::Count(1),
                     pid,
                     tid,
                     cpu,
@@ -833,7 +833,7 @@ impl OSExportMachine {
 
                 let sample = machine.make_sample(
                     time,
-                    0,
+                    MetricValue::Duration(0),
                     tid,
                     cpu,
                     kind,
@@ -899,7 +899,7 @@ impl OSExportMachine {
                                  * delay period (value) until now.
                                  */
                                 *sample.time_mut() = start_time;
-                                *sample.value_mut() = duration;
+                                *sample.value_mut() = MetricValue::Duration(duration);
 
                                 machine.process_mut(pid).add_sample(sample);
                             }
@@ -1441,6 +1441,8 @@ mod tests {
     use crate::perf_event::RingBufSessionBuilder;
     use crate::helpers::callstack::CallstackHelper;
 
+    use graph::{DefaultExportGraphMetricValueConverter, ExportGraphMetricValueConverter};
+
     #[test]
     #[ignore]
     fn it_works() {
@@ -1465,7 +1467,7 @@ mod tests {
             },
             move |tracer| {
                 /* Create default sample */
-                tracer.add_sample(1)
+                tracer.add_sample(MetricValue::Count(1))
             });
 
         settings = settings.with_event(
@@ -1477,7 +1479,7 @@ mod tests {
             },
             move |tracer| {
                 /* Create default sample */
-                tracer.add_sample(1)
+                tracer.add_sample(MetricValue::Count(1))
             });
 
         let mut builder = RingBufSessionBuilder::new()
@@ -1555,6 +1557,8 @@ mod tests {
                 }
             }
 
+            let converter = DefaultExportGraphMetricValueConverter::default();
+
             println!(
                 "{}: {} ({} Samples)",
                 process.pid(),
@@ -1569,7 +1573,7 @@ mod tests {
                     sample.callstack_id(),
                     sample.tid(),
                     kinds[sample.kind() as usize],
-                    sample.value());
+                    converter.convert(sample.value()));
             }
 
             if process.samples().len() > 0 {
