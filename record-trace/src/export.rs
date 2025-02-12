@@ -1,14 +1,22 @@
 use one_collect::helpers::exporting::ExportMachine;
+use one_collect::helpers::exporting::formats::nettrace::*;
 use one_collect::helpers::exporting::formats::perf_view::*;
 use one_collect::helpers::exporting::graph::{ExportGraph, ExportGraphMetricValueConverter};
 use one_collect::helpers::exporting::process::MetricValue;
 
 use crate::commandline::RecordArgs;
+use anyhow::anyhow;
+use std::path::PathBuf;
 
 pub (crate) trait Exporter {
+    fn validate(
+        &mut self,
+        args: &RecordArgs) -> anyhow::Result<()>;
+
     fn run(
-        machine: &ExportMachine,
-        args: &RecordArgs) -> bool;
+        &self,
+        machine: &mut ExportMachine,
+        args: &RecordArgs) -> anyhow::Result<()>;
 }
 
 struct PerfViewExportGraphMetricValueConverter {
@@ -36,18 +44,59 @@ impl PerfViewExportGraphMetricValueConverter {
 pub (crate) struct PerfViewExporter {
 }
 
-impl Exporter for PerfViewExporter {
-    fn run(
-        machine: &ExportMachine,
-        args: &RecordArgs) -> bool {
+impl PerfViewExporter {
+    pub fn new() -> Self {
+        Self {
+        }
+    }
+}
 
+impl Exporter for PerfViewExporter {
+    fn validate(
+        &mut self,
+        args: &RecordArgs) -> anyhow::Result<()> {
+        let output_path = args.output_path();
+        if output_path.exists() && !output_path.is_dir() {
+            return Err(anyhow!("{} is not a directory.", output_path.display()));
+        }
+        else if !output_path.exists() {
+            return Err(anyhow!("{} does not exist.", output_path.display()));
+        }
+
+        Ok(())
+    }
+
+    fn run(
+        &self,
+        machine: &mut ExportMachine,
+        args: &RecordArgs) -> anyhow::Result<()> {
+        
         let converter = PerfViewExportGraphMetricValueConverter::new(machine.qpc_freq());
 
         /* Split by comm name */
         let comm_map = machine.split_processes_by_comm();
 
-        let cpu = machine.find_sample_kind("cpu").expect("CPU sample kind should be known.");
-        let cswitch = machine.find_sample_kind("cswitch").expect("CSwitch sample kind should be known.");
+        let cpu = match machine.find_sample_kind("cpu") {
+            Some(cpu) => { cpu },
+            None => {
+                if args.on_cpu() {
+                    return Err(anyhow!("CPU sample kind should be known."));
+                }
+
+                0
+            }
+        };
+
+        let cswitch = match machine.find_sample_kind("cswitch") {
+            Some(cswitch) => { cswitch },
+            None => {
+                if args.off_cpu() {
+                    return Err(anyhow!("CSwitch sample kind should be known."));
+                }
+
+                0
+            }
+        };
 
         let mut graph = ExportGraph::new();
         let mut buf: String;
@@ -58,27 +107,31 @@ impl Exporter for PerfViewExporter {
                     for pid in pids {
                         let single_pid = vec![pid];
 
-                        let path = format!("{}/t.Unknown.{}.CPU.PerfView.xml", args.output_path().display(), pid);
+                        if args.on_cpu() {
+                            let path = format!("{}/t.Unknown.{}.CPU.PerfView.xml", args.output_path().display(), pid);
 
-                        Self::export_pids(
-                            machine,
-                            &mut graph,
-                            &converter,
-                            &single_pid,
-                            cpu,
-                            &path,
-                            "CPU Samples");
+                            Self::export_pids(
+                                machine,
+                                &mut graph,
+                                &converter,
+                                &single_pid,
+                                cpu,
+                                &path,
+                                "CPU Samples");
+                        }
 
-                        let path = format!("{}/t.Unknown.{}.CSwitch.PerfView.xml", args.output_path().display(), pid);
+                        if args.off_cpu() {
+                            let path = format!("{}/t.Unknown.{}.CSwitch.PerfView.xml", args.output_path().display(), pid);
 
-                        Self::export_pids(
-                            machine,
-                            &mut graph,
-                            &converter,
-                            &single_pid,
-                            cswitch,
-                            &path,
-                            "Wait Time");
+                            Self::export_pids(
+                                machine,
+                                &mut graph,
+                                &converter,
+                                &single_pid,
+                                cswitch,
+                                &path,
+                                "Wait Time");
+                        }
                     }
                 },
                 Some(comm_id) => {
@@ -95,31 +148,35 @@ impl Exporter for PerfViewExporter {
                         Err(_) => { "Unknown" },
                     };
 
-                    let path = format!("{}/t.{}.CPU.PerfView.xml", args.output_path().display(), comm);
+                    if args.on_cpu() {
+                        let path = format!("{}/t.{}.CPU.PerfView.xml", args.output_path().display(), comm);
 
-                    Self::export_pids(
-                        machine,
-                        &mut graph,
-                        &converter,
-                        &pids,
-                        cpu,
-                        &path,
-                        "CPU Samples");
+                        Self::export_pids(
+                            machine,
+                            &mut graph,
+                            &converter,
+                            &pids,
+                            cpu,
+                            &path,
+                            "CPU Samples");
+                    }
 
-                    let path = format!("{}/t.{}.CSwitch.PerfView.xml", args.output_path().display(), comm);
+                    if args.off_cpu() {
+                        let path = format!("{}/t.{}.CSwitch.PerfView.xml", args.output_path().display(), comm);
 
-                    Self::export_pids(
-                        machine,
-                        &mut graph,
-                        &converter,
-                        &pids,
-                        cswitch,
-                        &path,
-                        "Wait Time");
+                        Self::export_pids(
+                            machine,
+                            &mut graph,
+                            &converter,
+                            &pids,
+                            cswitch,
+                            &path,
+                            "Wait Time");
+                    }
                 }
             }
         }
-    true
+        Ok(())
     }
 }
 
@@ -151,5 +208,49 @@ impl PerfViewExporter {
 
             println!("{}: {} {}", path, total, sample_desc);
         }
+    }
+}
+
+pub (crate) struct NetTraceExporter {
+    output_path: PathBuf,
+}
+
+impl NetTraceExporter {
+    pub fn new() -> Self {
+        Self {
+            output_path: PathBuf::new(),
+        }
+    }
+}
+
+impl Exporter for NetTraceExporter {
+    fn validate(
+        &mut self,
+        args: &RecordArgs) -> anyhow::Result<()> {
+        let output_path = args.output_path();
+        self.output_path.push(args.output_path());
+
+        if output_path.exists() && output_path.is_dir() {
+            if let Some(extension) = output_path.extension() {
+                if extension == "nettrace" {
+                    return Err(anyhow!("{} is a directory.", output_path.display()));
+                }
+            }
+            else {
+                self.output_path.push("trace.nettrace");
+            }
+        }
+
+        Ok(())
+    }
+
+    fn run(
+        &self,
+        machine: &mut ExportMachine,
+        _args: &RecordArgs) -> anyhow::Result<()> {
+
+        let _ = machine.to_net_trace(|_proc| { true }, &self.output_path.to_str().unwrap());
+
+        Ok(())
     }
 }

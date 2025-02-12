@@ -1,5 +1,4 @@
 use crate::commandline::RecordArgs;
-use crate::export::{Exporter, PerfViewExporter};
 use one_collect::helpers::dotnet::UniversalDotNetHelp;
 use one_collect::helpers::{dotnet::universal::UniversalDotNetHelper, exporting::ExportSettings};
 use one_collect::helpers::exporting::universal::UniversalExporter;
@@ -22,6 +21,12 @@ impl Recorder {
     }
 
     pub (crate) fn run(&mut self) {
+        let mut format = self.args.format();
+        if let Err(e) = format.validate(&self.args) {
+            eprintln!("Error: {}", e);
+            process::exit(1);
+        }
+
         let mut settings = ExportSettings::default();
 
         // CPU sampling.
@@ -85,7 +90,10 @@ impl Recorder {
         println!("Resolving symbols.");
         exporter.capture_and_resolve_symbols();
 
-        PerfViewExporter::run(&exporter, &self.args);
+        if let Err(e) = format.run(&mut exporter, &self.args) {
+            eprintln!("Error: {}", e);
+            process::exit(1);
+        }
 
         println!("Finished recording trace.");
         println!("Trace written to {}", self.args.output_path().display());
