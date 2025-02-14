@@ -179,6 +179,7 @@ pub(crate) struct OSExportMachine {
     cswitches: HashMap<u32, WinCSwitch>,
     pid_mapping: HashMap<u32, u32>,
     cpu_samples: Option<HashMap<CpuProfileKey, CpuProfile>>,
+    global_idle_pid: u32,
     pid_index: u32,
 }
 
@@ -188,8 +189,17 @@ impl OSExportMachine {
             cswitches: HashMap::new(),
             pid_mapping: HashMap::new(),
             cpu_samples: Some(HashMap::new()),
+            global_idle_pid: 0,
             pid_index: 0,
         }
+    }
+
+    pub fn alloc_idle_pid(machine: &mut ExportMachine) {
+        /* Always allocate global idle pid as NsPid 0 */
+        machine.os.global_idle_pid = machine.os.alloc_global_pid(0);
+
+        /* Ensure ns_pid 0 == global_idle_pid */
+        *machine.process_mut(machine.os.global_idle_pid).ns_pid_mut() = Some(0);
     }
 
     pub fn get_or_alloc_global_pid(
@@ -306,7 +316,8 @@ impl OSExportMachine {
     fn hook_comm_event(
         ancillary: ReadOnly<AncillaryData>,
         event: &mut Event,
-        event_machine: Writable<ExportMachine>) {
+        event_machine: Writable<ExportMachine>,
+        existing: bool) {
         let fmt = event.format();
         let pid = fmt.get_field_ref_unchecked("ProcessId");
         let sid = fmt.get_field_ref_unchecked("UserSID");
@@ -326,6 +337,11 @@ impl OSExportMachine {
             let sid_length = Self::sid_length(dynamic)?;
             let dynamic = &dynamic[sid_length..];
 
+            let time = match existing {
+                true => { 0 },
+                false => { ancillary.borrow().time() },
+            };
+
             /*
              * Processes within the machine are stored using the
              * global PID. This allows us to handle PID re-use
@@ -336,7 +352,7 @@ impl OSExportMachine {
             event_machine.add_comm_exec(
                 global_pid,
                 fmt.get_str(comm, dynamic)?,
-                ancillary.borrow().time())?;
+                time)?;
 
             /* Store the local PID in the ns_pid as on Linux */
             *event_machine.process_mut(global_pid).ns_pid_mut() = Some(local_pid);
@@ -356,6 +372,8 @@ impl OSExportMachine {
             Some(callstack_helper) => { callstack_helper.to_reader() },
             None => { anyhow::bail!("No callstack reader specified."); }
         };
+
+        OSExportMachine::alloc_idle_pid(&mut machine);
 
         let machine = Writable::new(machine);
 
@@ -646,12 +664,14 @@ impl OSExportMachine {
         Self::hook_comm_event(
             session.ancillary_data(),
             session.comm_start_event(),
-            machine.clone());
+            machine.clone(),
+            false);
 
         Self::hook_comm_event(
             session.ancillary_data(),
             session.comm_start_capture_event(),
-            machine.clone());
+            machine.clone(),
+            true);
 
         /* Hook comm exit record */
         let event_ancillary = session.ancillary_data();
@@ -701,7 +721,7 @@ impl ExportMachineOSHooks for ExportMachine {
 
         /* Take mappings from Idle process */
         let kernel_mappings: Vec<ExportMapping> = self
-            .process_mut(0)
+            .process_mut(self.os.global_idle_pid)
             .mappings_mut()
             .drain(..)
             .collect();
@@ -830,6 +850,12 @@ impl UniversalExporterOSHooks for UniversalExporter {
         let mut session = EtwSession::new()
             .with_per_cpu_buffer_bytes(self.cpu_buf_bytes())
             .with_callstack_help(&callstack_helper);
+
+        if let Some(target_pids) = &settings.target_pids {
+            for pid in target_pids {
+                session = session.with_target_pid(*pid);
+            }
+        }
 
         session = self.run_build_hooks(session)?;
 

@@ -1,5 +1,25 @@
 use super::*;
 
+fn register_soft_pid(
+    event: &mut Event,
+    pid_field: &str) {
+    /*
+     * Legacy kernel events do not always have process IDs.
+     * We register a hook to provide this from the data for
+     * other consumers.
+     */
+    if let Some(pid) = event.format().get_field_ref(pid_field) {
+        event.register_soft_pid(move |data| {
+            let fmt = data.format();
+            let data = data.event_data();
+
+            let pid = fmt.get_u32(pid, data)?;
+
+            Ok(pid as i32)
+        });
+    }
+}
+
 pub fn comm(
     id: usize,
     name: &str) -> Event {
@@ -67,6 +87,8 @@ pub fn comm(
         LocationType::StaticUTF16String, offset, len));
 
     event.set_no_callstack_flag();
+
+    register_soft_pid(&mut event, "ProcessId");
 
     event
 }
@@ -137,6 +159,8 @@ pub fn mmap(
         LocationType::StaticUTF16String, offset, 0));
 
     event.set_no_callstack_flag();
+
+    register_soft_pid(&mut event, "ProcessId");
 
     event
 }
@@ -234,6 +258,8 @@ pub fn callstack(
         LocationType::Static, offset, len));
 
     event.set_no_callstack_flag();
+
+    register_soft_pid(&mut event, "StackProcess");
 
     event
 }

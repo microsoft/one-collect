@@ -693,7 +693,6 @@ impl NetTraceWriter {
         }
 
         if let Some(mapping) = replay.mapping_event() {
-            println!("Mapping: PID={}, Time={}", replay.process().ns_pid().unwrap(), replay.time());
             self.write_mapping_replay_event(machine, replay, mapping)?;
 
             for symbol in mapping.symbols() {

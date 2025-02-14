@@ -1,11 +1,12 @@
 use std::hash::{BuildHasherDefault, Hash, Hasher};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::thread::{self};
 
 use twox_hash::XxHash64;
 
 use crate::sharing::*;
 use crate::event::*;
+use crate::event::os::windows::WindowsEventExtension;
 
 #[allow(dead_code)]
 mod abi;
@@ -274,6 +275,7 @@ pub struct EtwSession {
 
     /* Config */
     cpu_buf_kb: u32,
+    target_pids: Option<Vec<i32>>,
 
     /* Callbacks */
     event_error_callback: Option<Box<dyn Fn(&Event, &anyhow::Error)>>,
@@ -325,6 +327,7 @@ impl EtwSession {
 
             /* Config */
             cpu_buf_kb: 64,
+            target_pids: None,
 
             /* Callbacks */
             event_error_callback: None,
@@ -341,6 +344,21 @@ impl EtwSession {
             elevate: false,
             profile_interval: None,
         }
+    }
+
+    pub fn with_target_pid(
+        mut self,
+        pid: i32) -> Self {
+        if let Some(ref mut pids) = self.target_pids {
+            pids.push(pid);
+        } else {
+            let mut pids = Vec::new();
+            pids.push(pid);
+
+            self.target_pids = Some(pids);
+        }
+
+        self
     }
 
     pub fn with_per_cpu_buffer_bytes(
@@ -859,6 +877,7 @@ impl EtwSession {
             session.enable_kernel_callstacks(&self.kernel_callstacks)?;
         }
 
+        let target_pids = self.target_pids.take();
         let enabled = self.take_enabled();
         let mut events = self.take_events();
 
@@ -866,13 +885,21 @@ impl EtwSession {
         let started_callbacks = self.started_callbacks.take();
         let stopping_callbacks = self.stopping_callbacks.take();
 
+        let mut pid_lookup = HashSet::new();
+
+        if let Some(target_pids) = &target_pids {
+            for pid in target_pids {
+                pid_lookup.insert(*pid);
+            }
+        }
+
         let thread = thread::spawn(move || -> anyhow::Result<()> {
             let context = SessionCallbackContext::new(handle);
 
             /* Enable capture environments first */
             for enable in enabled.values() {
                 if enable.needs_capture_environment() {
-                    let result = enable.enable(handle);
+                    let result = enable.enable(handle, &target_pids);
 
                     if result.is_err() {
                         TraceSession::remote_stop(handle);
@@ -891,7 +918,7 @@ impl EtwSession {
             /* Enable non-capture environments next */
             for enable in enabled.values() {
                 if !enable.needs_capture_environment() {
-                    let result = enable.enable(handle);
+                    let result = enable.enable(handle, &target_pids);
 
                     if result.is_err() {
                         TraceSession::remote_stop(handle);
@@ -934,6 +961,7 @@ impl EtwSession {
         let ancillary = self.ancillary.clone();
         let error_callback = self.event_error_callback.take();
         let mut errors = Vec::new();
+        let has_pid_filter = !pid_lookup.is_empty();
 
         let result = session.process(Box::new(move |event| {
             /* Find events by provider ID */
@@ -954,6 +982,23 @@ impl EtwSession {
 
                     for event in events {
                         errors.clear();
+
+                        if has_pid_filter {
+                            /*
+                             * Skip PID events via soft_pid filters:
+                             * Legacy Kernel ETW events do not have a stable
+                             * pid field. Events can register a software pid
+                             * reader to allow for this. These read the pid
+                             * from the actual event data vs the ancillary data.
+                             */
+                            if let Some(pid) = event.soft_pid(slice) {
+                                /* If we have a legacy PID, filter it */
+                                if pid != 0 && !pid_lookup.contains(&pid) {
+                                    /* Ignore if not in the set */
+                                    continue;
+                                }
+                            }
+                        }
 
                         event.process(
                             slice,
