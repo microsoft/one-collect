@@ -446,6 +446,7 @@ impl NetTraceWriter {
         /* Clear and update */
         self.event_block.clear();
         self.flush_time = end_time;
+        self.last_time = 0;
 
         Ok(())
     }
@@ -692,6 +693,7 @@ impl NetTraceWriter {
         }
 
         if let Some(mapping) = replay.mapping_event() {
+            println!("Mapping: PID={}, Time={}", replay.process().ns_pid().unwrap(), replay.time());
             self.write_mapping_replay_event(machine, replay, mapping)?;
 
             for symbol in mapping.symbols() {
