@@ -1,4 +1,5 @@
 use std::collections::hash_map::Entry::Occupied;
+use std::sync::{Arc, Mutex};
 
 use std::fs::File;
 
@@ -711,6 +712,16 @@ extern "system" {
         group: u16) -> u32;
 }
 
+fn qpc_time() -> u64 {
+    let mut t = 0u64;
+
+    unsafe {
+        QueryPerformanceCounter(&mut t);
+    }
+
+    t
+}
+
 #[cfg(target_os = "windows")]
 impl ExportMachineOSHooks for ExportMachine {
     fn os_add_kernel_mappings_with(
@@ -796,13 +807,7 @@ impl ExportMachineOSHooks for ExportMachine {
     }
 
     fn os_qpc_time(&self) -> u64 {
-        let mut t = 0u64;
-
-        unsafe {
-            QueryPerformanceCounter(&mut t);
-        }
-
-        t
+        qpc_time()
     }
 
     fn os_qpc_freq(&self) -> u64 {
@@ -863,9 +868,34 @@ impl UniversalExporterOSHooks for UniversalExporter {
 
         session.capture_environment();
 
+        /* Hook the actual start time after captures, etc */
+        #[derive(Default)]
+        struct StartDetails {
+            date: DateTime<Utc>,
+            qpc: u64,
+        }
+
+        let start_qpc = Arc::new(Mutex::new(StartDetails::default()));
+        let event_start_qpc = start_qpc.clone();
+
+        session.add_starting_callback(move |_| {
+            if let Ok(mut result) = event_start_qpc.try_lock() {
+                result.date = Utc::now();
+                result.qpc = qpc_time();
+            }
+        });
+
+        /* Parse as normal */
         exporter.borrow_mut().mark_start();
         session.parse_until(name, until)?;
         exporter.borrow_mut().mark_end();
+
+        /* Attempt to update the actual start times via callback */
+        if let Ok(result) = start_qpc.try_lock() {
+            exporter.borrow_mut().mark_start_direct(
+                result.date,
+                result.qpc);
+        }
 
         self.run_parsed_hooks(&exporter)?;
 

@@ -562,8 +562,17 @@ impl ExportMachine {
     }
 
     pub fn mark_start(&mut self) {
-        self.start_date = Some(Utc::now());
-        self.start_qpc = Some(self.os_qpc_time());
+        self.mark_start_direct(
+            Utc::now(),
+            self.os_qpc_time());
+    }
+
+    pub fn mark_start_direct(
+        &mut self,
+        start_date: DateTime<Utc>,
+        start_qpc: u64) {
+        self.start_date = Some(start_date);
+        self.start_qpc = Some(start_qpc);
     }
 
     pub fn mark_end(&mut self) {
