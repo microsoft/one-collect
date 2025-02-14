@@ -25,8 +25,8 @@ and composable way.
 ## Getting started
 
 If you are simply interested in a common way to consume events and profiling via several different formats without major
-tweaks please use the [CLI](cli) tool directly. It can start event and profiling based sessions and save them into several
-different formats.
+tweaks please use the [record-trace](record-trace) tool directly. It can start event and profiling based sessions and save them
+into several different formats.
 
 If you are planning to integrate event or profiling data into your agent or process, please look at our [examples](one_collect/examples).
 You have a lot of options how you integrate this data, you can custom process data live via event closures. You can also
