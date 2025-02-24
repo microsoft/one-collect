@@ -96,6 +96,7 @@ const PROCESS_TRACE_MODE_REAL_TIME: u32 = 256;
 const PROCESS_TRACE_MODE_RAW_TIMESTAMP: u32 = 4096;
 const PROCESS_TRACE_MODE_EVENT_RECORD: u32 = 268435456;
 
+const EVENT_FILTER_TYPE_PID: u32 = 0x80000004;
 const EVENT_FILTER_TYPE_EVENT_ID: u32 = 0x80000200;
 const EVENT_FILTER_TYPE_STACKWALK: u32 = 0x80001000;
 
@@ -581,7 +582,7 @@ impl TraceEnable {
         }
     }
 
-    fn build_filter(
+    fn build_event_filter(
         ids: &Vec<u16>) -> Vec<u8> {
         let mut data = Vec::new();
 
@@ -626,21 +627,25 @@ impl TraceEnable {
 
     pub fn enable(
         &self,
-        handle: u64) -> anyhow::Result<()> {
+        handle: u64,
+        target_pids: &Option<Vec<i32>>) -> anyhow::Result<()> {
         let mut params = ENABLE_TRACE_PARAMETERS::default();
 
         if !self.no_filtering {
             let mut events = EVENT_FILTER_DESCRIPTOR::default();
-            let events_filter = Self::build_filter(&self.events);
+            let events_filter = Self::build_event_filter(&self.events);
             events.Type = EVENT_FILTER_TYPE_EVENT_ID;
             events.Filter = events_filter.as_ptr();
             events.Size = events_filter.len() as u32;
 
             let mut callstacks = EVENT_FILTER_DESCRIPTOR::default();
-            let callstacks_filter = Self::build_filter(&self.callstacks);
+            let callstacks_filter = Self::build_event_filter(&self.callstacks);
             callstacks.Type = EVENT_FILTER_TYPE_STACKWALK;
             callstacks.Filter = callstacks_filter.as_ptr();
             callstacks.Size = callstacks_filter.len() as u32;
+
+            let mut pids = EVENT_FILTER_DESCRIPTOR::default();
+            pids.Type = EVENT_FILTER_TYPE_PID;
 
             let mut filters = Vec::new();
 
@@ -654,6 +659,15 @@ impl TraceEnable {
                 }
 
                 params.EnableProperty |= EVENT_ENABLE_PROPERTY_STACK_TRACE;
+            }
+
+            if let Some(target_pids) = target_pids {
+                if target_pids.len() <= 8 {
+                    pids.Filter = target_pids.as_ptr() as *const u8;
+                    pids.Size = target_pids.len() as u32 * 4;
+
+                    filters.push(pids);
+                }
             }
 
             params.EnableProperty |= self.properties;

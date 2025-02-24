@@ -446,6 +446,7 @@ impl NetTraceWriter {
         /* Clear and update */
         self.event_block.clear();
         self.flush_time = end_time;
+        self.last_time = 0;
 
         Ok(())
     }
