@@ -430,18 +430,21 @@ impl EventFormat {
         None
     }
 
-    /// Retrieves the data associated with a given `EventFieldRef` within the provided data slice.
+    /// Retrieves the data associated with a given `EventFieldRef` within the provided data slice
+    /// and offset.
     ///
     /// # Parameters
     /// - `field_ref`: A reference to the `EventField` for which to retrieve the data.
     /// - `data`: The data slice from which to retrieve the field data.
+    /// - `offset`: The offset to use in addition to a static offset.
     ///
     /// # Returns
     /// - A slice of the provided data that corresponds to the requested `EventFieldRef`.
-    pub fn get_data<'a>(
+    pub fn get_data_with_offset<'a>(
             &self,
             field_ref: EventFieldRef,
-            data: &'a [u8]) -> &'a [u8] {
+            data: &'a [u8],
+            offset: usize) -> &'a [u8] {
         let index: usize = field_ref.into();
 
         if index >= self.fields.len() {
@@ -449,24 +452,25 @@ impl EventFormat {
         }
 
         let field = &self.fields[index];
+        let offset = field.offset + offset;
 
         match &field.location {
             LocationType::Static => {
-                let end = field.offset + field.size;
+                let end = offset + field.size;
 
                 if end > data.len() {
                     return EMPTY;
                 }
 
-                &data[field.offset .. end]
+                &data[offset .. end]
             },
 
             LocationType::StaticString => {
-                if field.offset > data.len() {
+                if offset > data.len() {
                     return EMPTY;
                 }
 
-                let slice = &data[field.offset..];
+                let slice = &data[offset..];
                 let mut len = 0usize;
                 
                 for b in slice {
@@ -481,11 +485,11 @@ impl EventFormat {
             },
 
             LocationType::StaticUTF16String => {
-                if field.offset > data.len() {
+                if offset > data.len() {
                     return EMPTY;
                 }
 
-                let slice = &data[field.offset..];
+                let slice = &data[offset..];
                 let chunks = slice.chunks_exact(2);
                 let mut len = 0usize;
 
@@ -508,6 +512,21 @@ impl EventFormat {
                 todo!("Need to support absolute location");
             },
         }
+    }
+
+    /// Retrieves the data associated with a given `EventFieldRef` within the provided data slice.
+    ///
+    /// # Parameters
+    /// - `field_ref`: A reference to the `EventField` for which to retrieve the data.
+    /// - `data`: The data slice from which to retrieve the field data.
+    ///
+    /// # Returns
+    /// - A slice of the provided data that corresponds to the requested `EventFieldRef`.
+    pub fn get_data<'a>(
+            &self,
+            field_ref: EventFieldRef,
+            data: &'a [u8]) -> &'a [u8] {
+        self.get_data_with_offset(field_ref, data, 0)
     }
 
     /// Retrieves the value of a specified field from the event data as a 64-bit unsigned integer.
