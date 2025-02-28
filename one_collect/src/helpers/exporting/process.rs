@@ -7,6 +7,7 @@ use ruwind::{CodeSection, Unwindable};
 use super::*;
 use super::os::OSExportProcess;
 use super::mappings::ExportMappingLookup;
+use super::symbols::*;
 
 #[derive(Clone, Copy)]
 pub enum MetricValue {
@@ -216,6 +217,7 @@ pub struct ExportProcess {
     anon_maps: bool,
     create_time_qpc: Option<u64>,
     exit_time_qpc: Option<u64>,
+    dyn_symbols: Vec<ExportTimeSymbol>,
 }
 
 pub trait ExportProcessOSHooks {
@@ -244,6 +246,7 @@ impl ExportProcess {
             anon_maps: false,
             create_time_qpc: None,
             exit_time_qpc: None,
+            dyn_symbols: Vec::new(),
         }
     }
 
@@ -289,6 +292,28 @@ impl ExportProcess {
         }
 
         self.mappings.mappings_mut().push(mapping);
+    }
+
+    pub fn needs_dynamic_symbol(
+        &self,
+        symbol: &DynamicSymbol,
+        callstacks: &InternedCallstacks) -> bool {
+        if symbol.has_flag(SYM_FLAG_MUST_MATCH) {
+            /* TODO Only needs the symbol if it matches IPs  */
+        }
+
+        true
+    }
+
+    pub fn add_dynamic_symbol(
+        &mut self,
+        symbol: ExportTimeSymbol) {
+        self.dyn_symbols.push(symbol);
+    }
+
+    pub fn add_dynamic_symbol_mappings(
+        &mut self) {
+        /* TODO: Need to find matching mappings or create them */
     }
 
     pub fn add_sample(

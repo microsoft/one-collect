@@ -1,6 +1,73 @@
 use std::{fs::File, io::{BufRead, BufReader, Seek, SeekFrom}};
 use ruwind::elf::{ElfSymbol, ElfSymbolIterator};
 
+use crate::helpers::exporting::ExportMachine;
+
+pub const SYM_FLAG_MUST_MATCH: u8 = 1 << 0;
+
+pub struct DynamicSymbol<'a> {
+    time: u64,
+    pid: u32,
+    start: u64,
+    end: u64,
+    name: &'a str,
+    flags: u8,
+}
+
+impl<'a> DynamicSymbol<'a> {
+    pub fn new(
+        time: u64,
+        pid: u32,
+        start: u64,
+        end: u64,
+        name: &'a str) -> Self {
+        Self {
+            time,
+            pid,
+            start,
+            end,
+            name,
+            flags: 0,
+        }
+    }
+
+    pub fn time(&self) -> u64 { self.time }
+
+    pub fn pid(&self) -> u32 { self.pid }
+
+    pub fn start(&self) -> u64 { self.start }
+
+    pub fn end(&self) -> u64 { self.end }
+
+    pub fn name(&self) -> &str { self.name }
+
+    pub fn flags(&self) -> u8 { self.flags }
+
+    pub fn set_flag(
+        &mut self,
+        flag: u8) {
+        self.flags |= flag;
+    }
+
+    pub fn has_flag(
+        &self,
+        flag: u8) -> bool {
+        self.flags & flag == flag
+    }
+
+    pub fn to_export_time_symbol(
+        &self,
+        machine: &mut ExportMachine) -> ExportTimeSymbol {
+        ExportTimeSymbol::new(
+            self.time,
+            ExportSymbol {
+                name_id: machine.strings.to_id(self.name),
+                start: self.start,
+                end: self.end,
+            })
+    }
+}
+
 #[derive(Clone)]
 pub struct ExportSymbol {
     name_id: usize,
@@ -25,6 +92,27 @@ impl ExportSymbol {
     pub fn start(&self) -> u64 { self.start }
 
     pub fn end(&self) -> u64 { self.end }
+}
+
+#[derive(Clone)]
+pub struct ExportTimeSymbol {
+    time: u64,
+    symbol: ExportSymbol,
+}
+
+impl ExportTimeSymbol {
+    pub fn new(
+        time: u64,
+        symbol: ExportSymbol) -> Self {
+        Self  {
+            time,
+            symbol,
+        }
+    }
+
+    pub fn time(&self) -> u64 { self.time }
+
+    pub fn symbol(&self) -> ExportSymbol { self.symbol.clone() }
 }
 
 pub trait ExportSymbolReader {

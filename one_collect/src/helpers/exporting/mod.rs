@@ -48,6 +48,7 @@ pub use symbols::{
     ExportSymbolReader,
     KernelSymbolReader,
     ExportSymbol,
+    DynamicSymbol,
 };
 
 pub mod process;
@@ -440,6 +441,10 @@ pub trait ExportMachineOSHooks {
         pid: u32,
         comm: &str) -> anyhow::Result<()>;
 
+    fn os_add_dynamic_symbol(
+        &mut self,
+        symbol: &DynamicSymbol) -> anyhow::Result<()>;
+
     fn os_qpc_time(&self) -> u64;
 
     fn os_qpc_freq(&self) -> u64;
@@ -664,6 +669,12 @@ impl ExportMachine {
         self.add_kernel_mappings_with(&mut kernel_symbols);
     }
 
+    pub fn add_dynamic_symbol(
+        &mut self,
+        symbol: &DynamicSymbol) -> anyhow::Result<()> {
+        self.os_add_dynamic_symbol(symbol)
+    }
+
     pub fn capture_file_symbol_metadata(&mut self) {
         self.os_capture_file_symbol_metadata();
     }
@@ -674,6 +685,11 @@ impl ExportMachine {
 
 
     pub fn resolve_local_anon_symbols(&mut self) {
+        /* Dynamic symbols need to be mapped before resolving */
+        for proc in self.procs.values_mut() {
+            proc.add_dynamic_symbol_mappings();
+        }
+
         self.os_resolve_local_anon_symbols();
     }
 
