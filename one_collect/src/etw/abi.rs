@@ -85,6 +85,7 @@ extern "system" {
 }
 
 const EVENT_TRACE_CONTROL_STOP: u32 = 1;
+const EVENT_TRACE_CONTROL_FLUSH: u32 = 3;
 
 const WNODE_FLAG_TRACED_GUID: u32 = 131072;
 
@@ -513,6 +514,7 @@ impl EVENT_RECORD {
 pub struct TraceEnable {
     provider: Guid,
     capture_environment: bool,
+    rundown: bool,
     no_filtering: bool,
     properties: u32,
     level: u8,
@@ -528,6 +530,7 @@ impl TraceEnable {
             provider,
             no_filtering: false,
             capture_environment: false,
+            rundown: false,
             properties: 0,
             level: 0,
             keyword: 0,
@@ -545,6 +548,10 @@ impl TraceEnable {
         &mut self) {
         self.capture_environment = true;
     }
+
+    pub fn needs_rundown(&self) -> bool { self.rundown }
+
+    pub fn ensure_rundown(&mut self) { self.rundown = true; }
 
     pub fn ensure_no_filtering(
         &mut self) {
@@ -587,10 +594,10 @@ impl TraceEnable {
         let mut data = Vec::new();
 
         /* Filter in */
-        data.push(1);
+        data.push(1u8);
 
         /* Reserved */
-        data.push(0);
+        data.push(0u8);
 
         /* Count */
         let count = ids.len() as u16;
@@ -649,7 +656,7 @@ impl TraceEnable {
 
             let mut filters = Vec::new();
 
-            if self.events.len() <= 64 {
+            if !self.events.is_empty() && self.events.len() <= 64 {
                 filters.push(events);
             }
 
@@ -692,6 +699,18 @@ impl TraceEnable {
         }
 
         Ok(())
+    }
+}
+
+pub(crate) fn flush_trace(handle: u64) {
+    let mut properties = EVENT_TRACE_PROPERTIES::default();
+
+    unsafe {
+        ControlTraceW(
+            handle,
+            std::ptr::null(),
+            &mut properties,
+            EVENT_TRACE_CONTROL_FLUSH);
     }
 }
 
