@@ -687,7 +687,7 @@ impl ExportMachine {
     pub fn resolve_local_anon_symbols(&mut self) {
         /* Dynamic symbols need to be mapped before resolving */
         for proc in self.procs.values_mut() {
-            proc.add_dynamic_symbol_mappings();
+            proc.add_dynamic_symbol_mappings(&mut self.map_index);
         }
 
         self.os_resolve_local_anon_symbols();
