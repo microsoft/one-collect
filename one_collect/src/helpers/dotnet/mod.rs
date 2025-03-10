@@ -1,6 +1,9 @@
 pub mod os;
 use os::OSDotNetHelper;
 
+use crate::Writable;
+use crate::helpers::exporting::DynamicSymbol;
+
 /* Make it easy for callers to use public OS extensions */
 #[cfg(target_os = "linux")]
 pub use os::linux::DotNetHelperLinuxExt;
@@ -10,13 +13,21 @@ pub use os::windows::DotNetHelperWindowsExt;
 
 pub struct DotNetHelper {
     pub(crate) os: OSDotNetHelper,
+    jit_symbol_hooks: Writable<Vec<Box<dyn FnMut(&DynamicSymbol)>>>,
 }
 
 impl DotNetHelper {
     pub fn new() -> Self {
         Self {
             os: OSDotNetHelper::new(),
+            jit_symbol_hooks: Writable::new(Vec::new()),
         }
+    }
+
+    fn add_jit_symbol_hook(
+        &mut self,
+        hook: impl FnMut(&DynamicSymbol) + 'static) {
+        self.jit_symbol_hooks.borrow_mut().push(Box::new(hook));
     }
 }
 

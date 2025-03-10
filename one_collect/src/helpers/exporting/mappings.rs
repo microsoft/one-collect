@@ -100,11 +100,15 @@ impl ExportMapping {
 
     pub fn time(&self) -> u64 { self.time }
 
+    pub fn time_mut(&mut self) -> &mut u64 { &mut self.time }
+
     pub fn filename_id(&self) -> usize { self.filename_id }
 
     pub fn start(&self) -> u64 { self.start }
 
     pub fn end(&self) -> u64 { self.end }
+
+    pub fn end_mut(&mut self) -> &mut u64 { &mut self.end }
 
     pub fn len(&self) -> u64 { self.end - self.start }
 
@@ -292,16 +296,17 @@ impl ExportMappingLookup {
         self.lookup.borrow_mut().update(&mut items);
     }
 
-    pub fn find(
+    pub fn find_index(
         &self,
         address: u64,
-        time: Option<u64>) -> Option<&ExportMapping> {
+        time: Option<u64>) -> Option<usize> {
         let time = match time {
             Some(time) => { time },
             None => { u64::MAX },
         };
 
         let mut best: Option<&ExportMapping> = None;
+        let mut best_index: usize = 0;
 
         if self.mappings.len() >= self.min_lookup {
             /* Many items, ensure a lookup and use it */
@@ -318,29 +323,50 @@ impl ExportMappingLookup {
                         Some(existing) => {
                             if map.time() > existing.time() {
                                 best = Some(map);
+                                best_index = *index as usize;
                             }
                         },
-                        None => { best = Some(map); },
+                        None => {
+                            best = Some(map);
+                            best_index = *index as usize;
+                        },
                     }
                 }
             }
         } else {
             /* Minimal items, no lookup, scan range */
-            for map in &self.mappings {
+            for (index, map) in self.mappings.iter().enumerate() {
                 if map.contains_ip(address) && map.time() <= time {
                     match best {
                         Some(existing) => {
                             if map.time() > existing.time() {
                                 best = Some(map);
+                                best_index = index;
                             }
                         },
-                        None => { best = Some(map); },
+                        None => {
+                            best = Some(map);
+                            best_index = index;
+                        },
                     }
                 }
             }
         }
 
-        best
+        match best {
+            Some(_) => { Some(best_index) },
+            None => { None },
+        }
+    }
+
+    pub fn find(
+        &self,
+        address: u64,
+        time: Option<u64>) -> Option<&ExportMapping> {
+        match self.find_index(address, time) {
+            Some(index) => { Some(&self.mappings[index]) },
+            None => { None },
+        }
     }
 }
 

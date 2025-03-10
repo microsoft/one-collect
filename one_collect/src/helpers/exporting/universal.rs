@@ -17,12 +17,14 @@ impl<'a> UniversalParsedContext<'a> {
 }
 
 type BoxedBuildCallback = Box<dyn FnMut(SessionBuilder, &mut UniversalBuildSessionContext) -> anyhow::Result<SessionBuilder>>;
+type BoxedExportCallback = Box<dyn FnMut(&Writable<ExportMachine>) -> anyhow::Result<()>>;
 type BoxedParsedCallback = Box<dyn FnMut(&mut UniversalParsedContext) -> anyhow::Result<()>>;
 type BoxedDropCallback = Box<dyn FnMut()>;
 
 pub struct UniversalExporter {
     settings: Option<ExportSettings>,
     build_hooks: Vec<BoxedBuildCallback>,
+    export_hooks: Vec<BoxedExportCallback>,
     parsed_hooks: Vec<BoxedParsedCallback>,
     drop_hooks: Vec<BoxedDropCallback>,
     cpu_buf_bytes: usize,
@@ -47,6 +49,7 @@ impl UniversalExporter {
         Self {
             settings: Some(settings),
             build_hooks: Vec::new(),
+            export_hooks: Vec::new(),
             parsed_hooks: Vec::new(),
             drop_hooks: Vec::new(),
             cpu_buf_bytes,
@@ -71,6 +74,13 @@ impl UniversalExporter {
         mut self,
         hook: impl FnMut(&mut UniversalParsedContext) -> anyhow::Result<()> + 'static) -> Self {
         self.parsed_hooks.push(Box::new(hook));
+        self
+    }
+
+    pub fn with_export_hook(
+        mut self,
+        hook: impl FnMut(&Writable<ExportMachine>) -> anyhow::Result<()> + 'static) -> Self {
+        self.export_hooks.push(Box::new(hook));
         self
     }
 
@@ -114,6 +124,16 @@ impl UniversalExporter {
         }
 
         Ok(builder)
+    }
+
+    pub(crate) fn run_export_hooks(
+        &mut self,
+        machine: &Writable<ExportMachine>) -> anyhow::Result<()> {
+        for hook in &mut self.export_hooks {
+            hook(machine)?;
+        }
+
+        Ok(())
     }
 
     pub(crate) fn run_parsed_hooks(

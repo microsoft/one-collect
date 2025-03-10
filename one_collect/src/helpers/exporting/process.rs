@@ -1,4 +1,5 @@
 use std::fs::File;
+use std::cell::OnceCell;
 
 use crate::intern::InternedCallstacks;
 
@@ -7,6 +8,7 @@ use ruwind::{CodeSection, Unwindable};
 use super::*;
 use super::os::OSExportProcess;
 use super::mappings::ExportMappingLookup;
+use super::symbols::*;
 
 #[derive(Clone, Copy)]
 pub enum MetricValue {
@@ -216,6 +218,8 @@ pub struct ExportProcess {
     anon_maps: bool,
     create_time_qpc: Option<u64>,
     exit_time_qpc: Option<u64>,
+    dyn_symbols: Vec<ExportTimeSymbol>,
+    user_page_map: OnceCell<SymbolPageMap>,
 }
 
 pub trait ExportProcessOSHooks {
@@ -244,6 +248,8 @@ impl ExportProcess {
             anon_maps: false,
             create_time_qpc: None,
             exit_time_qpc: None,
+            dyn_symbols: Vec::new(),
+            user_page_map: OnceCell::new(),
         }
     }
 
@@ -291,10 +297,139 @@ impl ExportProcess {
         self.mappings.mappings_mut().push(mapping);
     }
 
+    pub fn needs_dynamic_symbol(
+        &self,
+        symbol: &DynamicSymbol,
+        callstacks: &InternedCallstacks) -> bool {
+        if symbol.has_flag(SYM_FLAG_MUST_MATCH) {
+            /* Only build the map once until new samples come in */
+            let page_map = self.user_page_map.get_or_init(|| {
+                let mut page_map = SymbolPageMap::new(256);
+                let mut addrs = HashSet::new();
+                let mut frames = Vec::new();
+
+                Self::get_unique_user_ips(
+                    &self.samples,
+                    &mut addrs,
+                    &mut frames,
+                    callstacks,
+                    None);
+
+                for addr in addrs {
+                    page_map.mark_ip(addr);
+                }
+
+                page_map
+            });
+
+            /* Check map to determine if we need the symbol */
+            if !page_map.seen_range(symbol.start(), symbol.end()) {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    pub fn add_dynamic_symbol(
+        &mut self,
+        symbol: ExportTimeSymbol) {
+        self.dyn_symbols.push(symbol);
+    }
+
+    pub fn add_dynamic_symbol_mappings(
+        &mut self,
+        map_index: &mut usize) {
+        /* Sort by symbol address range */
+        self.dyn_symbols.sort_by(|a,b| {
+            b.symbol().start().cmp(&a.symbol().start())
+        });
+
+        /* We will add dynamic mappings at a page boundary of 4KB */
+        let mut dyn_mappings: Vec<ExportMapping> = Vec::new();
+        let page_mask: u64 = 0xFFFFFFFFFFFFF000;
+        let page_size: u64 = 4096;
+
+        /* Mutably drain without references */
+        while !self.dyn_symbols.is_empty() {
+            /* SAFETY: Checked non-empty already */
+            let dyn_symbol = self.dyn_symbols.pop().unwrap();
+            let time = dyn_symbol.time();
+            let symbol = dyn_symbol.symbol();
+
+            /* Link mappings */
+            match self.mappings.find_index(
+                symbol.start(),
+                Some(time)) {
+                Some(index) => {
+                    /* Already mapped region, simply add */
+                    self.mappings_mut()[index].add_symbol(symbol);
+                },
+                None => {
+                    /* Not found, check our in-progress maps */
+                    let mut found = false;
+
+                    for mapping in &mut dyn_mappings {
+                        if mapping.contains_ip(symbol.start()) {
+                            /* Update time and add symbol */
+                            if mapping.time() > time {
+                                *mapping.time_mut() = time;
+                            }
+
+                            /* Extend out to next page if needed */
+                            if mapping.end() < symbol.end() {
+                                let end = (symbol.end() & page_mask) + page_size - 1;
+
+                                *mapping.end_mut() = end;
+                            }
+
+                            mapping.add_symbol(symbol.clone());
+
+                            /* No more checking */
+                            found = true;
+                            break;
+                        }
+                    }
+
+                    /* Add a new mapping if needed */
+                    if !found {
+                        /* Start at page boundary */
+                        let start = symbol.start() & page_mask;
+
+                        /* Extend to end of page boundary */
+                        let end = (symbol.end() & page_mask) + page_size - 1;
+
+                        let mut mapping = ExportMapping::new(
+                            time,
+                            0,
+                            start,
+                            end,
+                            0,
+                            true,
+                            *map_index,
+                            UnwindType::Prolog);
+
+                        mapping.add_symbol(symbol.clone());
+
+                        dyn_mappings.push(mapping);
+
+                        *map_index += 1;
+                    }
+                }
+            }
+        }
+
+        /* Add any dynamic mappings */
+        self.mappings_mut().extend_from_slice(&dyn_mappings);
+    }
+
     pub fn add_sample(
         &mut self,
         sample: ExportProcessSample) {
         self.samples.push(sample);
+
+        /* Clear page map */
+        self.user_page_map = OnceCell::new();
     }
 
     pub fn set_comm_id(
@@ -885,5 +1020,85 @@ mod tests {
 
         /* Time: 12 + */
         assert!(replay.done());
+    }
+
+    fn time_symbol(
+        time: u64,
+        name_id: usize,
+        start: u64,
+        end: u64) -> ExportTimeSymbol {
+        ExportTimeSymbol::new(
+            time,
+            ExportSymbol::new(
+                name_id,
+                start,
+                end))
+    }
+
+    #[test]
+    fn add_dynamic_symbol_mappings() {
+        let mut proc = ExportProcess::new(1);
+
+        /* First page */
+        proc.add_dynamic_symbol(time_symbol(0, 0, 0, 1024));
+
+        /* Second page */
+        proc.add_dynamic_symbol(time_symbol(0, 1, 4096, 4097));
+        proc.add_dynamic_symbol(time_symbol(0, 2, 4098, 4099));
+        proc.add_dynamic_symbol(time_symbol(0, 3, 4100, 4101));
+
+        /* Third page */
+        proc.add_dynamic_symbol(time_symbol(0, 4, 8192, 8193));
+        proc.add_dynamic_symbol(time_symbol(0, 5, 8194, 8195));
+
+        let mut index = 0;
+        proc.add_dynamic_symbol_mappings(&mut index);
+
+        assert_eq!(3, proc.mappings().len());
+
+        /* First page */
+        let found = proc.find_mapping(256, None);
+        assert!(found.is_some());
+        let found = found.unwrap();
+        assert_eq!(0, found.start());
+        assert_eq!(4095, found.end());
+
+        assert_eq!(1, found.symbols().len());
+
+        /* Second page */
+        let found = proc.find_mapping(4097, None);
+        assert!(found.is_some());
+        let found = found.unwrap();
+        assert_eq!(4096, found.start());
+        assert_eq!(8191, found.end());
+
+        let found = proc.find_mapping(4098, None);
+        assert!(found.is_some());
+        let found = found.unwrap();
+        assert_eq!(4096, found.start());
+        assert_eq!(8191, found.end());
+
+        let found = proc.find_mapping(4100, None);
+        assert!(found.is_some());
+        let found = found.unwrap();
+        assert_eq!(4096, found.start());
+        assert_eq!(8191, found.end());
+
+        assert_eq!(3, found.symbols().len());
+
+        /* Third page */
+        let found = proc.find_mapping(8192, None);
+        assert!(found.is_some());
+        let found = found.unwrap();
+        assert_eq!(8192, found.start());
+        assert_eq!(12287, found.end());
+
+        let found = proc.find_mapping(8194, None);
+        assert!(found.is_some());
+        let found = found.unwrap();
+        assert_eq!(8192, found.start());
+        assert_eq!(12287, found.end());
+
+        assert_eq!(2, found.symbols().len());
     }
 }

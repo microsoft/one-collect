@@ -253,14 +253,18 @@ impl ProviderEvents {
 }
 
 pub struct SessionCallbackContext {
-    _handle: u64,
+    handle: u64,
 }
 
 impl SessionCallbackContext {
     fn new(handle: u64) -> Self {
         SessionCallbackContext {
-            _handle: handle,
+            handle,
         }
+    }
+
+    pub fn flush_trace(&self) {
+        abi::flush_trace(self.handle);
     }
 }
 
@@ -283,6 +287,7 @@ pub struct EtwSession {
     starting_callbacks: Option<Vec<SendClosure>>,
     started_callbacks: Option<Vec<SendClosure>>,
     stopping_callbacks: Option<Vec<SendClosure>>,
+    rundown_callbacks: Option<Vec<SendClosure>>,
     stopped_callbacks: Option<Vec<NoSendClosure>>,
 
     /* Ancillary data */
@@ -335,6 +340,7 @@ impl EtwSession {
             starting_callbacks: Some(Vec::new()),
             started_callbacks: Some(Vec::new()),
             stopping_callbacks: Some(Vec::new()),
+            rundown_callbacks: Some(Vec::new()),
             stopped_callbacks: Some(Vec::new()),
 
             /* Ancillary data */
@@ -402,6 +408,14 @@ impl EtwSession {
         }
     }
 
+    pub fn add_rundown_callback(
+        &mut self,
+        callback: impl Fn(&SessionCallbackContext) + Send + 'static) {
+        if let Some(callbacks) = self.rundown_callbacks.as_mut() {
+            callbacks.push(Box::new(callback));
+        }
+    }
+
     pub fn add_stopping_callback(
         &mut self,
         callback: impl Fn(&SessionCallbackContext) + Send + 'static) {
@@ -447,9 +461,14 @@ impl EtwSession {
         provider: Guid,
         lookup_provider: Option<Guid>,
         ensure_provider: impl FnOnce(&mut TraceEnable),
-        id: usize) -> &mut Vec<Event> {
+        id: usize,
+        callstacks: bool) -> &mut Vec<Event> {
         if provider != EMPTY_PROVIDER {
-            ensure_provider(self.enable_provider(provider));
+            let enabler = self.enable_provider(provider);
+
+            enabler.add_event(id as u16, callstacks);
+
+            ensure_provider(enabler);
         }
 
         let mut use_op_id = false;
@@ -493,6 +512,28 @@ impl EtwSession {
             event);
     }
 
+    pub fn add_rundown_event(
+        &mut self,
+        event: Event,
+        properties: Option<u32>) {
+        let provider = *event.extension().provider();
+        let level = event.extension().level();
+        let keyword = event.extension().keyword();
+
+        self.add_complex_event(
+            provider,
+            |provider| {
+                provider.ensure_rundown();
+                provider.ensure_level(level);
+                provider.ensure_keyword(keyword);
+
+                if let Some(properties) = properties {
+                    provider.ensure_property(properties);
+                }
+            },
+            event);
+    }
+
     pub fn add_complex_event(
         &mut self,
         provider: Guid,
@@ -505,11 +546,14 @@ impl EtwSession {
             lookup_provider = Some(actual_provider);
         }
 
+        let callstacks = !event.has_no_callstack_flag();
+
         let events = self.provider_events_mut(
             provider,
             lookup_provider,
             ensure_provider,
-            event.id());
+            event.id(),
+            callstacks);
 
         events.push(event);
     }
@@ -550,7 +594,8 @@ impl EtwSession {
             provider,
             lookup_provider,
             ensure_provider,
-            id);
+            id,
+            false);
 
         if events.is_empty() {
             events.push(default_event(id));
@@ -883,6 +928,7 @@ impl EtwSession {
 
         let starting_callbacks = self.starting_callbacks.take();
         let started_callbacks = self.started_callbacks.take();
+        let rundown_callbacks = self.rundown_callbacks.take();
         let stopping_callbacks = self.stopping_callbacks.take();
 
         let mut pid_lookup = HashSet::new();
@@ -917,7 +963,8 @@ impl EtwSession {
 
             /* Enable non-capture environments next */
             for enable in enabled.values() {
-                if !enable.needs_capture_environment() {
+                if !enable.needs_capture_environment() &&
+                   !enable.needs_rundown() {
                     let result = enable.enable(handle, &target_pids);
 
                     if result.is_err() {
@@ -941,13 +988,29 @@ impl EtwSession {
                 std::thread::sleep(quantum);
             }
 
-            /* Disable providers */
-            for enable in enabled.values() {
-                let _ = enable.disable(handle);
-            }
-
             /* Run stopping hooks */
             if let Some(callbacks) = stopping_callbacks {
+                for callback in callbacks {
+                    callback(&context);
+                }
+            }
+
+            /* Enable rundown providers first */
+            for enable in enabled.values() {
+                if enable.needs_rundown() {
+                    let _ = enable.enable(handle, &target_pids);
+                }
+            }
+
+            /* Disable non-rundown providers last */
+            for enable in enabled.values() {
+                if !enable.needs_rundown() {
+                    let _ = enable.disable(handle);
+                }
+            }
+
+            /* Run rundown hooks */
+            if let Some(callbacks) = rundown_callbacks {
                 for callback in callbacks {
                     callback(&context);
                 }

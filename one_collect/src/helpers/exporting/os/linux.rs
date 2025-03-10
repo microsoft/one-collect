@@ -1245,6 +1245,22 @@ impl ExportMachineOSHooks for ExportMachine {
         }
     }
 
+    fn os_add_dynamic_symbol(
+        &mut self,
+        symbol: &DynamicSymbol) -> anyhow::Result<()> {
+        let pid = symbol.pid();
+
+        if let Some(proc) = self.find_process(pid) {
+            if proc.needs_dynamic_symbol(symbol, &self.callstacks) {
+                let symbol = symbol.to_export_time_symbol(self);
+
+                self.process_mut(pid).add_dynamic_symbol(symbol);
+            }
+        }
+
+        Ok(())
+    }
+
     fn os_add_mmap_exec(
         &mut self,
         pid: u32,
@@ -1416,6 +1432,8 @@ impl UniversalExporterOSHooks for UniversalExporter {
         let mut session = builder.build()?;
 
         let exporter = session.build_exporter(settings)?;
+
+        self.run_export_hooks(&exporter)?;
 
         session.capture_environment();
 

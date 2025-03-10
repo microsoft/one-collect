@@ -1,5 +1,120 @@
 use std::{fs::File, io::{BufRead, BufReader, Seek, SeekFrom}};
+use std::collections::HashSet;
 use ruwind::elf::{ElfSymbol, ElfSymbolIterator};
+
+use crate::helpers::exporting::ExportMachine;
+
+pub const SYM_FLAG_MUST_MATCH: u8 = 1 << 0;
+
+pub struct SymbolPageMap {
+    pages: HashSet<u64>,
+    page_size: u64,
+    page_mask: u64,
+}
+
+impl SymbolPageMap {
+    pub fn new(page_size: u64) -> Self {
+        Self {
+            pages: HashSet::new(),
+            page_size,
+
+            /* Mask out lower page bits */
+            page_mask: !(page_size.next_power_of_two() - 1),
+        }
+    }
+
+    pub fn mark_ip(
+        &mut self,
+        ip: u64) {
+        /* Find page high bit */
+        let page = ip & self.page_mask;
+
+        /* Insert high bit */
+        self.pages.insert(page);
+    }
+
+    pub fn seen_range(
+        &self,
+        start: u64,
+        end: u64) -> bool {
+        /* Find any page high bits */
+        let mut page = start & self.page_mask;
+        let end_page = end & self.page_mask;
+
+        while page <= end_page {
+            if self.pages.contains(&page) {
+                return true;
+            }
+
+            page += self.page_size;
+        }
+
+        false
+    }
+}
+
+pub struct DynamicSymbol<'a> {
+    time: u64,
+    pid: u32,
+    start: u64,
+    end: u64,
+    name: &'a str,
+    flags: u8,
+}
+
+impl<'a> DynamicSymbol<'a> {
+    pub fn new(
+        time: u64,
+        pid: u32,
+        start: u64,
+        end: u64,
+        name: &'a str) -> Self {
+        Self {
+            time,
+            pid,
+            start,
+            end,
+            name,
+            flags: 0,
+        }
+    }
+
+    pub fn time(&self) -> u64 { self.time }
+
+    pub fn pid(&self) -> u32 { self.pid }
+
+    pub fn start(&self) -> u64 { self.start }
+
+    pub fn end(&self) -> u64 { self.end }
+
+    pub fn name(&self) -> &str { self.name }
+
+    pub fn flags(&self) -> u8 { self.flags }
+
+    pub fn set_flag(
+        &mut self,
+        flag: u8) {
+        self.flags |= flag;
+    }
+
+    pub fn has_flag(
+        &self,
+        flag: u8) -> bool {
+        self.flags & flag == flag
+    }
+
+    pub fn to_export_time_symbol(
+        &self,
+        machine: &mut ExportMachine) -> ExportTimeSymbol {
+        ExportTimeSymbol::new(
+            self.time,
+            ExportSymbol {
+                name_id: machine.strings.to_id(self.name),
+                start: self.start,
+                end: self.end,
+            })
+    }
+}
 
 #[derive(Clone)]
 pub struct ExportSymbol {
@@ -25,6 +140,27 @@ impl ExportSymbol {
     pub fn start(&self) -> u64 { self.start }
 
     pub fn end(&self) -> u64 { self.end }
+}
+
+#[derive(Clone)]
+pub struct ExportTimeSymbol {
+    time: u64,
+    symbol: ExportSymbol,
+}
+
+impl ExportTimeSymbol {
+    pub fn new(
+        time: u64,
+        symbol: ExportSymbol) -> Self {
+        Self  {
+            time,
+            symbol,
+        }
+    }
+
+    pub fn time(&self) -> u64 { self.time }
+
+    pub fn symbol(&self) -> ExportSymbol { self.symbol.clone() }
 }
 
 pub trait ExportSymbolReader {
@@ -789,5 +925,22 @@ mod tests {
         else {
             assert!(false, "Unable to open file {}", path);
         }
+    }
+
+    #[test]
+    fn symbol_page_map() {
+        let mut map = SymbolPageMap::new(256);
+
+        map.mark_ip(0);
+        map.mark_ip(257);
+        map.mark_ip(1024);
+
+        assert!(map.seen_range(0, 256));
+        assert!(map.seen_range(257, 257));
+        assert!(map.seen_range(511, 511));
+        assert!(!map.seen_range(512, 1023));
+        assert!(map.seen_range(1024, 4096));
+        assert!(map.seen_range(1279, 1279));
+        assert!(!map.seen_range(1280, 4096));
     }
 }
