@@ -1,12 +1,13 @@
 use std::io::{Result, Error, BufRead, BufReader, ErrorKind, Write};
 use std::path::PathBuf;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 
 use crate::event::*;
+use crate::user_events::UserEventsFactory;
 
 /// Struct representing the trace file system.
 pub struct TraceFS {
-    root: String,
+    root: String
 }
 
 impl TraceFS {
@@ -55,7 +56,7 @@ impl TraceFS {
         let _ = std::fs::metadata(format!("{}/README", path))?;
 
         let tracefs = Self {
-            root: path.into(),
+            root: path.into()
         };
 
         Ok(tracefs)
@@ -400,6 +401,19 @@ impl TraceFS {
             file,
             address,
             fetch_args)
+    }
+
+    pub fn user_events_factory(&self) -> Result<UserEventsFactory> {
+        let mut path_buf = PathBuf::new();
+
+        path_buf.push(&self.root);
+        path_buf.push("user_events_data");
+
+        let file = OpenOptions::new()
+            .write(true)
+            .open(path_buf)?;
+
+        Ok(UserEventsFactory::new(file))
     }
 }
 

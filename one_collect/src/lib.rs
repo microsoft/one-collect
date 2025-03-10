@@ -11,6 +11,8 @@ pub mod procfs;
 pub mod perf_event;
 #[cfg(any(doc, target_os = "linux"))]
 pub mod openat;
+#[cfg(any(doc, target_os = "linux"))]
+pub mod user_events;
 
 #[cfg(any(doc, target_os = "windows"))]
 pub mod etw;
