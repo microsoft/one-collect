@@ -1102,6 +1102,8 @@ impl OSExportMachine {
 
     fn load_elf_metadata(
         machine: &mut ExportMachine) {
+        let mut package_buf = Vec::new();
+
         for proc in machine.procs.values() {
             for map in proc.mappings() {
                 if let Some(key) = map.node() {
@@ -1137,6 +1139,12 @@ impl OSExportMachine {
                                     let mut build_id: [u8; 20] = [0; 20];
                                     if let Ok(id) = read_build_id(&mut reader, &sections, &section_offsets, &mut build_id) {
                                         elf_metadata.set_build_id(id);
+                                    }
+
+                                    if read_package_metadata(&mut reader, &sections, &section_offsets, &mut package_buf).is_ok() {
+                                        if let Ok(metadata) = std::str::from_utf8(&package_buf) {
+                                            elf_metadata.set_version_metadata(metadata, &mut machine.strings);
+                                        }
                                     }
 
                                     sections.clear();

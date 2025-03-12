@@ -12,6 +12,7 @@ pub enum ModuleMetadata {
 pub struct ElfModuleMetadata {
     build_id: Option<[u8; 20]>,
     debug_link_id: usize,
+    version_metadata_id: usize,
 }
 
 impl ElfModuleMetadata {
@@ -19,6 +20,7 @@ impl ElfModuleMetadata {
         Self {
             build_id: None,
             debug_link_id: 0,
+            version_metadata_id: 0,
         }
     }
 
@@ -51,6 +53,17 @@ impl ElfModuleMetadata {
             Some(link) => { self.debug_link_id = strings.to_id(link.as_str()) },
             None => { self.debug_link_id = 0 }
         }
+    }
+
+    pub fn version_metadata_id(&self) -> usize {
+        self.version_metadata_id
+    }
+
+    pub fn set_version_metadata(
+        &mut self,
+        metadata: &str,
+        strings: &mut InternedStrings) {
+        self.version_metadata_id = strings.to_id(metadata);
     }
 }
 

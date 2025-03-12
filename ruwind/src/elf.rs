@@ -617,6 +617,26 @@ pub fn get_build_id<'a>(
     read_build_id(reader, &sections, &section_offsets, buf)
 }
 
+fn seek_to_note_data(
+    reader: &mut (impl Read + Seek),
+    section: &SectionMetadata) -> Result<usize, Error> {
+    reader.seek(SeekFrom::Start(section.offset))?;
+
+    let mut buf: [u8; 4] = [0; 4];
+    reader.read_exact(&mut buf[0..])?;
+    let name_len = u32::from_ne_bytes(buf[0..4].try_into().unwrap());
+    reader.read_exact(&mut buf[0..])?;
+    let desc_len = u32::from_ne_bytes(buf[0..4].try_into().unwrap());
+
+    /* Align to 4 bytes */
+    let name_len = (name_len + 3) & !3;
+
+    /* Skip over n_type field (4 bytes) and name */
+    reader.seek(SeekFrom::Current((4 + name_len).into()))?;
+
+    Ok(desc_len as usize)
+}
+
 pub fn read_build_id<'a>(
     reader: &mut (impl Read + Seek),
     sections: &Vec<SectionMetadata>,
@@ -627,7 +647,7 @@ pub fn read_build_id<'a>(
         let mut name_buf: [u8; 1024] = [0; 1024];
         if let Ok(name) = read_section_name(reader, section, section_offsets, &mut name_buf) {
             if name == ".note.gnu.build-id" {
-                reader.seek(SeekFrom::Start(section.offset + 16))?; // TODO: Document why +16?
+                let _len = seek_to_note_data(reader, section)?;
                 reader.read(&mut buf[0..])?;
                 return Ok(Some(buf));
             }
@@ -641,6 +661,31 @@ pub fn build_id_equals(
     left: &[u8; 20],
     right: &[u8; 20]) -> bool {
     left == right
+}
+
+pub fn read_package_metadata(
+    reader: &mut (impl Read + Seek),
+    sections: &Vec<SectionMetadata>,
+    section_offsets: &Vec<u64>,
+    buf: &mut Vec<u8>) -> Result<(), Error> {
+
+    for section in sections {
+        let mut name_buf: [u8; 1024] = [0; 1024];
+        if let Ok(name) = read_section_name(reader, section, section_offsets, &mut name_buf) {
+            if name == ".note.package" {
+                let len = seek_to_note_data(reader, section)?;
+
+                buf.clear();
+                buf.resize(len, 0);
+
+                return reader.read_exact(&mut buf[0..]);
+            }
+        }
+    }
+
+    Err(Error::new(
+        std::io::ErrorKind::Other,
+        "No metadata found"))
 }
 
 pub fn read_debug_link<'a>(
