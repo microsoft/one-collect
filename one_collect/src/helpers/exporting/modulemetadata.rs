@@ -9,6 +9,38 @@ pub enum ModuleMetadata {
     PE(PEModuleMetadata),
 }
 
+impl ModuleMetadata {
+    pub fn to_symbol_metadata(
+        &self,
+        strings: &InternedStrings,
+        out: &mut String) {
+        match self {
+            ModuleMetadata::Elf(elf) => {
+                elf.to_symbol_metadata(strings, out);
+            },
+
+            ModuleMetadata::PE(pe) => {
+                pe.to_symbol_metadata(strings, out);
+            }
+        }
+    }
+
+    pub fn to_version_metadata(
+        &self,
+        strings: &InternedStrings,
+        out: &mut String) {
+        match self {
+            ModuleMetadata::Elf(elf) => {
+                elf.to_version_metadata(strings, out);
+            },
+
+            ModuleMetadata::PE(pe) => {
+                pe.to_version_metadata(strings, out);
+            }
+        }
+    }
+}
+
 pub struct ElfModuleMetadata {
     build_id: Option<[u8; 20]>,
     debug_link_id: usize,

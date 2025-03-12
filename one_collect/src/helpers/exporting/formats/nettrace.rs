@@ -54,9 +54,14 @@ const FILE_NAME_FIELD: NetTraceField = NetTraceField {
     name: "FileName",
 };
 
-const SYMBOL_INDEX_FIELD: NetTraceField = NetTraceField {
+const SYMBOL_META_FIELD: NetTraceField = NetTraceField {
     type_id: TYPE_ID_STRING,
-    name: "SymbolIndex",
+    name: "SymbolMetadata",
+};
+
+const VERSION_META_FIELD: NetTraceField = NetTraceField {
+    type_id: TYPE_ID_STRING,
+    name: "VersionMetadata",
 };
 
 const PROCESS_ID_FIELD: NetTraceField = NetTraceField {
@@ -102,14 +107,15 @@ const PROCESS_CREATE_FIELDS: [NetTraceField; 4] = [
 
 const PROCESS_EXIT_FIELDS: [NetTraceField; 1] = [PROCESS_ID_FIELD];
 
-const PROCESS_MAPPING_FIELDS: [NetTraceField; 7] = [
+const PROCESS_MAPPING_FIELDS: [NetTraceField; 8] = [
     ID_FIELD,
     PROCESS_ID_FIELD,
     START_ADDRESS_FIELD,
     END_ADDRESS_FIELD,
     FILE_OFFSET_FIELD,
     FILE_NAME_FIELD,
-    SYMBOL_INDEX_FIELD,
+    SYMBOL_META_FIELD,
+    VERSION_META_FIELD,
 ];
 
 const PROCESS_SYMBOL_FIELDS: [NetTraceField; 5] = [
@@ -203,7 +209,7 @@ struct NetTraceWriter {
     last_time: u64,
     sync_time: u64,
     flush_time: u64,
-    name_buffer: String,
+    str_buffer: String,
     sym_id: u32,
     saved_callstacks: HashMap<SavedCallstackKey, u32>,
 }
@@ -222,7 +228,7 @@ impl NetTraceWriter {
             last_time: 0,
             sync_time: 0,
             flush_time: 0,
-            name_buffer: String::new(),
+            str_buffer: String::new(),
             sym_id: 0,
             saved_callstacks: HashMap::new(),
         };
@@ -576,58 +582,6 @@ impl NetTraceWriter {
             Err(_) => { "Unknown" },
         };
 
-        let sym_index = match machine.get_mapping_metadata(mapping) {
-            Some(metadata) => {
-                use std::fmt::Write;
-
-                self.name_buffer.clear();
-
-                match metadata {
-                    ModuleMetadata::Elf(elf) => {
-                        self.name_buffer.push_str("elf:");
-
-                        if let Some(build_id) = elf.build_id() {
-                            for b in build_id {
-                                write!(self.name_buffer, "{:02x}", b)?;
-                            }
-                        }
-
-                        self.name_buffer.push_str(":");
-
-                        if let Some(debug_link) = elf.debug_link(machine.strings()) {
-                            self.name_buffer.push_str(debug_link);
-                        }
-                    },
-
-                    ModuleMetadata::PE(pe) => {
-                        self.name_buffer.push_str("pe:");
-
-                        if let Some(name) = pe.symbol_name(machine.strings()) {
-                            self.name_buffer.push_str(name);
-                        }
-
-                        self.name_buffer.push_str(":");
-                        write!(self.name_buffer, "{}", pe.symbol_age())?;
-
-                        self.name_buffer.push_str(":");
-                        for b in pe.symbol_sig() {
-                            write!(self.name_buffer, "{:02x}", b)?;
-                        }
-
-                        self.name_buffer.push_str(":");
-
-                        if let Some(version) = pe.version_name(machine.strings()) {
-                            self.name_buffer.push_str(version);
-                        }
-                    },
-                }
-
-                &self.name_buffer
-            },
-
-            None => { "" },
-        };
-
         self.buffer.clear();
         self.buffer.write_u32(mapping.id() as u32)?;
         self.buffer.write_u32(process.pid())?;
@@ -635,7 +589,24 @@ impl NetTraceWriter {
         self.buffer.write_u64(mapping.end())?;
         self.buffer.write_u64(mapping.file_offset())?;
         self.buffer.write_unicode_with_null(name)?;
-        self.buffer.write_unicode_with_null(sym_index)?;
+
+        /* Symbol details */
+        self.str_buffer.clear();
+
+        if let Some(metadata) = machine.get_mapping_metadata(mapping) {
+            metadata.to_symbol_metadata(machine.strings(), &mut self.str_buffer);
+        }
+
+        self.buffer.write_unicode_with_null(&self.str_buffer)?;
+
+        /* Version details */
+        self.str_buffer.clear();
+
+        if let Some(metadata) = machine.get_mapping_metadata(mapping) {
+            metadata.to_version_metadata(machine.strings(), &mut self.str_buffer);
+        }
+
+        self.buffer.write_unicode_with_null(&self.str_buffer)?;
 
         self.write_event_blob_from_buffer(
             machine,
