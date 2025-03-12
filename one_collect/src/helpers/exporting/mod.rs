@@ -458,8 +458,11 @@ const NO_FRAMES: [u64; 1] = [0; 1];
 
 impl ExportMachine {
     pub fn new(settings: ExportSettings) -> Self {
-        let strings = InternedStrings::new(settings.string_buckets);
+        let mut strings = InternedStrings::new(settings.string_buckets);
         let callstacks = InternedCallstacks::new(settings.callstack_buckets);
+
+        /* Ensure string ID 0 is always empty */
+        strings.to_id("");
 
         Self {
             settings,
