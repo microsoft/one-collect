@@ -41,6 +41,66 @@ impl PEModuleMetadata {
         }
     }
 
+    pub fn to_symbol_metadata(
+        &self,
+        strings: &InternedStrings,
+        out: &mut String) {
+        out.clear();
+        out.push_str("{");
+        out.push_str("\"type\": \"PE\",");
+
+        if let Ok(symbol_name) = strings.from_id(self.symbol_name_id) {
+            out.push_str("\"name\": \"");
+            out.push_str(symbol_name);
+            out.push_str("\",");
+        }
+
+        out.push_str(&format!("\"date_time\": {},", self.date_time));
+        out.push_str(&format!("\"age\": {},", self.symbol_age));
+        out.push_str("\"signature\": \"");
+        for b in self.symbol_sig {
+            out.push_str(&format!("{:02x}", b));
+        }
+        out.push_str("\",");
+
+        out.push_str("\"perfmap_signature\": \"");
+        for b in self.perfmap_sig {
+            out.push_str(&format!("{:02x}", b));
+        }
+        out.push_str("\",");
+
+        out.push_str(&format!("\"perfmap_version\": {},", self.perfmap_version));
+
+        if let Ok(perfmap_name) = strings.from_id(self.perfmap_name_id) {
+            out.push_str("\"perfmap_name\": \"");
+            out.push_str(perfmap_name);
+            out.push_str("\",");
+        }
+
+        /* Remove trailing comma if it exists */
+        if out.ends_with(',') {
+            out.pop();
+        }
+
+        out.push_str("}");
+    }
+
+    pub fn to_version_metadata(
+        &self,
+        strings: &InternedStrings,
+        out: &mut String) {
+        out.clear();
+        out.push_str("{");
+
+        if let Ok(version_name) = strings.from_id(self.version_name_id) {
+            out.push_str("\"version\": \"");
+            out.push_str(version_name);
+            out.push_str("\"");
+        }
+
+        out.push_str("}");
+    }
+
     pub fn get_metadata(
         &mut self,
         path: &str,
@@ -773,5 +833,58 @@ mod tests {
             let mut f = File::open(&ntdll_path).unwrap();
             get_pe_info(&mut f, &mut m, &mut strings).unwrap();
         }
+    }
+
+    #[test]
+    fn to_symbol_metadata() {
+        let mut strings = InternedStrings::new(8);
+        let mut m = PEModuleMetadata::default();
+
+        m.symbol_name_id = strings.to_id("symbol_name");
+        m.date_time = 1;
+        m.symbol_age = 2;
+        m.symbol_sig = [3; 16];
+        m.perfmap_sig = [4; 16];
+        m.perfmap_version = 5;
+        m.perfmap_name_id = strings.to_id("perfmap_name");
+
+        let mut out = String::new();
+
+        m.to_symbol_metadata(&strings, &mut out);
+
+        let mut expected = String::new();
+
+        expected.push_str("{");
+        expected.push_str("\"type\": \"PE\",");
+        expected.push_str("\"name\": \"symbol_name\",");
+        expected.push_str("\"date_time\": 1,");
+        expected.push_str("\"age\": 2,");
+        expected.push_str("\"signature\": \"03030303030303030303030303030303\",");
+        expected.push_str("\"perfmap_signature\": \"04040404040404040404040404040404\",");
+        expected.push_str("\"perfmap_version\": 5,");
+        expected.push_str("\"perfmap_name\": \"perfmap_name\"");
+        expected.push_str("}");
+
+        assert_eq!(expected, out);
+    }
+
+    #[test]
+    fn to_version_metadata() {
+        let mut strings = InternedStrings::new(8);
+        let mut m = PEModuleMetadata::default();
+
+        m.version_name_id = strings.to_id("version_name");
+
+        let mut out = String::new();
+
+        m.to_version_metadata(&strings, &mut out);
+
+        let mut expected = String::new();
+
+        expected.push_str("{");
+        expected.push_str("\"version\": \"version_name\"");
+        expected.push_str("}");
+
+        assert_eq!(expected, out);
     }
 }

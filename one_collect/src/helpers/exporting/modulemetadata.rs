@@ -9,9 +9,42 @@ pub enum ModuleMetadata {
     PE(PEModuleMetadata),
 }
 
+impl ModuleMetadata {
+    pub fn to_symbol_metadata(
+        &self,
+        strings: &InternedStrings,
+        out: &mut String) {
+        match self {
+            ModuleMetadata::Elf(elf) => {
+                elf.to_symbol_metadata(strings, out);
+            },
+
+            ModuleMetadata::PE(pe) => {
+                pe.to_symbol_metadata(strings, out);
+            }
+        }
+    }
+
+    pub fn to_version_metadata(
+        &self,
+        strings: &InternedStrings,
+        out: &mut String) {
+        match self {
+            ModuleMetadata::Elf(elf) => {
+                elf.to_version_metadata(strings, out);
+            },
+
+            ModuleMetadata::PE(pe) => {
+                pe.to_version_metadata(strings, out);
+            }
+        }
+    }
+}
+
 pub struct ElfModuleMetadata {
     build_id: Option<[u8; 20]>,
     debug_link_id: usize,
+    version_metadata_id: usize,
 }
 
 impl ElfModuleMetadata {
@@ -19,6 +52,50 @@ impl ElfModuleMetadata {
         Self {
             build_id: None,
             debug_link_id: 0,
+            version_metadata_id: 0,
+        }
+    }
+
+    pub fn to_symbol_metadata(
+        &self,
+        strings: &InternedStrings,
+        out: &mut String) {
+        out.clear();
+        out.push_str("{");
+        out.push_str("\"type\": \"ELF\",");
+
+        if let Ok(debug_link) = strings.from_id(self.debug_link_id) {
+            out.push_str("\"debug_link\": \"");
+            out.push_str(debug_link);
+            out.push_str("\",");
+        }
+
+        if let Some(build_id) = self.build_id {
+            out.push_str("\"build_id\": \"");
+            for b in build_id {
+                out.push_str(&format!("{:02x}", b));
+            }
+            out.push_str("\",");
+        }
+
+        /* Remove trailing comma if it exists */
+        if out.ends_with(',') {
+            out.pop();
+        }
+
+        out.push_str("}");
+    }
+
+    pub fn to_version_metadata(
+        &self,
+        strings: &InternedStrings,
+        out: &mut String) {
+        out.clear();
+
+        if let Ok(version_metadata) = strings.from_id(self.version_metadata_id) {
+            out.push_str(version_metadata);
+        } else {
+            out.push_str("{}");
         }
     }
 
@@ -51,6 +128,17 @@ impl ElfModuleMetadata {
             Some(link) => { self.debug_link_id = strings.to_id(link.as_str()) },
             None => { self.debug_link_id = 0 }
         }
+    }
+
+    pub fn version_metadata_id(&self) -> usize {
+        self.version_metadata_id
+    }
+
+    pub fn set_version_metadata(
+        &mut self,
+        metadata: &str,
+        strings: &mut InternedStrings) {
+        self.version_metadata_id = strings.to_id(metadata);
     }
 }
 
@@ -121,5 +209,44 @@ mod tests {
         let dev_node_2 = ExportDevNode::new(2, 3);
         assert!(!metadata_lookup.contains(&dev_node_2));
         assert!(metadata_lookup.contains(&dev_node_1));
+    }
+
+    #[test]
+    fn to_symbol_metadata() {
+        let mut strings = InternedStrings::new(8);
+        let mut m = ElfModuleMetadata::new();
+
+        m.build_id = Some([1; 20]);
+        m.debug_link_id = strings.to_id("debug_link");
+
+        let mut out = String::new();
+
+        m.to_symbol_metadata(&strings, &mut out);
+
+        let mut expected = String::new();
+
+        expected.push_str("{");
+        expected.push_str("\"type\": \"ELF\",");
+        expected.push_str("\"debug_link\": \"debug_link\",");
+        expected.push_str("\"build_id\": \"0101010101010101010101010101010101010101\"");
+        expected.push_str("}");
+
+        assert_eq!(expected, out);
+    }
+
+    #[test]
+    fn to_version_metadata() {
+        let mut strings = InternedStrings::new(8);
+        let mut m = ElfModuleMetadata::new();
+
+        let version = "{\"version\": \"1\"}";
+
+        m.version_metadata_id = strings.to_id(version);
+
+        let mut out = String::new();
+
+        m.to_version_metadata(&strings, &mut out);
+
+        assert_eq!(version, out);
     }
 }
