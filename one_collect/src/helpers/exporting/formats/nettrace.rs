@@ -20,14 +20,20 @@ struct SavedCallstackKey {
     write_id: u32,
 }
 
+#[derive(Eq, Hash, PartialEq)]
+struct SavedPidTidKey {
+    pid: u32,
+    tid: u32,
+}
+
 struct NetTraceField {
-    type_id: u32,
+    type_id: u8,
     name: &'static str,
 }
 
-const TYPE_ID_UINT32: u32 = 10;
-const TYPE_ID_UINT64: u32 = 12;
-const TYPE_ID_STRING: u32 = 18;
+const TYPE_ID_UINT32: u8 = 10;
+const TYPE_ID_UINT64: u8 = 12;
+const TYPE_ID_STRING: u8 = 18;
 
 const VALUE_FIELD: NetTraceField = NetTraceField {
     type_id: TYPE_ID_UINT64,
@@ -159,8 +165,27 @@ trait EventPayloadWriter {
         &mut self,
         value: &str) -> anyhow::Result<()> {
         let bytes = value.as_bytes();
-        self.write_u32(value.len() as u32)?;
+        self.write_varint(value.len() as u64)?;
         self.write_bytes(bytes)
+    }
+
+    fn size_utf8(
+        &self,
+        value: &str) -> usize {
+        value.as_bytes().len() + self.size_varint(value.len() as u64)
+    }
+
+    fn size_varint(
+        &self,
+        mut value: u64) -> usize {
+        let mut size = 1usize;
+
+        while value >= 128 {
+            size += 1;
+            value >>= 7;
+        }
+
+        size
     }
 
     fn write_unicode_with_null(
@@ -212,6 +237,7 @@ struct NetTraceWriter {
     str_buffer: String,
     sym_id: u32,
     saved_callstacks: HashMap<SavedCallstackKey, u32>,
+    saved_pid_tids: HashMap<SavedPidTidKey, u32>,
 }
 
 impl NetTraceWriter {
@@ -231,6 +257,7 @@ impl NetTraceWriter {
             str_buffer: String::new(),
             sym_id: 0,
             saved_callstacks: HashMap::new(),
+            saved_pid_tids: HashMap::new(),
         };
 
         trace.init()?;
@@ -245,26 +272,7 @@ impl NetTraceWriter {
 
     fn reserve_u32(&mut self) -> anyhow::Result<u64> {
         self.output.write_u32(0)?;
-
         self.get_pos()
-    }
-
-    fn align_to_u32(&mut self) -> anyhow::Result<u64> {
-        let pos = self.get_pos()?;
-        let align = pos & 3;
-
-        /* Already aligned */
-        if align == 0 {
-            return Ok(0);
-        }
-
-        let padding = 4 - align;
-
-        for _ in 0..padding {
-            self.output.write_u8(0)?;
-        }
-
-        Ok(padding)
     }
 
     fn update_u32(
@@ -278,44 +286,17 @@ impl NetTraceWriter {
         Ok(())
     }
 
-    fn reserve_object_size(&mut self) -> anyhow::Result<(u64, u64)> {
-        let loc = self.reserve_u32()?;
-        let pad = self.align_to_u32()?;
-
-        Ok((loc, pad))
+    fn write_start_block(&mut self) -> anyhow::Result<u64> {
+        self.reserve_u32()
     }
 
-    fn update_object_size(
+    fn write_end_block(
         &mut self,
-        loc: u64,
-        pad: u64) -> anyhow::Result<()> {
-        let total_size = self.get_pos()? - loc - pad;
-        self.update_u32(total_size as u32, loc)
-    }
-
-    fn write_start_object(
-        &mut self,
-        version: u32,
-        min_version: u32,
-        name: &str) -> anyhow::Result<()> {
-        self.write_tag(5)?; /* BeginObj: Root */
-        self.write_tag(5)?; /* BeginObj: Type */
-        self.write_tag(1)?; /* NullRef */
-        self.output.write_u32(version)?; /* Version */
-        self.output.write_u32(min_version)?; /* Min Version */
-        self.output.write_utf8(name)?; /* Name */
-        self.write_tag(6) /* EndObj: Type */
-    }
-
-    fn write_end_object(
-        &mut self) -> anyhow::Result<()> {
-        self.write_tag(6)
-    }
-
-    fn write_tag(
-        &mut self,
+        block_start: u64,
         kind: u8) -> anyhow::Result<()> {
-        self.output.write_u8(kind)
+        let total_size = self.get_pos()? - block_start;
+        let header = total_size as u32 | (kind as u32) << 24;
+        self.update_u32(header, block_start)
     }
 
     fn write_event_metadata(
@@ -324,40 +305,37 @@ impl NetTraceWriter {
         provider: &str,
         event_id: u32,
         event_name: &str,
-        keywords: u64,
-        version: u32,
-        level: u32,
         fields: &[NetTraceField]) -> anyhow::Result<()> {
         /* Write payload */
         self.buffer.clear();
-        self.buffer.write_u32(meta_id)?;
-        self.buffer.write_unicode_with_null(provider)?;
-        self.buffer.write_u32(event_id)?;
-        self.buffer.write_unicode_with_null(event_name)?;
-        self.buffer.write_u64(keywords)?;
-        self.buffer.write_u32(version)?;
-        self.buffer.write_u32(level)?;
-        self.buffer.write_u32(fields.len() as u32)?;
+        self.buffer.write_varint(meta_id as u64)?;
+        self.buffer.write_utf8(provider)?;
+        self.buffer.write_varint(event_id as u64)?;
+        self.buffer.write_utf8(event_name)?;
+        self.buffer.write_u16(fields.len() as u16)?;
 
         for field in fields {
-            self.buffer.write_u32(field.type_id)?;
-            self.buffer.write_unicode_with_null(field.name)?;
+            let size = self.buffer.size_utf8(field.name) + 1;
+
+            self.buffer.write_u16(size as u16)?;
+            self.buffer.write_utf8(field.name)?;
+            self.buffer.write_u8(field.type_id)?;
         }
+
+        /* OptionalMetadata */
+        self.buffer.write_u16(0)?;
 
         let payload = self.buffer.as_slice();
 
-        self.output.write_u8(128)?; /* Flags: PayloadSize */
-        self.output.write_varint(self.sync_time)?; /* Timestamp */
-        self.output.write_varint(payload.len() as u64)?; /* PayloadSize */
+        self.output.write_u16(payload.len() as u16)?; /* Size */
         self.output.write_bytes(payload)
     }
 
     fn write_eventblock_start(
         &mut self,
         min_time: u64,
-        max_time: u64) -> anyhow::Result<(u64,u64)> {
-        self.write_start_object(2, 2, "EventBlock")?;
-        let (loc, pad) = self.reserve_object_size()?;
+        max_time: u64) -> anyhow::Result<u64> {
+        let block_start = self.write_start_block()?;
 
         /* Header */
         self.output.write_u16(20)?; /* HeaderSize */
@@ -365,7 +343,7 @@ impl NetTraceWriter {
         self.output.write_u64(min_time)?; /* Min timestamp */
         self.output.write_u64(max_time)?; /* Max timestamp */
 
-        Ok((loc, pad))
+        Ok(block_start)
     }
 
     fn write_event_timestamp(
@@ -394,15 +372,16 @@ impl NetTraceWriter {
         machine: &ExportMachine,
         meta_id: u32,
         cpu: u32,
-        thread_id: u32,
         stack_id: Option<u32>,
-        time: u64) -> anyhow::Result<()> {
+        replay: &ExportProcessReplay) -> anyhow::Result<()> {
+        let thread_id = self.get_pid_tid_id(replay);
+
         self.event_block.write_u8(207)?; /* Flags: 1 | 2 | 4 | 8 | 64 | 128 */
         self.event_block.write_varint(meta_id as u64)?; /* MetaID */
         self.event_block.write_varint(0u64)?; /* SeqID inc */
-        self.event_block.write_varint(thread_id as u64)?; /* Capture Thread ID */
+        self.event_block.write_varint(0u64)?; /* Capture Thread ID */
         self.event_block.write_varint(cpu as u64)?; /* Processor Number */
-        self.event_block.write_varint(thread_id as u64)?; /* Thread ID */
+        self.event_block.write_varint(thread_id as u64)?; /* Actual Thread ID */
 
         let stack_id = match stack_id {
             Some(stack_id) => { stack_id + 1 },
@@ -411,7 +390,7 @@ impl NetTraceWriter {
 
         self.event_block.write_varint(stack_id as u64)?; /* Stack ID */
 
-        self.write_event_timestamp(time)?;
+        self.write_event_timestamp(replay.time())?;
 
         let payload = self.buffer.as_slice();
 
@@ -440,14 +419,17 @@ impl NetTraceWriter {
         /* Write stacks to output */
         self.write_callstacks(machine)?;
 
+        /* Write threads to output */
+        self.write_threads()?;
+
         /* Write events to output */
-        let (loc, pad) = self.write_eventblock_start(
+        let block_start = self.write_eventblock_start(
             start_time,
             end_time)?;
 
         self.output.write_bytes(&self.event_block)?;
 
-        self.write_eventblock_end(loc, pad)?;
+        self.write_eventblock_end(block_start)?;
 
         /* Clear and update */
         self.event_block.clear();
@@ -459,10 +441,8 @@ impl NetTraceWriter {
 
     fn write_eventblock_end(
         &mut self,
-        loc: u64,
-        pad: u64) -> anyhow::Result<()> {
-        self.update_object_size(loc, pad)?;
-        self.write_end_object()
+        block_start: u64) -> anyhow::Result<()> {
+        self.write_end_block(block_start, 2)
     }
 
     fn write_created_replay_event(
@@ -509,9 +489,27 @@ impl NetTraceWriter {
             machine,
             id,
             0,
-            0,
             None,
-            replay.time())
+            replay)
+    }
+
+    fn get_pid_tid_id(
+        &mut self,
+        replay: &ExportProcessReplay) -> u32 {
+        /* Save pid_tid for later writing: 0 is reserved */
+        let len = self.saved_pid_tids.len() as u32 + 1;
+
+        let tid = match replay.sample_event() {
+            Some(sample) => { sample.tid() },
+            None => { 0 },
+        };
+
+        let key = SavedPidTidKey {
+            pid: replay.process().pid(),
+            tid,
+        };
+
+        *self.saved_pid_tids.entry(key).or_insert(len)
     }
 
     fn write_sample_replay_event(
@@ -546,10 +544,9 @@ impl NetTraceWriter {
         self.write_event_blob_from_buffer(
             machine,
             event_id,
-            0,
-            0,
+            sample.cpu() as u32,
             Some(id),
-            replay.time())
+            replay)
     }
 
     fn write_exited_replay_event(
@@ -565,9 +562,8 @@ impl NetTraceWriter {
             machine,
             self.exit_event_id,
             0,
-            0,
             None,
-            replay.time())
+            replay)
     }
 
     fn write_mapping_replay_event(
@@ -612,9 +608,8 @@ impl NetTraceWriter {
             machine,
             self.mapping_event_id,
             0,
-            0,
             None,
-            replay.time())
+            replay)
     }
 
     fn write_mapping_symbol_replay_event(
@@ -641,9 +636,8 @@ impl NetTraceWriter {
             machine,
             self.symbol_event_id,
             0,
-            0,
             None,
-            replay.time())
+            replay)
     }
 
     fn write_replay_event(
@@ -681,16 +675,11 @@ impl NetTraceWriter {
     fn write_metadata_object(
         &mut self,
         stack_kinds: &[String]) -> anyhow::Result<()> {
-        self.write_start_object(2, 2, "MetadataBlock")?;
-        let (loc, pad) = self.reserve_object_size()?;
-
-        /* Header */
-        self.output.write_u16(20)?; /* HeaderSize */
-        self.output.write_u16(1)?; /* Flags: Compressed */
-        self.output.write_u64(self.sync_time)?; /* Min timestamp */
-        self.output.write_u64(u64::MAX)?; /* Max timestamp */
-
+        let block_start = self.write_start_block()?;
         let mut meta_id = 1;
+
+        /* HeaderSize: Future expansion */
+        self.output.write_u16(0)?;
 
         /*
          * Stack Event Metadata:
@@ -704,9 +693,6 @@ impl NetTraceWriter {
                 "Universal.Events",
                 meta_id,
                 kind,
-                0,
-                0,
-                0,
                 &STACK_EVENT_FIELDS)?;
 
             meta_id += 1;
@@ -727,9 +713,6 @@ impl NetTraceWriter {
             "Universal.System",
             0, /* Stable ID */
             "ExistingProcess",
-            0,
-            0,
-            0,
             &PROCESS_CREATE_FIELDS)?;
 
         meta_id += 1;
@@ -741,9 +724,6 @@ impl NetTraceWriter {
             "Universal.System",
             1, /* Stable ID */
             "ProcessCreate",
-            0,
-            0,
-            0,
             &PROCESS_CREATE_FIELDS)?;
 
         meta_id += 1;
@@ -755,9 +735,6 @@ impl NetTraceWriter {
             "Universal.System",
             2, /* Stable ID */
             "ProcessExit",
-            0,
-            0,
-            0,
             &PROCESS_EXIT_FIELDS)?;
 
         meta_id += 1;
@@ -769,9 +746,6 @@ impl NetTraceWriter {
             "Universal.System",
             3, /* Stable ID */
             "ProcessMapping",
-            0,
-            0,
-            0,
             &PROCESS_MAPPING_FIELDS)?;
 
         meta_id += 1;
@@ -783,28 +757,23 @@ impl NetTraceWriter {
             "Universal.System",
             4, /* Stable ID */
             "ProcessSymbol",
-            0,
-            0,
-            0,
             &PROCESS_SYMBOL_FIELDS)?;
 
         /* Done writing metadata */
-        self.update_object_size(loc, pad)?;
-        self.write_end_object()
+        self.write_end_block(block_start, 3)
     }
 
     fn write_seq_block(
         &mut self,
         time_qpc: u64) -> anyhow::Result<()> {
-        self.write_start_object(2, 2, "SPBlock")?;
-        let (loc, pad) = self.reserve_object_size()?;
+        let block_start = self.write_start_block()?;
 
         self.output.write_u64(time_qpc)?; /* Timestamp */
+        self.output.write_u32(1)?; /* Flags: Clear Threads */
         self.output.write_u32(0)?; /* ThreadCount */
 
         /* Done writing seq block */
-        self.update_object_size(loc, pad)?;
-        self.write_end_object()
+        self.write_end_block(block_start, 4)
     }
 
     fn write_trace_object(
@@ -812,7 +781,6 @@ impl NetTraceWriter {
         sync_time: DateTime<Utc>,
         sync_time_qpc: u64,
         qpc_freq: u64,
-        process_id: u32,
         num_of_cpus: u32,
         sample_freq: u32) -> anyhow::Result<()> {
         /* Conversions to match trace format */
@@ -823,7 +791,7 @@ impl NetTraceWriter {
         self.sync_time = sync_time_qpc;
         self.flush_time = self.sync_time;
 
-        self.write_start_object(4, 4, "Trace")?;
+        let block_start = self.write_start_block()?;
         self.output.write_u16(sync_time.year() as u16)?;
         self.output.write_u16(sync_time.month() as u16)?;
         self.output.write_u16(sync_time.weekday() as u16)?;
@@ -835,15 +803,22 @@ impl NetTraceWriter {
         self.output.write_u64(sync_time_qpc)?;
         self.output.write_u64(qpc_freq)?;
         self.output.write_u32(ptr_size)?;
-        self.output.write_u32(process_id)?;
-        self.output.write_u32(num_of_cpus)?;
-        self.output.write_u32(nanos_between_samples)?;
-        self.write_end_object()
+
+        /* Key values */
+        self.output.write_u32(2)?;
+        self.output.write_utf8("HardwareThreadCount")?;
+        self.output.write_utf8(&format!("{}", num_of_cpus))?;
+        self.output.write_utf8("ExpectedCPUSamplingRate")?;
+        self.output.write_utf8(&format!("{}", nanos_between_samples))?;
+
+        self.write_end_block(block_start, 1)
     }
 
     fn init(&mut self) -> anyhow::Result<()> {
         self.output.write(b"Nettrace")?;
-        self.output.write_utf8("!FastSerialization.1")
+        self.output.write_u32(0)?; /* Reserved */
+        self.output.write_u32(6)?; /* Major Ver */
+        self.output.write_u32(0) /* Minor Ver */
     }
 
     fn take_saved_callstacks(&mut self) -> Vec<SavedCallstackKey> {
@@ -865,8 +840,7 @@ impl NetTraceWriter {
     fn write_callstacks(
         &mut self,
         machine: &ExportMachine) -> anyhow::Result<()> {
-        self.write_start_object(2, 2, "StackBlock")?;
-        let (loc, pad) = self.reserve_object_size()?;
+        let block_start = self.write_start_block()?;
 
         let callstacks = self.take_saved_callstacks();
         let len = callstacks.len() as u32;
@@ -892,8 +866,38 @@ impl NetTraceWriter {
         }
 
         /* Done writing stacks */
-        self.update_object_size(loc, pad)?;
-        self.write_end_object()
+        self.write_end_block(block_start, 5)
+    }
+
+    fn write_threads(&mut self) -> anyhow::Result<()> {
+        let block_start = self.write_start_block()?;
+
+        /* Add in reserved index of 0 */
+        self.saved_pid_tids.insert(
+            SavedPidTidKey {
+                pid: 0,
+                tid: 0,
+            },
+            0);
+
+        for (k,id) in self.saved_pid_tids.drain() {
+            let len = self.output.size_varint(k.pid as u64) +
+                self.output.size_varint(k.tid as u64) +
+                self.output.size_varint(id as u64) +
+                2;
+
+            self.output.write_u16(len as u16)?;
+            self.output.write_varint(id as u64)?;
+
+            self.output.write_u8(2)?;
+            self.output.write_varint(k.pid as u64)?;
+
+            self.output.write_u8(3)?;
+            self.output.write_varint(k.tid as u64)?;
+        }
+
+        /* Done writing threads */
+        self.write_end_block(block_start, 6)
     }
 
     fn finish(
@@ -916,7 +920,8 @@ impl NetTraceWriter {
         /* Always emit end sequence to convey end time */
         self.write_seq_block(end_time)?;
 
-        self.write_tag(1)?; /* NullRef */
+        /* EndOfStream Block */
+        self.output.write_u32(0)?;
 
         Ok(self.output.flush()?)
     }
@@ -947,7 +952,6 @@ impl NetTraceFormat for ExportMachine {
             sync_time,
             sync_time_qpc,
             qpc_freq,
-            0,
             cpu_count,
             sample_freq)?;
 
