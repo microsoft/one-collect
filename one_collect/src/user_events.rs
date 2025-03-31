@@ -6,7 +6,13 @@ use std::io::{self, Result};
 use std::rc::Rc;
 
 #[cfg(target_os = "linux")]
-use std::os::unix::io::AsRawFd;
+use std::os::unix::io::{AsRawFd, RawFd};
+
+#[cfg(target_os = "linux")]
+use std::os::unix::net::UnixStream;
+
+#[cfg(target_os = "linux")]
+use libc::*;
 
 pub trait UserEventDesc {
     fn format(&self) -> String;
@@ -228,6 +234,72 @@ const fn ioc(dir: ffi::c_ulong, typ: ffi::c_ulong, nr: ffi::c_ulong) -> ffi::c_u
         | (typ << IOC_TYPESHIFT)
         | (nr << IOC_NRSHIFT)
         | ((mem::size_of::<usize>() as ffi::c_ulong) << IOC_SIZESHIFT)
+}
+
+pub trait WithUserEventFD {
+    fn write_all_with_user_events_fd(
+        &mut self,
+        buf: &[u8]) -> anyhow::Result<()>;
+}
+
+#[cfg(target_os = "linux")]
+impl WithUserEventFD for UnixStream {
+    fn write_all_with_user_events_fd(
+        &mut self,
+        buf: &[u8]) -> anyhow::Result<()> {
+        let fd_len = std::mem::size_of::<RawFd>() as u32;
+
+        let mut iov = iovec {
+            iov_base: buf.as_ptr() as *mut c_void,
+            iov_len: buf.len(),
+        };
+
+        unsafe {
+            let path = CString::new("/sys/kernel/tracing/user_events_data")?;
+
+            let user_fd = libc::open(path.as_ptr(), libc::O_RDWR);
+
+            if user_fd == -1 {
+                anyhow::bail!(
+                    "Unable to open user_events_data file, error={}",
+                    *libc::__errno_location());
+            }
+
+            let mut cmsg = Vec::with_capacity(
+                libc::CMSG_SPACE(fd_len) as usize);
+
+            let msg = msghdr {
+                msg_name: std::ptr::null_mut(),
+                msg_namelen: 0,
+                msg_iov: &mut iov,
+                msg_iovlen: 1,
+                msg_control: cmsg.as_mut_ptr(),
+                msg_controllen: libc::CMSG_LEN(fd_len) as usize,
+                msg_flags: 0,
+            };
+
+            /* Init Control Message */
+            let cmsg_raw = libc::CMSG_FIRSTHDR(&msg);
+            let cmsg = &mut *cmsg_raw;
+
+            cmsg.cmsg_len = msg.msg_controllen;
+            cmsg.cmsg_level = libc::SOL_SOCKET;
+            cmsg.cmsg_type = libc::SCM_RIGHTS;
+
+            /* Set the user events FD */
+            let cmsg_data = libc::CMSG_DATA(cmsg_raw) as *mut RawFd;
+            *cmsg_data = user_fd;
+
+            /* Send message with control message */
+            if libc::sendmsg(self.as_raw_fd(), &msg, libc::MSG_NOSIGNAL) == -1 {
+                anyhow::bail!(
+                    "Unable to send message, error={}",
+                    *libc::__errno_location());
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
