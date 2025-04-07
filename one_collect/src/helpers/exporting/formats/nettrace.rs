@@ -496,8 +496,8 @@ impl NetTraceWriter {
     fn get_pid_tid_id(
         &mut self,
         replay: &ExportProcessReplay) -> u32 {
-        /* Save pid_tid for later writing: 0 is reserved */
-        let len = self.saved_pid_tids.len() as u32 + 1;
+        /* Save pid_tid for later writing */
+        let len = self.saved_pid_tids.len() as u32;
 
         let tid = match replay.sample_event() {
             Some(sample) => { sample.tid() },
@@ -815,6 +815,8 @@ impl NetTraceWriter {
     }
 
     fn init(&mut self) -> anyhow::Result<()> {
+        self.init_threads();
+
         self.output.write(b"Nettrace")?;
         self.output.write_u32(0)?; /* Reserved */
         self.output.write_u32(6)?; /* Major Ver */
@@ -869,9 +871,7 @@ impl NetTraceWriter {
         self.write_end_block(block_start, 5)
     }
 
-    fn write_threads(&mut self) -> anyhow::Result<()> {
-        let block_start = self.write_start_block()?;
-
+    fn init_threads(&mut self) {
         /* Add in reserved index of 0 */
         self.saved_pid_tids.insert(
             SavedPidTidKey {
@@ -879,6 +879,10 @@ impl NetTraceWriter {
                 tid: 0,
             },
             0);
+    }
+
+    fn write_threads(&mut self) -> anyhow::Result<()> {
+        let block_start = self.write_start_block()?;
 
         for (k,id) in self.saved_pid_tids.drain() {
             let len = self.output.size_varint(k.pid as u64) +
@@ -895,6 +899,8 @@ impl NetTraceWriter {
             self.output.write_u8(3)?;
             self.output.write_varint(k.tid as u64)?;
         }
+
+        self.init_threads();
 
         /* Done writing threads */
         self.write_end_block(block_start, 6)
