@@ -31,91 +31,82 @@ struct NetTraceField {
     name: &'static str,
 }
 
-const TYPE_ID_UINT32: u8 = 10;
-const TYPE_ID_UINT64: u8 = 12;
-const TYPE_ID_STRING: u8 = 18;
+const TYPE_ID_VARUINT: u8 = 21;
+const TYPE_ID_UTF8: u8 = 23;
 
 const VALUE_FIELD: NetTraceField = NetTraceField {
-    type_id: TYPE_ID_UINT64,
+    type_id: TYPE_ID_VARUINT,
     name: "Value",
 };
 
 const ID_FIELD: NetTraceField = NetTraceField {
-    type_id: TYPE_ID_UINT32,
+    type_id: TYPE_ID_VARUINT,
     name: "Id",
 };
 
 const NAME_FIELD: NetTraceField = NetTraceField {
-    type_id: TYPE_ID_STRING,
+    type_id: TYPE_ID_UTF8,
     name: "Name",
 };
 
 const NAMESPACE_NAME_FIELD: NetTraceField = NetTraceField {
-    type_id: TYPE_ID_STRING,
+    type_id: TYPE_ID_UTF8,
     name: "NamespaceName",
 };
 
 const FILE_NAME_FIELD: NetTraceField = NetTraceField {
-    type_id: TYPE_ID_STRING,
+    type_id: TYPE_ID_UTF8,
     name: "FileName",
 };
 
 const SYMBOL_META_FIELD: NetTraceField = NetTraceField {
-    type_id: TYPE_ID_STRING,
+    type_id: TYPE_ID_UTF8,
     name: "SymbolMetadata",
 };
 
 const VERSION_META_FIELD: NetTraceField = NetTraceField {
-    type_id: TYPE_ID_STRING,
+    type_id: TYPE_ID_UTF8,
     name: "VersionMetadata",
 };
 
-const PROCESS_ID_FIELD: NetTraceField = NetTraceField {
-    type_id: TYPE_ID_UINT32,
-    name: "ProcessId",
-};
-
 const NAMESPACE_ID_FIELD: NetTraceField = NetTraceField {
-    type_id: TYPE_ID_UINT32,
+    type_id: TYPE_ID_VARUINT,
     name: "NamespaceId",
 };
 
 const MAPPING_ID_FIELD: NetTraceField = NetTraceField {
-    type_id: TYPE_ID_UINT32,
+    type_id: TYPE_ID_VARUINT,
     name: "MappingId",
 };
 
 const START_ADDRESS_FIELD: NetTraceField = NetTraceField {
-    type_id: TYPE_ID_UINT64,
+    type_id: TYPE_ID_VARUINT,
     name: "StartAddress",
 };
 
 const END_ADDRESS_FIELD: NetTraceField = NetTraceField {
-    type_id: TYPE_ID_UINT64,
+    type_id: TYPE_ID_VARUINT,
     name: "EndAddress",
 };
 
 const FILE_OFFSET_FIELD: NetTraceField = NetTraceField {
-    type_id: TYPE_ID_UINT64,
+    type_id: TYPE_ID_VARUINT,
     name: "FileOffset",
 };
 
-const STACK_EVENT_FIELDS: [NetTraceField; 2] = [
-    PROCESS_ID_FIELD,
+const STACK_EVENT_FIELDS: [NetTraceField; 1] = [
     VALUE_FIELD];
 
-const PROCESS_CREATE_FIELDS: [NetTraceField; 4] = [
-    ID_FIELD,
+const PROCESS_CREATE_FIELDS: [NetTraceField; 3] = [
     NAMESPACE_ID_FIELD,
     NAME_FIELD,
     NAMESPACE_NAME_FIELD,
 ];
 
-const PROCESS_EXIT_FIELDS: [NetTraceField; 1] = [PROCESS_ID_FIELD];
+const PROCESS_EXIT_FIELDS: [NetTraceField; 0] = [];
 
-const PROCESS_MAPPING_FIELDS: [NetTraceField; 8] = [
+const PROCESS_MAPPING_FIELDS: [NetTraceField; 7] = [
     ID_FIELD,
-    PROCESS_ID_FIELD,
     START_ADDRESS_FIELD,
     END_ADDRESS_FIELD,
     FILE_OFFSET_FIELD,
@@ -161,6 +152,14 @@ trait EventPayloadWriter {
         self.write_bytes(&value.to_le_bytes())
     }
 
+    fn write_short_utf8(
+        &mut self,
+        value: &str) -> anyhow::Result<()> {
+        let bytes = value.as_bytes();
+        self.write_u16(value.len() as u16)?;
+        self.write_bytes(bytes)
+    }
+
     fn write_utf8(
         &mut self,
         value: &str) -> anyhow::Result<()> {
@@ -186,16 +185,6 @@ trait EventPayloadWriter {
         }
 
         size
-    }
-
-    fn write_unicode_with_null(
-        &mut self,
-        value: &str) -> anyhow::Result<()> {
-        for c in value.chars() {
-            self.write_u16(c as u16)?;
-        }
-
-        self.write_u16(0)
     }
 
     fn write_varint(
@@ -467,12 +456,11 @@ impl NetTraceWriter {
         };
 
         self.buffer.clear();
-        self.buffer.write_u32(process.pid())?;
-        self.buffer.write_u32(ns_pid)?;
-        self.buffer.write_unicode_with_null(name)?;
+        self.buffer.write_varint(ns_pid as u64)?;
+        self.buffer.write_short_utf8(name)?;
 
         /* TODO: Once we have namespace names */
-        self.buffer.write_unicode_with_null("Unknown")?;
+        self.buffer.write_short_utf8("Unknown")?;
 
         /*
          * We export using different events for created processes:
@@ -530,13 +518,10 @@ impl NetTraceWriter {
         let id = *self.saved_callstacks.entry(key).or_insert(len);
 
         /* Write out event */
-        let process = replay.process();
-
         let value = converter.convert(sample.value());
 
         self.buffer.clear();
-        self.buffer.write_u32(process.pid())?;
-        self.buffer.write_u64(value)?;
+        self.buffer.write_varint(value)?;
 
         /* Meta ID of 0 is reserved, so we add 1 here */
         let event_id = (sample.kind() + 1) as u32;
@@ -553,10 +538,7 @@ impl NetTraceWriter {
         &mut self,
         machine: &ExportMachine,
         replay: &ExportProcessReplay) -> anyhow::Result<()> {
-        let process = replay.process();
-
         self.buffer.clear();
-        self.buffer.write_u32(process.pid())?;
 
         self.write_event_blob_from_buffer(
             machine,
@@ -571,20 +553,17 @@ impl NetTraceWriter {
         machine: &ExportMachine,
         replay: &ExportProcessReplay,
         mapping: &ExportMapping) -> anyhow::Result<()> {
-        let process = replay.process();
-
         let name = match machine.strings().from_id(mapping.filename_id()) {
             Ok(name) => { name },
             Err(_) => { "Unknown" },
         };
 
         self.buffer.clear();
-        self.buffer.write_u32(mapping.id() as u32)?;
-        self.buffer.write_u32(process.pid())?;
-        self.buffer.write_u64(mapping.start())?;
-        self.buffer.write_u64(mapping.end())?;
-        self.buffer.write_u64(mapping.file_offset())?;
-        self.buffer.write_unicode_with_null(name)?;
+        self.buffer.write_varint(mapping.id() as u64)?;
+        self.buffer.write_varint(mapping.start())?;
+        self.buffer.write_varint(mapping.end())?;
+        self.buffer.write_varint(mapping.file_offset())?;
+        self.buffer.write_short_utf8(name)?;
 
         /* Symbol details */
         self.str_buffer.clear();
@@ -593,7 +572,7 @@ impl NetTraceWriter {
             metadata.to_symbol_metadata(machine.strings(), &mut self.str_buffer);
         }
 
-        self.buffer.write_unicode_with_null(&self.str_buffer)?;
+        self.buffer.write_short_utf8(&self.str_buffer)?;
 
         /* Version details */
         self.str_buffer.clear();
@@ -602,7 +581,7 @@ impl NetTraceWriter {
             metadata.to_version_metadata(machine.strings(), &mut self.str_buffer);
         }
 
-        self.buffer.write_unicode_with_null(&self.str_buffer)?;
+        self.buffer.write_short_utf8(&self.str_buffer)?;
 
         self.write_event_blob_from_buffer(
             machine,
@@ -624,11 +603,11 @@ impl NetTraceWriter {
         };
 
         self.buffer.clear();
-        self.buffer.write_u32(self.sym_id)?;
-        self.buffer.write_u32(mapping.id() as u32)?;
-        self.buffer.write_u64(symbol.start())?;
-        self.buffer.write_u64(symbol.end())?;
-        self.buffer.write_unicode_with_null(name)?;
+        self.buffer.write_varint(self.sym_id as u64)?;
+        self.buffer.write_varint(mapping.id() as u64)?;
+        self.buffer.write_varint(symbol.start())?;
+        self.buffer.write_varint(symbol.end())?;
+        self.buffer.write_short_utf8(name)?;
 
         self.sym_id += 1;
 
