@@ -79,6 +79,11 @@ const MAPPING_ID_FIELD: NetTraceField = NetTraceField {
     name: "MappingId",
 };
 
+const META_ID_FIELD: NetTraceField = NetTraceField {
+    type_id: TYPE_ID_VARUINT,
+    name: "MetadataId",
+};
+
 const START_ADDRESS_FIELD: NetTraceField = NetTraceField {
     type_id: TYPE_ID_VARUINT,
     name: "StartAddress",
@@ -105,12 +110,17 @@ const PROCESS_CREATE_FIELDS: [NetTraceField; 3] = [
 
 const PROCESS_EXIT_FIELDS: [NetTraceField; 0] = [];
 
-const PROCESS_MAPPING_FIELDS: [NetTraceField; 7] = [
+const PROCESS_MAPPING_FIELDS: [NetTraceField; 6] = [
     ID_FIELD,
     START_ADDRESS_FIELD,
     END_ADDRESS_FIELD,
     FILE_OFFSET_FIELD,
     FILE_NAME_FIELD,
+    META_ID_FIELD,
+];
+
+const PROCESS_MAPPING_META_FIELDS: [NetTraceField; 3] = [
+    ID_FIELD,
     SYMBOL_META_FIELD,
     VERSION_META_FIELD,
 ];
@@ -220,6 +230,7 @@ struct NetTraceWriter {
     exit_event_id: u32,
     mapping_event_id: u32,
     symbol_event_id: u32,
+    mapping_meta_event_id: u32,
     last_time: u64,
     sync_time: u64,
     flush_time: u64,
@@ -227,6 +238,7 @@ struct NetTraceWriter {
     sym_id: u32,
     saved_callstacks: HashMap<SavedCallstackKey, u32>,
     saved_pid_tids: HashMap<SavedPidTidKey, u32>,
+    saved_meta_ids: HashMap<ExportDevNode, u32>,
 }
 
 impl NetTraceWriter {
@@ -240,6 +252,7 @@ impl NetTraceWriter {
             exit_event_id: 0,
             mapping_event_id: 0,
             symbol_event_id: 0,
+            mapping_meta_event_id: 0,
             last_time: 0,
             sync_time: 0,
             flush_time: 0,
@@ -247,6 +260,7 @@ impl NetTraceWriter {
             sym_id: 0,
             saved_callstacks: HashMap::new(),
             saved_pid_tids: HashMap::new(),
+            saved_meta_ids: HashMap::new(),
         };
 
         trace.init()?;
@@ -548,11 +562,74 @@ impl NetTraceWriter {
             replay)
     }
 
+    fn write_mapping_metadata_event(
+        &mut self,
+        machine: &ExportMachine,
+        replay: &ExportProcessReplay,
+        mapping: &ExportMapping) -> anyhow::Result<u32> {
+        let mut existing = true;
+
+        let id = match mapping.node() {
+            Some(node) => {
+                /* 0 is reserved for not defined, so add 1 to length */
+                let next_id = self.saved_meta_ids.len() as u32 + 1;
+
+                *self.saved_meta_ids.entry(*node).or_insert_with(|| {
+                    /* Flag as a new entry */
+                    existing = false;
+
+                    next_id
+                })
+            },
+            None => {
+                /* Use 0 for not defined */
+                0
+            },
+        };
+
+        /* Skip writing if we already wrote the entry */
+        if !existing {
+            self.buffer.clear();
+            self.buffer.write_varint(id as u64)?;
+
+            /* Symbol details */
+            self.str_buffer.clear();
+
+            if let Some(metadata) = machine.get_mapping_metadata(mapping) {
+                metadata.to_symbol_metadata(machine.strings(), &mut self.str_buffer);
+            }
+
+            self.buffer.write_short_utf8(&self.str_buffer)?;
+
+            /* Version details */
+            self.str_buffer.clear();
+
+            if let Some(metadata) = machine.get_mapping_metadata(mapping) {
+                metadata.to_version_metadata(machine.strings(), &mut self.str_buffer);
+            }
+
+            self.buffer.write_short_utf8(&self.str_buffer)?;
+
+            self.write_event_blob_from_buffer(
+                machine,
+                self.mapping_meta_event_id,
+                0,
+                None,
+                replay)?;
+        }
+
+        Ok(id)
+    }
+
     fn write_mapping_replay_event(
         &mut self,
         machine: &ExportMachine,
         replay: &ExportProcessReplay,
         mapping: &ExportMapping) -> anyhow::Result<()> {
+        /* Write mapping metadata first if not already written */
+        let meta_id = self.write_mapping_metadata_event(machine, replay, mapping)?;
+
+        /* Write actual mapping details */
         let name = match machine.strings().from_id(mapping.filename_id()) {
             Ok(name) => { name },
             Err(_) => { "Unknown" },
@@ -564,6 +641,7 @@ impl NetTraceWriter {
         self.buffer.write_varint(mapping.end())?;
         self.buffer.write_varint(mapping.file_offset())?;
         self.buffer.write_short_utf8(name)?;
+        self.buffer.write_varint(meta_id as u64)?;
 
         /* Symbol details */
         self.str_buffer.clear();
@@ -737,6 +815,17 @@ impl NetTraceWriter {
             4, /* Stable ID */
             "ProcessSymbol",
             &PROCESS_SYMBOL_FIELDS)?;
+
+        meta_id += 1;
+
+        self.mapping_meta_event_id = meta_id;
+
+        self.write_event_metadata(
+            meta_id,
+            "Universal.System",
+            5, /* Stable ID */
+            "ProcessMappingMetadata",
+            &PROCESS_MAPPING_META_FIELDS)?;
 
         /* Done writing metadata */
         self.write_end_block(block_start, 3)
