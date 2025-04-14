@@ -17,6 +17,11 @@ use chrono::{DateTime, Utc};
 
 mod lookup;
 
+pub mod record;
+use record::ExportRecordType;
+use record::ExportRecordData;
+use record::ExportRecord;
+
 pub mod os;
 use os::OSExportMachine;
 use os::OSExportSampler;
@@ -127,6 +132,17 @@ impl ExportSampler {
             &self.frames))
     }
 
+    pub fn attach_record_to_sample(
+        &mut self,
+        sample: &mut ExportProcessSample,
+        record_type: u16,
+        record_data: &[u8]) -> anyhow::Result<()> {
+        self.exporter.borrow_mut().attach_record_to_sample(
+            sample,
+            record_type,
+            record_data)
+    }
+
     fn add_custom_sample(
         &mut self,
         pid: u32,
@@ -153,12 +169,37 @@ impl ExportSampler {
             kind,
             &self.frames)
     }
+
+    fn add_sample_with_record(
+        &mut self,
+        data: &EventData,
+        value: MetricValue,
+        kind: u16,
+        record_type: u16,
+        record_data: &[u8]) -> anyhow::Result<()> {
+        self.frames.clear();
+
+        /* OS Specific callstack hook */
+        self.os_event_callstack(data)?;
+
+        self.exporter.borrow_mut().add_sample_with_record(
+            self.os_event_time(data)?,
+            value,
+            self.os_event_pid(data)?,
+            self.os_event_tid(data)?,
+            self.os_event_cpu(data)?,
+            kind,
+            record_type,
+            record_data,
+            &self.frames)
+    }
 }
 
 pub struct ExportBuiltContext<'a> {
     exporter: &'a mut ExportMachine,
     session: &'a mut os::Session,
     sample_kind: Option<u16>,
+    record_type: Option<u16>,
 }
 
 impl<'a> ExportBuiltContext<'a> {
@@ -169,10 +210,13 @@ impl<'a> ExportBuiltContext<'a> {
             exporter,
             session,
             sample_kind: None,
+            record_type: None,
         }
     }
 
     fn take_sample_kind(&mut self) -> Option<u16> { self.sample_kind.take() }
+
+    fn take_record_type(&mut self) -> Option<u16> { self.record_type.take() }
 
     pub fn exporter_mut(&mut self) -> &mut ExportMachine { self.exporter }
 
@@ -180,16 +224,27 @@ impl<'a> ExportBuiltContext<'a> {
 
     pub fn set_sample_kind(
         &mut self,
-        kind: &str) {
+        kind: &str) -> u16 {
         let kind = self.exporter.sample_kind(kind);
 
         self.sample_kind = Some(kind);
+
+        kind
+    }
+
+    pub fn set_record_type(
+        &mut self,
+        record_type: ExportRecordType) {
+        let record_type = self.exporter.record_type(record_type);
+
+        self.record_type = Some(record_type);
     }
 }
 
 pub struct ExportTraceContext<'a> {
     sampler: &'a mut ExportSampler,
     sample_kind: u16,
+    record_type: u16,
     data: &'a EventData<'a>,
 }
 
@@ -197,10 +252,12 @@ impl<'a> ExportTraceContext<'a> {
     fn new(
         sampler: &'a mut ExportSampler,
         sample_kind: u16,
+        record_type: u16,
         data: &'a EventData) -> Self {
         Self {
             sampler,
             sample_kind,
+            record_type,
             data,
         }
     }
@@ -251,6 +308,17 @@ impl<'a> ExportTraceContext<'a> {
             self.sample_kind)
     }
 
+    pub fn attach_record_to_sample(
+        &mut self,
+        sample: &mut ExportProcessSample,
+        record_type: u16,
+        record_data: &[u8]) -> anyhow::Result<()> {
+        self.sampler.attach_record_to_sample(
+            sample,
+            record_type,
+            record_data)
+    }
+
     pub fn add_custom_sample(
         &mut self,
         pid: u32,
@@ -266,6 +334,18 @@ impl<'a> ExportTraceContext<'a> {
         self.add_sample_with_kind(
             value,
             self.sample_kind)
+    }
+
+    pub fn add_sample_with_record(
+        &mut self,
+        value: MetricValue,
+        record_data: &[u8]) -> anyhow::Result<()> {
+        self.sampler.add_sample_with_record(
+            self.data,
+            value,
+            self.sample_kind,
+            self.record_type,
+            record_data)
     }
 }
 
@@ -404,8 +484,11 @@ pub struct ExportMachine {
     callstacks: InternedCallstacks,
     pub(crate) os: OSExportMachine,
     procs: HashMap<u32, ExportProcess>,
+    records: Vec<ExportRecord>,
+    record_data: Vec<u8>,
     module_metadata: ModuleMetadataLookup,
     kinds: Vec<String>,
+    record_types: Vec<ExportRecordType>,
     map_index: usize,
     drop_closures: Vec<Box<dyn FnMut()>>,
     start_date: Option<DateTime<Utc>>,
@@ -460,9 +543,15 @@ impl ExportMachine {
     pub fn new(settings: ExportSettings) -> Self {
         let mut strings = InternedStrings::new(settings.string_buckets);
         let callstacks = InternedCallstacks::new(settings.callstack_buckets);
+        let mut records = Vec::new();
+        let mut record_types = Vec::new();
 
         /* Ensure string ID 0 is always empty */
         strings.to_id("");
+
+        /* Ensure record ID 0 is always empty/default */
+        records.push(ExportRecord::default());
+        record_types.push(ExportRecordType::default());
 
         Self {
             settings,
@@ -470,8 +559,11 @@ impl ExportMachine {
             callstacks,
             os: OSExportMachine::new(),
             procs: HashMap::new(),
+            records,
+            record_data: Vec::new(),
             module_metadata: ModuleMetadataLookup::new(),
             kinds: Vec::new(),
+            record_types,
             map_index: 0,
             drop_closures: Vec::new(),
             start_date: None,
@@ -598,11 +690,27 @@ impl ExportMachine {
 
     pub fn sample_kinds(&self) -> &Vec<String> { &self.kinds }
 
+    pub fn record_types(&self) -> &Vec<ExportRecordType> { &self.record_types }
+
     pub fn strings(&self) -> &InternedStrings { &self.strings }
 
     pub fn callstacks(&self) -> &InternedCallstacks { &self.callstacks }
 
     pub fn processes(&self) -> Values<u32, ExportProcess> { self.procs.values() }
+
+    pub fn sample_record_data(
+        &self,
+        sample: &ExportProcessSample) -> ExportRecordData {
+        /* Lookup data via sample's record ID */
+        let record = &self.records[sample.record_id()];
+
+        let record_type_id = record.record_type();
+
+        ExportRecordData::new(
+            record_type_id,
+            &self.record_types[record_type_id as usize],
+            &self.record_data[record.start()..record.end()])
+    }
 
     pub fn find_sample_kind(
         &self,
@@ -637,6 +745,20 @@ impl ExportMachine {
 
     pub fn processes_mut(&mut self) -> ValuesMut<u32, ExportProcess> {
         self.procs.values_mut()
+    }
+
+    pub fn record_type(
+        &mut self,
+        record_type: ExportRecordType) -> u16 {
+        for (i, existing) in self.record_types.iter().enumerate() {
+            if existing == &record_type {
+                return i as u16;
+            }
+        }
+
+        let count = self.record_types.len() as u16;
+        self.record_types.push(record_type);
+        count
     }
 
     pub fn sample_kind(
@@ -835,6 +957,68 @@ impl ExportMachine {
         Ok(())
     }
 
+    pub fn attach_record_to_sample(
+        &mut self,
+        sample: &mut ExportProcessSample,
+        record_type: u16,
+        record_data: &[u8]) -> anyhow::Result<()> {
+        if sample.has_record() {
+            anyhow::bail!("Record is already attached.");
+        }
+
+        /*
+         * Add record data to global data slice:
+         * Instead of having many vecs (IE: each process) we keep
+         * a single vec that can grow naturally to accomodate the
+         * system wide view of records with minimal allocations.
+         */
+        let record_id = self.records.len();
+        let offset = self.record_data.len();
+        let len = record_data.len() as u32;
+
+        self.records.push(
+            ExportRecord::new(
+                record_type,
+                offset,
+                len));
+
+        self.record_data.extend_from_slice(record_data);
+
+        /* Associate record with sample and add */
+        sample.attach_record(record_id);
+
+        Ok(())
+    }
+
+    pub fn add_sample_with_record(
+        &mut self,
+        time: u64,
+        value: MetricValue,
+        pid: u32,
+        tid: u32,
+        cpu: u16,
+        kind: u16,
+        record_type: u16,
+        record_data: &[u8],
+        frames: &[u64]) -> anyhow::Result<()> {
+        let mut sample = self.make_sample(
+            time,
+            value,
+            tid,
+            cpu,
+            kind,
+            frames);
+
+        self.attach_record_to_sample(
+            &mut sample,
+            record_type,
+            record_data)?;
+
+        self.process_mut(pid).add_sample(sample);
+
+        Ok(())
+    }
+
     pub fn add_custom_sample(
         &mut self,
         pid: u32,
@@ -907,6 +1091,115 @@ pub trait ExportSessionHelp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::*;
+
+    #[test]
+    fn sample_records() {
+        let mut machine = ExportMachine::new(ExportSettings::default());
+
+        let mut e = Event::new(1, "test".into());
+        let format = e.format_mut();
+
+        format.add_field(
+            EventField::new(
+                "1".into(), "unsigned char".into(),
+                LocationType::Static, 0, 1));
+
+        let kind = machine.sample_kind("test");
+        let record_type = machine.record_type(ExportRecordType::from_event(kind, &e));
+        let mut record_data: [u8; 1] = [b'Z'];
+        let mut frames = Vec::new();
+
+        frames.push(1);
+        frames.push(2);
+        frames.push(3);
+
+        machine.add_sample_with_record(
+            0,
+            MetricValue::Count(0),
+            0,
+            0,
+            0,
+            kind,
+            record_type,
+            &record_data,
+            &frames).unwrap();
+
+        record_data[0] = b'A';
+
+        machine.add_sample_with_record(
+            0,
+            MetricValue::Count(0),
+            0,
+            0,
+            0,
+            kind,
+            record_type,
+            &record_data,
+            &frames).unwrap();
+
+        let sample_kinds = machine.sample_kinds();
+        let record_types = machine.record_types();
+        let proc = machine.find_process(0).unwrap();
+        let samples = proc.samples();
+
+        assert_eq!(2, samples.len());
+
+        let sample = &samples[0];
+        let data = machine.sample_record_data(sample);
+        let record_type = data.record_type();
+        let record_data = data.record_data();
+        assert_eq!(1, record_type.id());
+        assert_eq!("test", record_type.name());
+        assert_eq!(1, record_data.len());
+        assert_eq!(b'Z', record_data[0]);
+
+        let sample = &samples[1];
+        let data = machine.sample_record_data(sample);
+        let record_type = data.record_type();
+        let record_data = data.record_data();
+        assert_eq!(1, record_type.id());
+        assert_eq!("test", record_type.name());
+        assert_eq!(1, record_data.len());
+        assert_eq!(b'A', record_data[0]);
+    }
+
+    #[test]
+    fn record_type() {
+        let mut machine = ExportMachine::new(ExportSettings::default());
+
+        let mut e = Event::new(1, "test".into());
+        let format = e.format_mut();
+
+        format.add_field(
+            EventField::new(
+                "1".into(), "unsigned char".into(),
+                LocationType::Static, 0, 1));
+
+        let kind = machine.sample_kind("test");
+
+        let first = machine.record_type(ExportRecordType::from_event(kind, &e));
+        assert_ne!(0, first);
+        assert_eq!(first, machine.record_type(ExportRecordType::from_event(kind, &e)));
+
+        let mut e = Event::new(1, "test".into());
+        let format = e.format_mut();
+
+        format.add_field(
+            EventField::new(
+                "1".into(), "unsigned char".into(),
+                LocationType::Static, 0, 1));
+
+        format.add_field(
+            EventField::new(
+                "2".into(), "unsigned char".into(),
+                LocationType::Static, 0, 1));
+
+        let second = machine.record_type(ExportRecordType::from_event(kind, &e));
+        assert_ne!(0, second);
+        assert_ne!(first, second);
+        assert_eq!(second, machine.record_type(ExportRecordType::from_event(kind, &e)));
+    }
 
     #[test]
     fn replay_by_time() {
