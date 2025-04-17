@@ -77,6 +77,8 @@ impl PEModuleMetadata {
             out.push_str("\",");
         }
 
+        out.push_str(&format!("\"text_offset\": {},", self.text_loaded_layout_offset));
+
         /* Remove trailing comma if it exists */
         if out.ends_with(',') {
             out.pop();
@@ -847,6 +849,7 @@ mod tests {
         m.perfmap_sig = [4; 16];
         m.perfmap_version = 5;
         m.perfmap_name_id = strings.to_id("perfmap_name");
+        m.text_loaded_layout_offset = 65516;
 
         let mut out = String::new();
 
@@ -862,7 +865,8 @@ mod tests {
         expected.push_str("\"signature\": \"03030303030303030303030303030303\",");
         expected.push_str("\"perfmap_signature\": \"04040404040404040404040404040404\",");
         expected.push_str("\"perfmap_version\": 5,");
-        expected.push_str("\"perfmap_name\": \"perfmap_name\"");
+        expected.push_str("\"perfmap_name\": \"perfmap_name\",");
+        expected.push_str("\"text_offset\": 65516");
         expected.push_str("}");
 
         assert_eq!(expected, out);
