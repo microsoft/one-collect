@@ -283,8 +283,7 @@ impl From<EventFieldRef> for usize {
 
 /// `LocationType` is used to classify the type of location of an `EventField`.
 /// It describes if the location is static, dynamic, or a static string.
-#[derive(Debug)]
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum LocationType {
     /// Represents a static location that holds binary data.
     Static,
@@ -300,6 +299,7 @@ pub enum LocationType {
 
 /// `EventField` represents a field in an event.
 /// It holds information about the field name, type, location, offset, and size.
+#[derive(Clone, PartialEq)]
 pub struct EventField {
     /// The name of the field.
     pub name: String,
@@ -343,6 +343,7 @@ impl EventField {
 
 /// `EventFormat` represents the format of an event.
 /// It holds a collection of `EventField`s which describe the fields within an event.
+#[derive(Clone, PartialEq)]
 pub struct EventFormat {
     fields: Vec<EventField>,
 }

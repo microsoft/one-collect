@@ -3,6 +3,7 @@ use std::io::{Seek, SeekFrom, Write, BufWriter};
 
 use chrono::{DateTime, Datelike, Timelike, Utc};
 
+use crate::event::{EventField, LocationType};
 use crate::helpers::exporting::*;
 use crate::helpers::exporting::graph::*;
 
@@ -26,11 +27,21 @@ struct SavedPidTidKey {
     tid: u32,
 }
 
-struct NetTraceField {
+struct NetTraceField<'a> {
     type_id: u8,
-    name: &'static str,
+    name: &'a str,
 }
 
+const TYPE_ID_BYTE: u8 = 6;
+const TYPE_ID_INT16: u8 = 7;
+const TYPE_ID_UINT16: u8 = 8;
+const TYPE_ID_INT32: u8 = 9;
+const TYPE_ID_UINT32: u8 = 10;
+const TYPE_ID_INT64: u8 = 11;
+const TYPE_ID_UINT64: u8 = 12;
+const TYPE_ID_SINGLE: u8 = 13;
+const TYPE_ID_DOUBLE: u8 = 14;
+const TYPE_ID_NULL_UTF16_STRING: u8 = 18;
 const TYPE_ID_VARUINT: u8 = 21;
 const TYPE_ID_UTF8: u8 = 23;
 
@@ -225,6 +236,7 @@ struct NetTraceWriter {
     output: BufWriter<File>,
     event_block: Vec<u8>,
     buffer: Vec<u8>,
+    record_id_offset: u32,
     existing_event_id: u32,
     create_event_id: u32,
     exit_event_id: u32,
@@ -247,6 +259,7 @@ impl NetTraceWriter {
             output: BufWriter::new(File::create(path)?),
             event_block: Vec::new(),
             buffer: Vec::new(),
+            record_id_offset: 0,
             existing_event_id: 0,
             create_event_id: 0,
             exit_event_id: 0,
@@ -538,7 +551,26 @@ impl NetTraceWriter {
         self.buffer.write_varint(value)?;
 
         /* Meta ID of 0 is reserved, so we add 1 here */
-        let event_id = (sample.kind() + 1) as u32;
+        let mut event_id = sample.kind() as u32 + 1;
+
+        /* Handle if it's a record based sample */
+        if sample.has_record() {
+            /* Get the record for the sample */
+            let data = machine.sample_record_data(sample);
+
+            /* Write the extra data after the value */
+            self.buffer.write_all(data.record_data())?;
+
+            /*
+             * We use the record_type as the kind with an offset.
+             * This is setup when originally writing out the metadata
+             * for the NetTrace file. This ensures we can have samples
+             * that contain record data as well as those that don't, even
+             * if the name conflicts. We do not need a + 1 here because
+             * the record_id_offset handles this for us.
+             */
+            event_id = self.record_id_offset + data.record_type_id() as u32;
+        }
 
         self.write_event_blob_from_buffer(
             machine,
@@ -729,9 +761,85 @@ impl NetTraceWriter {
         Ok(())
     }
 
+    fn event_field_to_type(field: &EventField) -> Option<u8> {
+        let type_id;
+
+        if field.location == LocationType::StaticUTF16String {
+            type_id = TYPE_ID_NULL_UTF16_STRING;
+        } else {
+            let first_word = field.type_name.split_whitespace().next();
+
+            if field.type_name.ends_with("]") {
+                if let Some(index) = field.type_name.rfind('[') {
+                    if index != field.type_name.len() - 2 {
+                        /*
+                         * NetTrace cannot currently represent static
+                         * sized arrays of char/bytes/etc. So we must
+                         * stop on these until we have a workaround.
+                         */
+                        return None;
+                    }
+                }
+            }
+
+            type_id = match first_word {
+                /* Byte */
+                Some("u8") => { TYPE_ID_BYTE },
+                Some("s8") => { TYPE_ID_BYTE },
+                Some("char") => { TYPE_ID_BYTE },
+
+                /* INT16 */
+                Some("u16") => { TYPE_ID_UINT16 },
+                Some("s16") => { TYPE_ID_INT16 },
+                Some("short") => { TYPE_ID_INT16 },
+
+                /* INT32 */
+                Some("u32") => { TYPE_ID_UINT32 },
+                Some("s32") => { TYPE_ID_INT32 },
+                Some("int") => { TYPE_ID_INT32 },
+
+                /* INT64 */
+                Some("u64") => { TYPE_ID_UINT64 },
+                Some("s64") => { TYPE_ID_INT64 },
+                Some("long") => { TYPE_ID_INT64 },
+
+                /* SINGLE */
+                Some("float") => { TYPE_ID_SINGLE },
+
+                /* DOUBLE */
+                Some("double") => { TYPE_ID_DOUBLE },
+
+                /* UNSIGNED */
+                Some("unsigned") => {
+                    /* Ambigious, use size */
+                    match field.size {
+                        1 => { TYPE_ID_BYTE },
+                        2 => { TYPE_ID_UINT16 },
+                        4 => { TYPE_ID_UINT32 },
+                        8 => { TYPE_ID_UINT64 },
+                        _ => { return None; },
+                    }
+                },
+
+                /* Linux Variable Data */
+                Some("__rel_loc") => { TYPE_ID_UINT32 },
+                Some("__data_loc") => { TYPE_ID_UINT32 },
+
+                /* Windows UTF16 string */
+                Some("string") => { TYPE_ID_NULL_UTF16_STRING },
+
+                /* Unhandled */
+                _ => { return None; },
+            };
+        }
+
+        Some(type_id)
+    }
+
     fn write_metadata_object(
         &mut self,
-        stack_kinds: &[String]) -> anyhow::Result<()> {
+        stack_kinds: &[String],
+        record_types: &[ExportRecordType]) -> anyhow::Result<()> {
         let block_start = self.write_start_block()?;
         let mut meta_id = 1;
 
@@ -751,6 +859,48 @@ impl NetTraceWriter {
                 meta_id,
                 kind,
                 &STACK_EVENT_FIELDS)?;
+
+            meta_id += 1;
+        }
+
+        /*
+         * Record Event Metadata:
+         * These can also be unbounded in size. We use the resource_type
+         * as the meta_id along with a calculated offset.
+         */
+        self.record_id_offset = meta_id;
+
+        let mut record_fields = Vec::new();
+
+        for record_type in record_types {
+            record_fields.clear();
+            record_fields.push(VALUE_FIELD);
+
+            /* Dynamic fields */
+            for field in record_type.format().fields() {
+                match Self::event_field_to_type(field) {
+                    Some(type_id) => {
+                        record_fields.push(NetTraceField {
+                            type_id,
+                            name: &field.name,
+                        });
+                    },
+                    None => {
+                        /*
+                         * If we cannot support it, then stop. This is until
+                         * we have a way to represent fixed sized arrays.
+                         */
+                        break;
+                    },
+                }
+            }
+
+            self.write_event_metadata(
+                meta_id,
+                "Universal.Events",
+                meta_id,
+                record_type.name(),
+                &record_fields)?;
 
             meta_id += 1;
         }
@@ -1029,7 +1179,9 @@ impl NetTraceFormat for ExportMachine {
             cpu_count,
             sample_freq)?;
 
-        writer.write_metadata_object(self.sample_kinds())?;
+        writer.write_metadata_object(
+            self.sample_kinds(),
+            self.record_types())?;
 
         let converter = DefaultExportGraphMetricValueConverter::default();
 
@@ -1042,5 +1194,252 @@ impl NetTraceFormat for ExportMachine {
         writer.finish(&self)?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn event_field_to_type() {
+        /* BYTE */
+        assert_eq!(
+            Some(TYPE_ID_BYTE),
+            NetTraceWriter::event_field_to_type(
+                &EventField::new(
+                    "Test".into(),
+                    "char a".into(),
+                    LocationType::Static,
+                    0,
+                    1)));
+
+        assert_eq!(
+            Some(TYPE_ID_BYTE),
+            NetTraceWriter::event_field_to_type(
+                &EventField::new(
+                    "Test".into(),
+                    "u8 a".into(),
+                    LocationType::Static,
+                    0,
+                    1)));
+
+        assert_eq!(
+            Some(TYPE_ID_BYTE),
+            NetTraceWriter::event_field_to_type(
+                &EventField::new(
+                    "Test".into(),
+                    "s8 a".into(),
+                    LocationType::Static,
+                    0,
+                    1)));
+
+        /* INT16 */
+        assert_eq!(
+            Some(TYPE_ID_INT16),
+            NetTraceWriter::event_field_to_type(
+                &EventField::new(
+                    "Test".into(),
+                    "short a".into(),
+                    LocationType::Static,
+                    0,
+                    2)));
+
+        assert_eq!(
+            Some(TYPE_ID_INT16),
+            NetTraceWriter::event_field_to_type(
+                &EventField::new(
+                    "Test".into(),
+                    "s16 a".into(),
+                    LocationType::Static,
+                    0,
+                    2)));
+
+        assert_eq!(
+            Some(TYPE_ID_UINT16),
+            NetTraceWriter::event_field_to_type(
+                &EventField::new(
+                    "Test".into(),
+                    "u16 a".into(),
+                    LocationType::Static,
+                    0,
+                    2)));
+
+        assert_eq!(
+            Some(TYPE_ID_UINT16),
+            NetTraceWriter::event_field_to_type(
+                &EventField::new(
+                    "Test".into(),
+                    "unsigned short a".into(),
+                    LocationType::Static,
+                    0,
+                    2)));
+
+        /* INT32 */
+        assert_eq!(
+            Some(TYPE_ID_INT32),
+            NetTraceWriter::event_field_to_type(
+                &EventField::new(
+                    "Test".into(),
+                    "int a".into(),
+                    LocationType::Static,
+                    0,
+                    4)));
+
+        assert_eq!(
+            Some(TYPE_ID_INT32),
+            NetTraceWriter::event_field_to_type(
+                &EventField::new(
+                    "Test".into(),
+                    "s32 a".into(),
+                    LocationType::Static,
+                    0,
+                    4)));
+
+        assert_eq!(
+            Some(TYPE_ID_UINT32),
+            NetTraceWriter::event_field_to_type(
+                &EventField::new(
+                    "Test".into(),
+                    "u32 a".into(),
+                    LocationType::Static,
+                    0,
+                    4)));
+
+        assert_eq!(
+            Some(TYPE_ID_UINT32),
+            NetTraceWriter::event_field_to_type(
+                &EventField::new(
+                    "Test".into(),
+                    "unsigned int a".into(),
+                    LocationType::Static,
+                    0,
+                    4)));
+
+        /* INT64 */
+        assert_eq!(
+            Some(TYPE_ID_INT64),
+            NetTraceWriter::event_field_to_type(
+                &EventField::new(
+                    "Test".into(),
+                    "long a".into(),
+                    LocationType::Static,
+                    0,
+                    8)));
+
+        assert_eq!(
+            Some(TYPE_ID_INT64),
+            NetTraceWriter::event_field_to_type(
+                &EventField::new(
+                    "Test".into(),
+                    "s64 a".into(),
+                    LocationType::Static,
+                    0,
+                    8)));
+
+        assert_eq!(
+            Some(TYPE_ID_UINT64),
+            NetTraceWriter::event_field_to_type(
+                &EventField::new(
+                    "Test".into(),
+                    "u64 a".into(),
+                    LocationType::Static,
+                    0,
+                    8)));
+
+        assert_eq!(
+            Some(TYPE_ID_UINT64),
+            NetTraceWriter::event_field_to_type(
+                &EventField::new(
+                    "Test".into(),
+                    "unsigned long a".into(),
+                    LocationType::Static,
+                    0,
+                    8)));
+
+        /* SINGLE */
+        assert_eq!(
+            Some(TYPE_ID_SINGLE),
+            NetTraceWriter::event_field_to_type(
+                &EventField::new(
+                    "Test".into(),
+                    "float a".into(),
+                    LocationType::Static,
+                    0,
+                    4)));
+
+        /* DOUBLE */
+        assert_eq!(
+            Some(TYPE_ID_DOUBLE),
+            NetTraceWriter::event_field_to_type(
+                &EventField::new(
+                    "Test".into(),
+                    "double a".into(),
+                    LocationType::Static,
+                    0,
+                    4)));
+
+        /* UTF16 String */
+        assert_eq!(
+            Some(TYPE_ID_NULL_UTF16_STRING),
+            NetTraceWriter::event_field_to_type(
+                &EventField::new(
+                    "Test".into(),
+                    "string a".into(),
+                    LocationType::Static,
+                    0,
+                    4)));
+
+        assert_eq!(
+            Some(TYPE_ID_NULL_UTF16_STRING),
+            NetTraceWriter::event_field_to_type(
+                &EventField::new(
+                    "Test".into(),
+                    "wchar a[]".into(),
+                    LocationType::StaticUTF16String,
+                    0,
+                    4)));
+
+        /* Variable Linux Data */
+        assert_eq!(
+            Some(TYPE_ID_UINT32),
+            NetTraceWriter::event_field_to_type(
+                &EventField::new(
+                    "Test".into(),
+                    "__rel_loc char data[]".into(),
+                    LocationType::Static,
+                    0,
+                    4)));
+
+        assert_eq!(
+            Some(TYPE_ID_UINT32),
+            NetTraceWriter::event_field_to_type(
+                &EventField::new(
+                    "Test".into(),
+                    "__data_loc char data[]".into(),
+                    LocationType::Static,
+                    0,
+                    4)));
+
+        /* Unknown */
+        assert_eq!(
+            None,
+            NetTraceWriter::event_field_to_type(
+                &EventField::new(
+                    "Test".into(),
+                    "char comm[16]".into(),
+                    LocationType::Static,
+                    0,
+                    16)));
+
+        assert_eq!(
+            None,
+            NetTraceWriter::event_field_to_type(
+                &EventField::new(
+                    "Test".into(),
+                    "wut da".into(),
+                    LocationType::Static,
+                    0,
+                    1)));
     }
 }

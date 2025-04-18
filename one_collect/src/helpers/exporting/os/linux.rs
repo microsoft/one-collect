@@ -689,6 +689,8 @@ impl OSExportMachine {
             None => { anyhow::bail!("No callstack reader specified."); }
         };
 
+        let empty_record_type = machine.record_type(ExportRecordType::default());
+
         let machine = Writable::new(machine);
 
         let callstack_machine = machine.clone();
@@ -712,6 +714,7 @@ impl OSExportMachine {
                         session,
                         &callstack_reader)));
 
+
             for mut callback in events {
                 if callback.event.is_none() {
                     continue;
@@ -727,11 +730,22 @@ impl OSExportMachine {
                 /* Invoke built callback for setup, etc */
                 (callback.built)(&mut builder)?;
 
-                let sample_kind = match builder.take_sample_kind() {
+                /* Must take these to allow builder to drop */
+                let sample_kind = builder.take_sample_kind();
+                let record_type = builder.take_record_type();
+
+                let sample_kind = match sample_kind {
                     /* If the builder has a sample kind pre-defined, use that */
                     Some(kind) => { kind },
                     /* Otherwise, use the event name */
                     None => { event_machine.sample_kind(event.name()) }
+                };
+
+                let record_type = match record_type {
+                    /* If the builder has a record type defined, use that */
+                    Some(record_type) => { record_type },
+                    /* Otherwise, use an empty record type */
+                    None => { empty_record_type },
                 };
 
                 /* Re-use sampler for all events */
@@ -743,6 +757,7 @@ impl OSExportMachine {
                         &mut ExportTraceContext::new(
                             &mut event_sampler.borrow_mut(),
                             sample_kind,
+                            record_type,
                             data))
                 });
 

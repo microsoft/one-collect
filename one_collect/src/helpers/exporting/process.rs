@@ -25,7 +25,16 @@ pub struct ExportProcessSample {
     kind: u16,
     tid: u32,
     ip: u64,
-    callstack_id: usize,
+
+    /*
+     * Never expect more than millions of these:
+     * Callers expect these to be usize for ease of use.
+     * However, we never expect this to get into the billions.
+     * We can save space by casting in and out of this struct
+     * safely from usize to u32 and back.
+     */
+    callstack_id: u32,
+    record_id: u32,
 }
 
 impl ExportProcessSample {
@@ -37,6 +46,8 @@ impl ExportProcessSample {
         tid: u32,
         ip: u64,
         callstack_id: usize) -> Self {
+        let callstack_id = callstack_id as u32;
+
         Self {
             time,
             value,
@@ -45,6 +56,7 @@ impl ExportProcessSample {
             tid,
             ip,
             callstack_id,
+            record_id: 0,
         }
     }
 
@@ -64,7 +76,17 @@ impl ExportProcessSample {
 
     pub fn ip(&self) -> u64 { self.ip }
 
-    pub fn callstack_id(&self) -> usize { self.callstack_id }
+    pub fn callstack_id(&self) -> usize { self.callstack_id as usize }
+
+    pub fn record_id(&self) -> usize { self.record_id as usize }
+
+    pub fn has_record(&self) -> bool { self.record_id != 0 }
+
+    pub fn attach_record(
+        &mut self,
+        record_id: usize) {
+        self.record_id = record_id as u32;
+    }
 }
 
 const EXPORT_PROCESS_FLAG_CREATED: u8 = 1 << 0;
