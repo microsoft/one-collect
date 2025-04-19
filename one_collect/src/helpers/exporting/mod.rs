@@ -7,6 +7,12 @@ use crate::Writable;
 use crate::event::{Event, EventData};
 use crate::intern::{InternedStrings, InternedCallstacks};
 
+#[cfg(feature = "scripting")]
+pub mod scripting;
+
+#[cfg(feature = "scripting")]
+pub use scripting::ScriptedUniversalExporter;
+
 use crate::helpers::callstack::CallstackHelper;
 
 use modulemetadata::ModuleMetadata;

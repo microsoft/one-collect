@@ -56,6 +56,14 @@ impl UniversalExporter {
         }
     }
 
+    pub fn swap_settings(
+        &mut self,
+        mut func: impl FnMut(ExportSettings) -> ExportSettings) {
+        if let Some(settings) = self.settings.take() {
+            self.settings = Some(func(settings));
+        }
+    }
+
     pub fn with_per_cpu_buffer_bytes(
         mut self,
         bytes: usize) -> Self {

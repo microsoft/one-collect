@@ -6,6 +6,10 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[features]
+default = ["scripting"]
+scripting = []
+
 [dependencies]
 anyhow = "1.0.75"
 twox-hash = "1.6.3"
@@ -14,6 +18,7 @@ protobuf = "3.4.*"
 flate2 = "1.0.31"
 ruwind = { path = "../ruwind" }
 chrono = "0.4.39"
+rhai = "1.21.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2.153"
