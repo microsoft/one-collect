@@ -15,6 +15,11 @@ use std::thread::{self, JoinHandle};
 use crate::helpers::dotnet::*;
 use crate::helpers::dotnet::universal::UniversalDotNetHelperOSHooks;
 
+#[cfg(feature = "scripting")]
+use crate::helpers::dotnet::scripting::{DotNetScenario, DotNetScenarioOSHooks};
+#[cfg(feature = "scripting")]
+use crate::helpers::exporting::UniversalExporter;
+
 use crate::perf_event::*;
 use crate::openat::OpenAt;
 use crate::Writable;
@@ -285,6 +290,15 @@ impl DotNetHelperLinuxExt for DotNetHelper {
                 let _ = proc.disable_perf_map();
             }
         }
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "scripting"))]
+impl DotNetScenarioOSHooks for DotNetScenario {
+    fn os_use_scenario(
+        &mut self,
+        exporter: UniversalExporter) -> UniversalExporter {
+        exporter
     }
 }
 

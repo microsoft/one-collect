@@ -4,6 +4,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::helpers::dotnet::*;
 use crate::helpers::dotnet::universal::UniversalDotNetHelperOSHooks;
 
+#[cfg(feature = "scripting")]
+use crate::helpers::dotnet::scripting::{DotNetScenario, DotNetScenarioOSHooks};
+#[cfg(feature = "scripting")]
+use crate::helpers::exporting::UniversalExporter;
+
 use crate::helpers::exporting::symbols::*;
 
 use crate::ReadOnly;
@@ -33,6 +38,15 @@ impl DotNetHelperWindowsExt for DotNetHelper {
         self.os.jit_symbols = true;
 
         self
+    }
+}
+
+#[cfg(all(target_os = "windows", feature = "scripting"))]
+impl DotNetScenarioOSHooks for DotNetScenario {
+    fn os_use_scenario(
+        &mut self,
+        exporter: UniversalExporter) -> UniversalExporter {
+        exporter
     }
 }
 

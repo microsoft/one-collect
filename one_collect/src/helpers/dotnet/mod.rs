@@ -1,6 +1,12 @@
 pub mod os;
 use os::OSDotNetHelper;
 
+#[cfg(feature = "scripting")]
+pub mod scripting;
+
+#[cfg(feature = "scripting")]
+pub use scripting::DotNetScripting;
+
 use crate::Writable;
 use crate::helpers::exporting::DynamicSymbol;
 
