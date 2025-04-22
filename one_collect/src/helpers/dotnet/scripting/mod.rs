@@ -2,28 +2,44 @@ use crate::helpers::exporting::{
     UniversalExporter,
     ScriptedUniversalExporter
 };
+use crate::helpers::exporting::process::MetricValue;
+use crate::event::Event;
 
 use rhai::{CustomType, TypeBuilder};
 
 mod runtime;
 
+pub (crate) struct DotNetSample {
+    event: Event,
+    sample_value: Box<dyn FnMut(&[u8]) -> anyhow::Result<MetricValue>>,
+    record: bool,
+}
+
+impl DotNetSample {
+    pub fn record(&self) -> bool { self.record }
+
+    pub fn take(self) -> (Event, Box<dyn FnMut(&[u8]) -> anyhow::Result<MetricValue>>) {
+        (self.event, self.sample_value)
+    }
+}
+
 #[derive(Default, Clone)]
 pub (crate) struct DotNetEventGroup {
     events: Vec<DotNetEvent>,
-    keyword: u32,
+    keyword: u64,
     level: u8,
 }
 
 impl DotNetEventGroup {
     pub fn events(&self) -> &Vec<DotNetEvent> { &self.events }
 
-    pub fn keyword(&self) -> u32 { self.keyword }
+    pub fn keyword(&self) -> u64 { self.keyword }
 
     pub fn level(&self) -> u8 { self.level }
 
     fn update_keyword(
         &mut self,
-        keyword: u32,
+        keyword: u64,
         level: u8) {
         self.keyword |= keyword;
 
@@ -44,7 +60,7 @@ impl DotNetEventGroup {
 #[derive(Default, Clone)]
 pub (crate) struct DotNetEvent {
     id: u16,
-    keywords: u32,
+    keywords: u64,
     level: u8,
 }
 
@@ -127,6 +143,7 @@ mod tests {
             callstacks.with_records();
             callstacks.with_exceptions(); \
             callstacks.with_gc_allocs(); \
+            callstacks.with_contentions(); \
             use_dotnet_scenario(callstacks); \
             \
             let records = new_dotnet_scenario(); \
