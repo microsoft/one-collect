@@ -396,6 +396,7 @@ impl OSExportMachine {
 
                 let mut builder = ExportBuiltContext::new(
                     &mut event_machine,
+                    &event,
                     session);
 
                 /* Invoke built callback for setup, etc */

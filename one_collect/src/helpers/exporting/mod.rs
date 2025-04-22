@@ -166,12 +166,17 @@ impl ExportSampler {
         /* OS Specific callstack hook */
         self.os_event_callstack(data)?;
 
+        let time = self.os_event_time(data)?;
+        let pid = self.os_event_pid(data)?;
+        let tid = self.os_event_tid(data)?;
+        let cpu = self.os_event_cpu(data)?;
+
         self.exporter.borrow_mut().add_sample(
-            self.os_event_time(data)?,
+            time,
             value,
-            self.os_event_pid(data)?,
-            self.os_event_tid(data)?,
-            self.os_event_cpu(data)?,
+            pid,
+            tid,
+            cpu,
             kind,
             &self.frames)
     }
@@ -188,12 +193,17 @@ impl ExportSampler {
         /* OS Specific callstack hook */
         self.os_event_callstack(data)?;
 
+        let time = self.os_event_time(data)?;
+        let pid = self.os_event_pid(data)?;
+        let tid = self.os_event_tid(data)?;
+        let cpu = self.os_event_cpu(data)?;
+
         self.exporter.borrow_mut().add_sample_with_record(
-            self.os_event_time(data)?,
+            time,
             value,
-            self.os_event_pid(data)?,
-            self.os_event_tid(data)?,
-            self.os_event_cpu(data)?,
+            pid,
+            tid,
+            cpu,
             kind,
             record_type,
             record_data,
@@ -204,6 +214,7 @@ impl ExportSampler {
 pub struct ExportBuiltContext<'a> {
     exporter: &'a mut ExportMachine,
     session: &'a mut os::Session,
+    event: &'a Event,
     sample_kind: Option<u16>,
     record_type: Option<u16>,
 }
@@ -211,10 +222,12 @@ pub struct ExportBuiltContext<'a> {
 impl<'a> ExportBuiltContext<'a> {
     fn new(
         exporter: &'a mut ExportMachine,
+        event: &'a Event,
         session: &'a mut os::Session) -> Self {
         Self {
             exporter,
             session,
+            event,
             sample_kind: None,
             record_type: None,
         }
@@ -224,9 +237,24 @@ impl<'a> ExportBuiltContext<'a> {
 
     fn take_record_type(&mut self) -> Option<u16> { self.record_type.take() }
 
+    pub fn event(&self) -> &Event { self.event }
+
     pub fn exporter_mut(&mut self) -> &mut ExportMachine { self.exporter }
 
     pub fn session_mut(&mut self) -> &mut os::Session { self.session }
+
+    pub fn use_event_for_kind(
+        &mut self,
+        record: bool) {
+        let kind = self.set_sample_kind(self.event.name());
+
+        if record {
+            self.set_record_type(
+                ExportRecordType::from_event(
+                    kind,
+                    self.event));
+        }
+    }
 
     pub fn set_sample_kind(
         &mut self,
@@ -340,6 +368,18 @@ impl<'a> ExportTraceContext<'a> {
         self.add_sample_with_kind(
             value,
             self.sample_kind)
+    }
+
+    pub fn add_sample_with_event_data(
+        &mut self,
+        value: MetricValue,
+        range: std::ops::Range<usize>) -> anyhow::Result<()> {
+        self.sampler.add_sample_with_record(
+            self.data,
+            value,
+            self.sample_kind,
+            self.record_type,
+            &self.data.event_data()[range])
     }
 
     pub fn add_sample_with_record(
