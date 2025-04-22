@@ -155,6 +155,9 @@ mod tests {
             records.with_gc_finalizers(); \
             records.with_gc_suspends(); \
             records.with_gc_restarts(); \
+            records.with_tp_worker_threads(); \
+            records.with_tp_worker_thread_adjustments(); \
+            records.with_tp_io_threads(); \
             use_dotnet_scenario(records);").unwrap();
     }
 }

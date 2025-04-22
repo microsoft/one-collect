@@ -15,7 +15,10 @@ impl DotNetScenario {
             .with_fn("with_gc_finalizers", Self::with_gc_finalizers)
             .with_fn("with_gc_suspends", Self::with_gc_suspends)
             .with_fn("with_gc_restarts", Self::with_gc_restarts)
-            .with_fn("with_contentions", Self::with_contentions);
+            .with_fn("with_contentions", Self::with_contentions)
+            .with_fn("with_tp_worker_threads", Self::with_tp_worker_threads)
+            .with_fn("with_tp_worker_thread_adjustments", Self::with_tp_worker_thread_adjustments)
+            .with_fn("with_tp_io_threads", Self::with_tp_io_threads);
     }
 
     pub fn runtime_samples(&self) -> HashMap<u16, DotNetSample> {
@@ -504,6 +507,434 @@ impl DotNetScenario {
                     }
                 },
 
+                50 => {
+                    let mut event = Event::new(
+                        event.id.into(),
+                        "ThreadPoolWorkerThreadStart".into());
+
+                    let format = event.format_mut();
+                    let mut offset = 0;
+                    let mut len;
+
+                    len = 4;
+                    format.add_field(EventField::new(
+                        "ActiveWorkerThreadCount".into(), "u32".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    format.add_field(EventField::new(
+                        "RetiredWorkerThreadCount".into(), "u32".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    len = 2;
+                    format.add_field(EventField::new(
+                        "ClrInstanceID".into(), "u16".into(),
+                        LocationType::Static, offset, len));
+
+                    DotNetSample {
+                        event,
+                        sample_value: Box::new(|_| { Ok(MetricValue::Count(1)) }),
+                        record,
+                    }
+                },
+
+                51 => {
+                    let mut event = Event::new(
+                        event.id.into(),
+                        "ThreadPoolWorkerThreadStop".into());
+
+                    let format = event.format_mut();
+                    let mut offset = 0;
+                    let mut len;
+
+                    len = 4;
+                    format.add_field(EventField::new(
+                        "ActiveWorkerThreadCount".into(), "u32".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    format.add_field(EventField::new(
+                        "RetiredWorkerThreadCount".into(), "u32".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    len = 2;
+                    format.add_field(EventField::new(
+                        "ClrInstanceID".into(), "u16".into(),
+                        LocationType::Static, offset, len));
+
+                    DotNetSample {
+                        event,
+                        sample_value: Box::new(|_| { Ok(MetricValue::Count(1)) }),
+                        record,
+                    }
+                },
+
+                52 => {
+                    let mut event = Event::new(
+                        event.id.into(),
+                        "ThreadPoolWorkerThreadRetirementStart".into());
+
+                    let format = event.format_mut();
+                    let mut offset = 0;
+                    let mut len;
+
+                    len = 4;
+                    format.add_field(EventField::new(
+                        "ActiveWorkerThreadCount".into(), "u32".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    format.add_field(EventField::new(
+                        "RetiredWorkerThreadCount".into(), "u32".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    len = 2;
+                    format.add_field(EventField::new(
+                        "ClrInstanceID".into(), "u16".into(),
+                        LocationType::Static, offset, len));
+
+                    DotNetSample {
+                        event,
+                        sample_value: Box::new(|_| { Ok(MetricValue::Count(1)) }),
+                        record,
+                    }
+                },
+
+                53 => {
+                    let mut event = Event::new(
+                        event.id.into(),
+                        "ThreadPoolWorkerThreadRetirementStop".into());
+
+                    let format = event.format_mut();
+                    let mut offset = 0;
+                    let mut len;
+
+                    len = 4;
+                    format.add_field(EventField::new(
+                        "ActiveWorkerThreadCount".into(), "u32".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    format.add_field(EventField::new(
+                        "RetiredWorkerThreadCount".into(), "u32".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    len = 2;
+                    format.add_field(EventField::new(
+                        "ClrInstanceID".into(), "u16".into(),
+                        LocationType::Static, offset, len));
+
+                    DotNetSample {
+                        event,
+                        sample_value: Box::new(|_| { Ok(MetricValue::Count(1)) }),
+                        record,
+                    }
+                },
+
+                54 => {
+                    let mut event = Event::new(
+                        event.id.into(),
+                        "ThreadPoolWorkerThreadAdjustmentSample".into());
+
+                    let format = event.format_mut();
+                    let mut offset = 0;
+                    let mut len;
+
+                    len = 8;
+                    format.add_field(EventField::new(
+                        "Throughput".into(), "double".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    len = 2;
+                    format.add_field(EventField::new(
+                        "ClrInstanceID".into(), "u16".into(),
+                        LocationType::Static, offset, len));
+
+                    DotNetSample {
+                        event,
+                        sample_value: Box::new(move |data| {
+                            let slice = data[0..8].try_into()?;
+                            let value = u64::from_ne_bytes(slice);
+
+                            Ok(MetricValue::Count(value))
+                        }),
+                        record,
+                    }
+                },
+
+                55 => {
+                    let mut event = Event::new(
+                        event.id.into(),
+                        "ThreadPoolWorkerThreadAdjustmentAdjustment".into());
+
+                    let format = event.format_mut();
+                    let mut offset = 0;
+                    let mut len;
+
+                    len = 8;
+                    format.add_field(EventField::new(
+                        "AverageThroughput".into(), "double".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    len = 4;
+                    format.add_field(EventField::new(
+                        "NewWorkerThreadCount".into(), "u32".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    format.add_field(EventField::new(
+                        "Reason".into(), "u32".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    len = 2;
+                    format.add_field(EventField::new(
+                        "ClrInstanceID".into(), "u16".into(),
+                        LocationType::Static, offset, len));
+
+                    DotNetSample {
+                        event,
+                        sample_value: Box::new(move |data| {
+                            let slice = data[0..8].try_into()?;
+                            let value = u64::from_ne_bytes(slice);
+
+                            Ok(MetricValue::Count(value))
+                        }),
+                        record,
+                    }
+                },
+
+                56 => {
+                    let mut event = Event::new(
+                        event.id.into(),
+                        "ThreadPoolWorkerThreadAdjustmentStats".into());
+
+                    let format = event.format_mut();
+                    let mut offset = 0;
+                    let mut len;
+
+                    len = 8;
+                    format.add_field(EventField::new(
+                        "Duration".into(), "double".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    format.add_field(EventField::new(
+                        "Throughput".into(), "double".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    format.add_field(EventField::new(
+                        "ThreadWave".into(), "double".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    format.add_field(EventField::new(
+                        "ThroughputWave".into(), "double".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    format.add_field(EventField::new(
+                        "ThroughputErrorEstimate".into(), "double".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    format.add_field(EventField::new(
+                        "AverageThroughputErrorEstimate".into(), "double".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    format.add_field(EventField::new(
+                        "ThroughputRatio".into(), "double".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    format.add_field(EventField::new(
+                        "Confidence".into(), "double".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    format.add_field(EventField::new(
+                        "NewControlSetting".into(), "double".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    len = 2;
+                    format.add_field(EventField::new(
+                        "NewThreadWaveMagnitude".into(), "u16".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    format.add_field(EventField::new(
+                        "ClrInstanceID".into(), "u16".into(),
+                        LocationType::Static, offset, len));
+
+                    DotNetSample {
+                        event,
+                        sample_value: Box::new(move |data| {
+                            let slice = data[8..16].try_into()?;
+                            let value = u64::from_ne_bytes(slice);
+
+                            Ok(MetricValue::Count(value))
+                        }),
+                        record,
+                    }
+                },
+
+                44 => {
+                    let mut event = Event::new(
+                        event.id.into(),
+                        "IOThreadCreate".into());
+
+                    let format = event.format_mut();
+                    let mut offset = 0;
+                    let mut len;
+
+                    len = 8;
+                    format.add_field(EventField::new(
+                        "Count".into(), "u64".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    format.add_field(EventField::new(
+                        "NumRetired".into(), "u64".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    len = 2;
+                    format.add_field(EventField::new(
+                        "ClrInstanceID".into(), "u16".into(),
+                        LocationType::Static, offset, len));
+
+                    DotNetSample {
+                        event,
+                        sample_value: Box::new(move |data| {
+                            let slice = data[0..8].try_into()?;
+                            let value = u64::from_ne_bytes(slice);
+
+                            Ok(MetricValue::Count(value))
+                        }),
+                        record,
+                    }
+                },
+
+                46 => {
+                    let mut event = Event::new(
+                        event.id.into(),
+                        "IOThreadRetire".into());
+
+                    let format = event.format_mut();
+                    let mut offset = 0;
+                    let mut len;
+
+                    len = 8;
+                    format.add_field(EventField::new(
+                        "Count".into(), "u64".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    format.add_field(EventField::new(
+                        "NumRetired".into(), "u64".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    len = 2;
+                    format.add_field(EventField::new(
+                        "ClrInstanceID".into(), "u16".into(),
+                        LocationType::Static, offset, len));
+
+                    DotNetSample {
+                        event,
+                        sample_value: Box::new(move |data| {
+                            let slice = data[0..8].try_into()?;
+                            let value = u64::from_ne_bytes(slice);
+
+                            Ok(MetricValue::Count(value))
+                        }),
+                        record,
+                    }
+                },
+
+                47 => {
+                    let mut event = Event::new(
+                        event.id.into(),
+                        "IOThreadUnretire".into());
+
+                    let format = event.format_mut();
+                    let mut offset = 0;
+                    let mut len;
+
+                    len = 8;
+                    format.add_field(EventField::new(
+                        "Count".into(), "u64".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    format.add_field(EventField::new(
+                        "NumRetired".into(), "u64".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    len = 2;
+                    format.add_field(EventField::new(
+                        "ClrInstanceID".into(), "u16".into(),
+                        LocationType::Static, offset, len));
+
+                    DotNetSample {
+                        event,
+                        sample_value: Box::new(move |data| {
+                            let slice = data[0..8].try_into()?;
+                            let value = u64::from_ne_bytes(slice);
+
+                            Ok(MetricValue::Count(value))
+                        }),
+                        record,
+                    }
+                },
+
+                45 => {
+                    let mut event = Event::new(
+                        event.id.into(),
+                        "IOThreadTerminate".into());
+
+                    let format = event.format_mut();
+                    let mut offset = 0;
+                    let mut len;
+
+                    len = 8;
+                    format.add_field(EventField::new(
+                        "Count".into(), "u64".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    format.add_field(EventField::new(
+                        "NumRetired".into(), "u64".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    len = 2;
+                    format.add_field(EventField::new(
+                        "ClrInstanceID".into(), "u16".into(),
+                        LocationType::Static, offset, len));
+
+                    DotNetSample {
+                        event,
+                        sample_value: Box::new(move |data| {
+                            let slice = data[0..8].try_into()?;
+                            let value = u64::from_ne_bytes(slice);
+
+                            Ok(MetricValue::Count(value))
+                        }),
+                        record,
+                    }
+                },
+
                 81 => {
                     let mut event = Event::new(
                         event.id.into(),
@@ -569,6 +1000,92 @@ impl DotNetScenario {
         }
 
         samples
+    }
+
+    pub fn with_tp_worker_threads(&mut self) {
+        /* Start */
+        self.runtime.add(
+            DotNetEvent {
+                id: 50,
+                keywords: 0x10000,
+                level: 4,
+            });
+
+        /* Stop */
+        self.runtime.add(
+            DotNetEvent {
+                id: 51,
+                keywords: 0x10000,
+                level: 4,
+            });
+
+        /* RetireStart */
+        self.runtime.add(
+            DotNetEvent {
+                id: 52,
+                keywords: 0x10000,
+                level: 4,
+            });
+
+        /* RetireStop */
+        self.runtime.add(
+            DotNetEvent {
+                id: 53,
+                keywords: 0x10000,
+                level: 4,
+            });
+    }
+
+    pub fn with_tp_worker_thread_adjustments(&mut self) {
+        /* Sample */
+        self.runtime.add(
+            DotNetEvent {
+                id: 54,
+                keywords: 0x10000,
+                level: 4,
+            });
+
+        /* Adjustment */
+        self.runtime.add(
+            DotNetEvent {
+                id: 55,
+                keywords: 0x10000,
+                level: 4,
+            });
+
+        /* Stats */
+        self.runtime.add(
+            DotNetEvent {
+                id: 56,
+                keywords: 0x10000,
+                level: 4,
+            });
+    }
+
+    pub fn with_tp_io_threads(&mut self) {
+        /* Retire */
+        self.runtime.add(
+            DotNetEvent {
+                id: 46,
+                keywords: 0x10000,
+                level: 4,
+            });
+
+        /* Unretire */
+        self.runtime.add(
+            DotNetEvent {
+                id: 47,
+                keywords: 0x10000,
+                level: 4,
+            });
+
+        /* Terminate */
+        self.runtime.add(
+            DotNetEvent {
+                id: 45,
+                keywords: 0x10000,
+                level: 4,
+            });
     }
 
     pub fn with_contentions(&mut self) {
