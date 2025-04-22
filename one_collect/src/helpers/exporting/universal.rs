@@ -56,6 +56,19 @@ impl UniversalExporter {
         }
     }
 
+    pub fn add_event(
+        &mut self,
+        event: Event,
+        built: impl FnMut(&mut ExportBuiltContext) -> anyhow::Result<()> + 'static,
+        trace: impl FnMut(&mut ExportTraceContext) -> anyhow::Result<()> + 'static) {
+        if let Some(settings) = self.settings.take() {
+            self.settings = Some(settings.with_event(
+                event,
+                built,
+                trace));
+        }
+    }
+
     pub fn swap_settings(
         &mut self,
         mut func: impl FnMut(ExportSettings) -> ExportSettings) {
