@@ -18,7 +18,9 @@ impl DotNetScenario {
             .with_fn("with_contentions", Self::with_contentions)
             .with_fn("with_tp_worker_threads", Self::with_tp_worker_threads)
             .with_fn("with_tp_worker_thread_adjustments", Self::with_tp_worker_thread_adjustments)
-            .with_fn("with_tp_io_threads", Self::with_tp_io_threads);
+            .with_fn("with_tp_io_threads", Self::with_tp_io_threads)
+            .with_fn("with_arm_threads", Self::with_arm_threads)
+            .with_fn("with_arm_allocs", Self::with_arm_allocs);
     }
 
     pub fn runtime_samples(&self) -> HashMap<u16, DotNetSample> {
@@ -962,6 +964,197 @@ impl DotNetScenario {
                     }
                 },
 
+                85 => {
+                    let mut event = Event::new(
+                        event.id.into(),
+                        "ThreadCreated".into());
+
+                    let format = event.format_mut();
+                    let mut offset = 0;
+                    let mut len;
+
+                    len = 8;
+                    format.add_field(EventField::new(
+                        "ThreadID".into(), "u64".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    format.add_field(EventField::new(
+                        "AppDomainID".into(), "u64".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    len = 4;
+                    format.add_field(EventField::new(
+                        "Flags".into(), "u32".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    format.add_field(EventField::new(
+                        "ManagedThreadIndex".into(), "u32".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    format.add_field(EventField::new(
+                        "OSThreadID".into(), "u32".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    len = 2;
+                    format.add_field(EventField::new(
+                        "ClrInstanceID".into(), "u16".into(),
+                        LocationType::Static, offset, len));
+
+                    DotNetSample {
+                        event,
+                        sample_value: Box::new(|_| { Ok(MetricValue::Count(1)) }),
+                        record,
+                    }
+                },
+
+                86 => {
+                    let mut event = Event::new(
+                        event.id.into(),
+                        "ThreadTerminated".into());
+
+                    let format = event.format_mut();
+                    let mut offset = 0;
+                    let mut len;
+
+                    len = 8;
+                    format.add_field(EventField::new(
+                        "ThreadID".into(), "u64".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    format.add_field(EventField::new(
+                        "AppDomainID".into(), "u64".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    len = 2;
+                    format.add_field(EventField::new(
+                        "ClrInstanceID".into(), "u16".into(),
+                        LocationType::Static, offset, len));
+
+                    DotNetSample {
+                        event,
+                        sample_value: Box::new(|_| { Ok(MetricValue::Count(1)) }),
+                        record,
+                    }
+                },
+
+                87 => {
+                    let mut event = Event::new(
+                        event.id.into(),
+                        "ThreadAppDomainEnter".into());
+
+                    let format = event.format_mut();
+                    let mut offset = 0;
+                    let mut len;
+
+                    len = 8;
+                    format.add_field(EventField::new(
+                        "ThreadID".into(), "u64".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    format.add_field(EventField::new(
+                        "AppDomainID".into(), "u64".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    len = 2;
+                    format.add_field(EventField::new(
+                        "ClrInstanceID".into(), "u16".into(),
+                        LocationType::Static, offset, len));
+
+                    DotNetSample {
+                        event,
+                        sample_value: Box::new(|_| { Ok(MetricValue::Count(1)) }),
+                        record,
+                    }
+                },
+
+                83 => {
+                    let mut event = Event::new(
+                        event.id.into(),
+                        "AppDomainMemAllocated".into());
+
+                    let format = event.format_mut();
+                    let mut offset = 0;
+                    let mut len;
+
+                    len = 8;
+                    format.add_field(EventField::new(
+                        "AppDomainID".into(), "u64".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    format.add_field(EventField::new(
+                        "Allocated".into(), "u64".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    len = 2;
+                    format.add_field(EventField::new(
+                        "ClrInstanceID".into(), "u16".into(),
+                        LocationType::Static, offset, len));
+
+                    DotNetSample {
+                        event,
+                        sample_value: Box::new(move |data| {
+                            let slice = data[8..16].try_into()?;
+                            let value = u64::from_ne_bytes(slice);
+
+                            Ok(MetricValue::Bytes(value))
+                        }),
+                        record,
+                    }
+                },
+
+                84 => {
+                    let mut event = Event::new(
+                        event.id.into(),
+                        "AppDomainMemSurvived".into());
+
+                    let format = event.format_mut();
+                    let mut offset = 0;
+                    let mut len;
+
+                    len = 8;
+                    format.add_field(EventField::new(
+                        "AppDomainID".into(), "u64".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    format.add_field(EventField::new(
+                        "Survived".into(), "u64".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    format.add_field(EventField::new(
+                        "ProcessSurvived".into(), "u64".into(),
+                        LocationType::Static, offset, len));
+                    offset += len;
+
+                    len = 2;
+                    format.add_field(EventField::new(
+                        "ClrInstanceID".into(), "u16".into(),
+                        LocationType::Static, offset, len));
+
+                    DotNetSample {
+                        event,
+                        sample_value: Box::new(move |data| {
+                            let slice = data[8..16].try_into()?;
+                            let value = u64::from_ne_bytes(slice);
+
+                            Ok(MetricValue::Bytes(value))
+                        }),
+                        record,
+                    }
+                },
+
                 91 => {
                     let mut event = Event::new(
                         event.id.into(),
@@ -1000,6 +1193,50 @@ impl DotNetScenario {
         }
 
         samples
+    }
+
+    pub fn with_arm_threads(&mut self) {
+        /* Created */
+        self.runtime.add(
+            DotNetEvent {
+                id: 85,
+                keywords: 0x10800,
+                level: 4,
+            });
+
+        /* Terminated */
+        self.runtime.add(
+            DotNetEvent {
+                id: 86,
+                keywords: 0x10800,
+                level: 4,
+            });
+
+        /* Enter */
+        self.runtime.add(
+            DotNetEvent {
+                id: 87,
+                keywords: 0x10800,
+                level: 4,
+            });
+    }
+
+    pub fn with_arm_allocs(&mut self) {
+        /* Alloc */
+        self.runtime.add(
+            DotNetEvent {
+                id: 83,
+                keywords: 0x800,
+                level: 4,
+            });
+
+        /* Survived */
+        self.runtime.add(
+            DotNetEvent {
+                id: 84,
+                keywords: 0x800,
+                level: 4,
+            });
     }
 
     pub fn with_tp_worker_threads(&mut self) {

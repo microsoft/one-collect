@@ -158,6 +158,8 @@ mod tests {
             records.with_tp_worker_threads(); \
             records.with_tp_worker_thread_adjustments(); \
             records.with_tp_io_threads(); \
+            records.with_arm_threads(); \
+            records.with_arm_allocs(); \
             use_dotnet_scenario(records);").unwrap();
     }
 }
