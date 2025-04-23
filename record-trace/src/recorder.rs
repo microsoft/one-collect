@@ -56,6 +56,7 @@ impl Recorder {
             Some(script) => {
                 let mut scripted = ScriptedUniversalExporter::new(settings);
 
+                scripted.enable_os_scripting();
                 scripted.enable_dotnet_scripting();
 
                 match scripted.from_script(script) {

@@ -52,6 +52,10 @@ impl ScriptedUniversalExporter {
         self.exporter.clone()
     }
 
+    pub fn enable_os_scripting(&mut self) {
+        self.engine.enable_os_scripting();
+    }
+
     fn init(&mut self) {
         let fn_exporter = self.export_swapper();
 
