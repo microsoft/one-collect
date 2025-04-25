@@ -80,6 +80,40 @@ struct ExportCSwitch {
     sample: Option<ExportProcessSample>,
 }
 
+#[derive(Default)]
+struct ExportProxy {
+    errors: Vec<anyhow::Error>,
+    events: HashMap<usize, Event>,
+}
+
+impl ExportProxy {
+    fn proxy_event_data(
+        &mut self,
+        event_id: usize,
+        full_data: &[u8],
+        event_data: &[u8]) {
+        if let Some(event) = self.events.get_mut(&event_id) {
+            self.errors.clear();
+
+            event.process(
+                full_data,
+                event_data,
+                &mut self.errors);
+
+            /* Log errors, if any */
+            for error in &self.errors {
+                eprintln!("Error: Event '{}': {}", event.name(), error);
+            }
+        }
+    }
+
+    fn add_event(
+        &mut self,
+        event: Event) {
+        self.events.insert(event.id(), event);
+    }
+}
+
 struct ExportSampler {
     exporter: Writable<ExportMachine>,
     frames: Vec<u64>,
@@ -129,11 +163,15 @@ impl ExportSampler {
         /* OS Specific callstack hook */
         self.os_event_callstack(data)?;
 
+        let time = self.os_event_time(data)?;
+        let tid = self.os_event_tid(data)?;
+        let cpu = self.os_event_cpu(data)?;
+
         Ok(self.exporter.borrow_mut().make_sample(
-            self.os_event_time(data)?,
+            time,
             value,
-            self.os_event_tid(data)?,
-            self.os_event_cpu(data)?,
+            tid,
+            cpu,
             kind,
             &self.frames))
     }
@@ -276,7 +314,8 @@ impl<'a> ExportBuiltContext<'a> {
 }
 
 pub struct ExportTraceContext<'a> {
-    sampler: &'a mut ExportSampler,
+    sampler: Writable<ExportSampler>,
+    proxy: Writable<ExportProxy>,
     sample_kind: u16,
     record_type: u16,
     data: &'a EventData<'a>,
@@ -284,12 +323,14 @@ pub struct ExportTraceContext<'a> {
 
 impl<'a> ExportTraceContext<'a> {
     fn new(
-        sampler: &'a mut ExportSampler,
+        sampler: Writable<ExportSampler>,
+        proxy: Writable<ExportProxy>,
         sample_kind: u16,
         record_type: u16,
         data: &'a EventData) -> Self {
         Self {
             sampler,
+            proxy,
             sample_kind,
             record_type,
             data,
@@ -299,26 +340,47 @@ impl<'a> ExportTraceContext<'a> {
     pub fn data(&self) -> &'a EventData { self.data }
 
     pub fn cpu(&self) -> anyhow::Result<u16> {
-        self.sampler.os_event_cpu(self.data)
+        self.sampler.borrow().os_event_cpu(self.data)
     }
 
     pub fn time(&self) -> anyhow::Result<u64> {
-        self.sampler.os_event_time(self.data)
+        self.sampler.borrow().os_event_time(self.data)
     }
 
     pub fn pid(&self) -> anyhow::Result<u32> {
-        self.sampler.os_event_pid(self.data)
+        self.sampler.borrow().os_event_pid(self.data)
     }
 
     pub fn tid(&self) -> anyhow::Result<u32> {
-        self.sampler.os_event_tid(self.data)
+        self.sampler.borrow().os_event_tid(self.data)
+    }
+
+    pub fn proxy_data(
+        &mut self,
+        event_id: usize,
+        full_data: &[u8],
+        event_data: &[u8]) {
+        self.proxy.borrow_mut().proxy_event_data(
+            event_id,
+            full_data,
+            event_data);
+    }
+
+    pub fn proxy_event_data(
+        &mut self,
+        event_id: usize,
+        range: std::ops::Range<usize>) {
+        self.proxy_data(
+            event_id,
+            self.data.full_data(),
+            &self.data.event_data()[range]);
     }
 
     pub fn add_sample_with_kind(
         &mut self,
         value: MetricValue,
         kind: u16) -> anyhow::Result<()> {
-        self.sampler.add_sample(
+        self.sampler.borrow_mut().add_sample(
             self.data,
             value,
             kind)
@@ -328,7 +390,7 @@ impl<'a> ExportTraceContext<'a> {
         &mut self,
         value: MetricValue,
         kind: u16) -> anyhow::Result<ExportProcessSample> {
-        self.sampler.make_sample(
+        self.sampler.borrow_mut().make_sample(
             self.data,
             value,
             kind)
@@ -347,7 +409,7 @@ impl<'a> ExportTraceContext<'a> {
         sample: &mut ExportProcessSample,
         record_type: u16,
         record_data: &[u8]) -> anyhow::Result<()> {
-        self.sampler.attach_record_to_sample(
+        self.sampler.borrow_mut().attach_record_to_sample(
             sample,
             record_type,
             record_data)
@@ -357,7 +419,7 @@ impl<'a> ExportTraceContext<'a> {
         &mut self,
         pid: u32,
         sample: ExportProcessSample) -> anyhow::Result<()> {
-        self.sampler.add_custom_sample(
+        self.sampler.borrow_mut().add_custom_sample(
             pid,
             sample)
     }
@@ -374,7 +436,7 @@ impl<'a> ExportTraceContext<'a> {
         &mut self,
         value: MetricValue,
         range: std::ops::Range<usize>) -> anyhow::Result<()> {
-        self.sampler.add_sample_with_record(
+        self.sampler.borrow_mut().add_sample_with_record(
             self.data,
             value,
             self.sample_kind,
@@ -386,7 +448,7 @@ impl<'a> ExportTraceContext<'a> {
         &mut self,
         value: MetricValue,
         record_data: &[u8]) -> anyhow::Result<()> {
-        self.sampler.add_sample_with_record(
+        self.sampler.borrow_mut().add_sample_with_record(
             self.data,
             value,
             self.sample_kind,
@@ -428,6 +490,7 @@ pub struct ExportSettings {
     os: OSExportSettings,
     events: Option<Vec<ExportEventCallback>>,
     target_pids: Option<Vec<i32>>,
+    proxy_id: usize,
 }
 
 impl Default for ExportSettings {
@@ -452,10 +515,22 @@ impl ExportSettings {
             os: OSExportSettings::new(),
             events: None,
             target_pids: None,
+            proxy_id: 0,
         }
     }
 
     pub fn has_unwinder(&self) -> bool { self.unwinder }
+
+    pub fn new_proxy_event(
+        &mut self,
+        name: String) -> Event {
+        self.proxy_id += 1;
+
+        let mut event = Event::new(self.proxy_id, name);
+        event.set_proxy_flag();
+
+        event
+    }
 
     pub fn with_event(
         self,
@@ -1291,5 +1366,84 @@ mod tests {
 
                 Ok(())
             }).expect("Should work");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn proxy() {
+        let mut settings = ExportSettings::default();
+        let count = Writable::new(0usize);
+
+        let mut first = settings.new_proxy_event("1".into());
+        let mut second = settings.new_proxy_event("2".into());
+        let mut third = settings.new_proxy_event("3".into());
+
+        let e_count = count.clone();
+        first.add_callback(move |data| {
+            *e_count.borrow_mut() += 1;
+            assert_eq!(b'1', data.event_data()[0]);
+            assert_eq!(1, data.event_data().len());
+            Ok(())
+        });
+
+        let e_count = count.clone();
+        second.add_callback(move |data| {
+            *e_count.borrow_mut() += 1;
+            assert_eq!(b'2', data.event_data()[0]);
+            assert_eq!(1, data.event_data().len());
+            Ok(())
+        });
+
+        let e_count = count.clone();
+        third.add_callback(move |data| {
+            *e_count.borrow_mut() += 1;
+            assert_eq!(b'3', data.event_data()[0]);
+            assert_eq!(1, data.event_data().len());
+            Ok(())
+        });
+
+        assert_eq!(1, first.id());
+        assert_eq!(2, second.id());
+        assert_eq!(3, third.id());
+
+        let mut proxy = ExportProxy::default();
+
+        proxy.add_event(first);
+        proxy.add_event(second);
+        proxy.add_event(third);
+
+        let machine = Writable::new(ExportMachine::new(settings));
+
+        let session = crate::etw::EtwSession::new();
+
+        let sampler = ExportSampler::new(
+            &machine,
+            OSExportSampler::new(&session));
+
+        let mut data = Vec::new();
+
+        data.push(b'1');
+        data.push(b'2');
+        data.push(b'3');
+
+        let format = EventFormat::new();
+
+        let event_data = EventData::new(
+            &data,
+            &data,
+            &format);
+
+        let mut context = ExportTraceContext::new(
+            Writable::new(sampler),
+            Writable::new(proxy),
+            0,
+            0,
+            &event_data);
+
+        context.proxy_event_data(1, 0..1);
+        context.proxy_event_data(2, 1..2);
+        context.proxy_event_data(3, 2..3);
+
+        assert_eq!(3, *count.borrow());
     }
 }

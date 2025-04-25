@@ -733,6 +733,7 @@ impl EventFormat {
 }
 
 const EVENT_FLAG_NO_CALLSTACK:u64 = 1u64 << 0;
+const EVENT_FLAG_PROXY:u64 = 1u64 << 1;
 
 struct FieldSkip {
     loc_type: LocationType,
@@ -901,6 +902,17 @@ impl Event {
     /// Checks if the no_callstack flag is set for the event.
     pub fn has_no_callstack_flag(&self) -> bool {
         self.flags & EVENT_FLAG_NO_CALLSTACK != 0
+    }
+
+    /// Sets the proxy flag for the event. Use this when events are used for proxy
+    /// scenarios. The underlying session will not actually enable / add these events.
+    pub fn set_proxy_flag(&mut self) {
+        self.flags |= EVENT_FLAG_PROXY;
+    }
+
+    /// Checks if the proxy flag is set for the event.
+    pub fn has_proxy_flag(&self) -> bool {
+        self.flags & EVENT_FLAG_PROXY != 0
     }
 
     /// Returns a mutable reference to the event format.
