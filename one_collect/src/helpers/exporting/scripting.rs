@@ -1,7 +1,7 @@
 use super::*;
-use crate::scripting::ScriptEngine;
+use crate::scripting::{ScriptEngine, ScriptEvent};
 
-use rhai::Engine;
+use rhai::{Engine, EvalAltResult};
 
 pub struct UniversalExporterSwapper {
     exporter: Option<UniversalExporter>,
@@ -11,6 +11,18 @@ impl UniversalExporterSwapper {
     pub fn new(settings: ExportSettings) -> Self {
         Self {
             exporter: Some(UniversalExporter::new(settings)),
+        }
+    }
+
+    pub fn add_event(
+        &mut self,
+        event: Event,
+        built: impl FnMut(&mut ExportBuiltContext) -> anyhow::Result<()> + 'static,
+        trace: impl FnMut(&mut ExportTraceContext) -> anyhow::Result<()> + 'static) {
+        if let Some(mut exporter) = self.exporter.take() {
+            exporter.add_event(event, built, trace);
+
+            self.exporter.replace(exporter);
         }
     }
 
@@ -65,6 +77,95 @@ impl ScriptedUniversalExporter {
                 fn_exporter.borrow_mut().swap(|exporter| {
                     exporter.with_per_cpu_buffer_bytes(size as usize)
                 });
+            });
+
+        let fn_exporter = self.export_swapper();
+
+        self.rhai_engine().register_fn(
+            "record_event",
+            move |event: ScriptEvent| -> Result<(), Box<EvalAltResult>> {
+            if let Some(event) = event.to_event() {
+                fn_exporter.borrow_mut().add_event(
+                    event,
+                    move |built| {
+                        built.use_event_for_kind(true);
+
+                        Ok(())
+                    },
+                    move |trace| {
+                        let event_data = trace.data().event_data();
+
+                        trace.add_sample_with_event_data(
+                            MetricValue::Count(1),
+                            0..event_data.len())
+                    });
+            } else {
+                return Err("Event has already been used.".into());
+            }
+
+            Ok(())
+        });
+
+        let fn_exporter = self.export_swapper();
+
+        self.rhai_engine().register_fn(
+            "sample_event",
+            move |event: ScriptEvent,
+                sample_field: String,
+                sample_type: String,
+                record_data: bool| -> Result<(), Box<EvalAltResult>> {
+                if let Some(event) = event.to_event() {
+                    let mut get_data = match event.try_get_field_data_closure(&sample_field) {
+                        Some(closure) => { closure },
+                        None => { return Err(
+                            format!(
+                                "Field \"{}\" cannot be used for samples.",
+                                sample_field).into());
+                        },
+                    };
+
+                    /* SAFETY: Already accessed the field above */
+                    let format = event.format();
+                    let field_ref = format.get_field_ref_unchecked(&sample_field);
+                    let sample_field = &format.get_field_unchecked(field_ref);
+
+                    let mut get_metric = match MetricValue::try_get_value_closure(
+                        &sample_type,
+                        &sample_field.type_name) {
+                        Some(closure) => { closure },
+                        None => { return Err(
+                            format!(
+                                "Sample type \"{}\" with data type \"{}\" cannot be used.",
+                                sample_type,
+                                &sample_field.type_name).into());
+                        },
+                    };
+
+                    fn_exporter.borrow_mut().add_event(
+                        event,
+                        move |built| {
+                            built.use_event_for_kind(record_data);
+
+                            Ok(())
+                        },
+                        move |trace| {
+                            let event_data = trace.data().event_data();
+                            let sample_data = get_data(event_data);
+                            let sample_value = get_metric(sample_data)?;
+
+                            if record_data {
+                                trace.add_sample_with_event_data(
+                                    sample_value,
+                                    0..event_data.len())
+                            } else {
+                                trace.add_sample(sample_value)
+                            }
+                        });
+                } else {
+                    return Err("Event has already been used.".into());
+                }
+
+                Ok(())
             });
     }
 
