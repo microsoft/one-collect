@@ -183,4 +183,8 @@ impl UniversalExporter {
             None => { anyhow::bail!("No settings.") },
         }
     }
+
+    pub(crate) fn settings_mut(&mut self) -> Option<&mut ExportSettings> {
+        self.settings.as_mut()
+    }
 }

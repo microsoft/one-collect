@@ -14,15 +14,25 @@ impl UniversalExporterSwapper {
         }
     }
 
+    pub fn new_proxy_event(
+        &mut self,
+        name: String) -> Option<Event> {
+        if let Some(exporter) = self.exporter.as_mut() {
+            if let Some(settings) = exporter.settings_mut() {
+                return Some(settings.new_proxy_event(name));
+            }
+        }
+
+        None
+    }
+
     pub fn add_event(
         &mut self,
         event: Event,
         built: impl FnMut(&mut ExportBuiltContext) -> anyhow::Result<()> + 'static,
         trace: impl FnMut(&mut ExportTraceContext) -> anyhow::Result<()> + 'static) {
-        if let Some(mut exporter) = self.exporter.take() {
+        if let Some(exporter) = self.exporter.as_mut() {
             exporter.add_event(event, built, trace);
-
-            self.exporter.replace(exporter);
         }
     }
 
