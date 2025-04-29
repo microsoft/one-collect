@@ -3,9 +3,12 @@ use crate::helpers::exporting::{
     ScriptedUniversalExporter
 };
 use crate::helpers::exporting::process::MetricValue;
+use crate::helpers::dotnet::os::OSDotNetEventFactory;
 use crate::event::Event;
+use crate::scripting::ScriptEvent;
+use crate::Writable;
 
-use rhai::{CustomType, TypeBuilder};
+use rhai::{CustomType, TypeBuilder, EvalAltResult};
 
 mod runtime;
 
@@ -122,6 +125,36 @@ impl DotNetScripting for ScriptedUniversalExporter {
                     scenario.use_scenario(exporter)
                 });
             });
+
+        let fn_exporter = self.export_swapper();
+
+        let factory = Writable::new(
+            OSDotNetEventFactory::new(
+                move |name| { fn_exporter.borrow_mut().new_proxy_event(name) }));
+
+        let fn_factory = factory.clone();
+
+        self.export_swapper().borrow_mut().swap(move |exporter| {
+            factory.borrow_mut().hook_to_exporter(exporter)
+        });
+
+        self.rhai_engine().register_fn(
+            "event_from_dotnet",
+            move |provider_name: String,
+            keyword: i64,
+            level: i64,
+            id: i64,
+            name: String| -> Result<ScriptEvent, Box<EvalAltResult>> {
+            match fn_factory.borrow_mut().new_event(
+                &provider_name,
+                keyword as u64,
+                level as u8,
+                id as usize,
+                name) {
+                Ok(event) => { Ok(event.into()) },
+                Err(e) => { Err(format!("{}", e).into()) }
+            }
+        });
     }
 }
 
@@ -160,6 +193,13 @@ mod tests {
             records.with_tp_io_threads(); \
             records.with_arm_threads(); \
             records.with_arm_allocs(); \
-            use_dotnet_scenario(records);").unwrap();
+            use_dotnet_scenario(records);
+            \
+            let event = event_from_dotnet( \
+                \"Microsoft-Windows-DotNETRuntime\", \
+                0x8000, 2, 80, \"ExceptionThrown\"); \
+            event.append_field(\"Test\", \"u32\", 4); \
+            record_event(event);\
+            ").unwrap();
     }
 }

@@ -20,6 +20,9 @@ ruwind = { path = "../ruwind" }
 chrono = "0.4.39"
 rhai = "1.21.0"
 
+[target.'cfg(target_os = "windows")'.dependencies]
+rust-crypto = "0.2.36"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2.153"
 

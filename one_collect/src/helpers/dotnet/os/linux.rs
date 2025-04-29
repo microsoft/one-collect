@@ -24,6 +24,7 @@ use crate::perf_event::*;
 use crate::openat::OpenAt;
 use crate::Writable;
 use crate::procfs;
+use crate::event::*;
 
 #[cfg(target_os = "linux")]
 use libc::PROT_EXEC;
@@ -290,6 +291,41 @@ impl DotNetHelperLinuxExt for DotNetHelper {
                 let _ = proc.disable_perf_map();
             }
         }
+    }
+}
+
+pub(crate) struct OSDotNetEventFactory {
+    proxy: Box<dyn FnMut(String) -> Option<Event>>,
+}
+
+impl OSDotNetEventFactory {
+    pub fn new(proxy: impl FnMut(String) -> Option<Event> + 'static) -> Self {
+        Self {
+            proxy: Box::new(proxy),
+        }
+    }
+
+    pub fn hook_to_exporter(
+        &mut self,
+        exporter: UniversalExporter) -> UniversalExporter {
+        todo!("Need to build hook");
+    }
+
+    pub fn new_event(
+        &mut self,
+        _provider_name: &str,
+        _keyword: u64,
+        _level: u8,
+        _id: usize,
+        name: String) -> anyhow::Result<Event> {
+        let mut event = match (self.proxy)(name) {
+            Some(event) => { event },
+            None => { anyhow::bail!("Event couldn't be created with proxy"); },
+        };
+
+        todo!("Need to proxy via user_events");
+
+        Ok(event)
     }
 }
 
