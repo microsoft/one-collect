@@ -5,8 +5,6 @@ use crate::helpers::dotnet::*;
 use crate::helpers::dotnet::universal::UniversalDotNetHelperOSHooks;
 
 #[cfg(feature = "scripting")]
-use crate::helpers::dotnet::scripting::{DotNetScenario, DotNetScenarioOSHooks};
-#[cfg(feature = "scripting")]
 use crate::helpers::exporting::UniversalExporter;
 
 use crate::helpers::exporting::symbols::*;
@@ -145,48 +143,6 @@ impl OSDotNetEventFactory {
         *event.extension_mut().keyword_mut() = keyword;
 
         Ok(event)
-    }
-}
-
-#[cfg(all(target_os = "windows", feature = "scripting"))]
-impl DotNetScenarioOSHooks for DotNetScenario {
-    fn os_use_scenario(
-        &mut self,
-        mut exporter: UniversalExporter) -> UniversalExporter {
-        let mut samples = self.runtime_samples();
-        let keyword = self.runtime().keyword();
-        let level = self.runtime().level();
-
-        for (_, sample) in samples.drain() {
-            let record = sample.record();
-
-            let (mut event, mut closure) = sample.take();
-
-            *event.extension_mut().provider_mut() = CLR_RUNTIME_PROVIDER;
-            *event.extension_mut().level_mut() = level;
-            *event.extension_mut().keyword_mut() = keyword;
-
-            exporter.add_event(
-                event,
-                move |built| {
-                    built.use_event_for_kind(record);
-
-                    Ok(())
-                },
-                move |trace| {
-                    let record_data = trace.data().event_data();
-
-                    let value = closure(record_data)?;
-
-                    if record {
-                        trace.add_sample_with_event_data(value, 0..record_data.len())
-                    } else {
-                        trace.add_sample(value)
-                    }
-                });
-        }
-
-        exporter
     }
 }
 

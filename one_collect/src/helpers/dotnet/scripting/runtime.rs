@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use super::*;
 use crate::event::*;
 
@@ -23,15 +21,26 @@ impl DotNetScenario {
             .with_fn("with_arm_allocs", Self::with_arm_allocs);
     }
 
-    pub fn runtime_samples(&self) -> HashMap<u16, DotNetSample> {
-        let mut samples = HashMap::new();
-
+    pub fn add_runtime_samples(
+        &self,
+        factory: &mut OSDotNetEventFactory,
+        mut add_sample: impl FnMut(DotNetSample)) {
         let record = self.record;
+
+        let mut new_event = |id: usize, name: String| -> Event {
+            factory.new_event(
+                "Microsoft-Windows-DotNETRuntime",
+                self.runtime.keyword(),
+                self.runtime.level(),
+                id.into(),
+                name.into()).expect(
+                    "Creating with known provider should always work.")
+        };
 
         for event in self.runtime.events() {
             let mut sample = match event.id {
                 1 => {
-                    let mut event = Event::new(
+                    let mut event = new_event(
                         event.id.into(),
                         "GCStart".into());
 
@@ -73,7 +82,7 @@ impl DotNetScenario {
                 },
 
                 2 => {
-                    let mut event = Event::new(
+                    let mut event = new_event(
                         event.id.into(),
                         "GCEnd".into());
 
@@ -105,7 +114,7 @@ impl DotNetScenario {
                 },
 
                 4 => {
-                    let mut event = Event::new(
+                    let mut event = new_event(
                         event.id.into(),
                         "GCHeapStats".into());
 
@@ -204,7 +213,7 @@ impl DotNetScenario {
                 },
 
                 5 => {
-                    let mut event = Event::new(
+                    let mut event = new_event(
                         event.id.into(),
                         "GCCreateSegment".into());
 
@@ -242,7 +251,7 @@ impl DotNetScenario {
                 },
 
                 6 => {
-                    let mut event = Event::new(
+                    let mut event = new_event(
                         event.id.into(),
                         "GCFreeSegment".into());
 
@@ -269,7 +278,7 @@ impl DotNetScenario {
                 },
 
                 7 => {
-                    let event = Event::new(
+                    let event = new_event(
                         event.id.into(),
                         "GCRestartEEBegin".into());
 
@@ -281,7 +290,7 @@ impl DotNetScenario {
                 },
 
                 3 => {
-                    let event = Event::new(
+                    let event = new_event(
                         event.id.into(),
                         "GCRestartEEEnd".into());
 
@@ -293,7 +302,7 @@ impl DotNetScenario {
                 },
 
                 9 => {
-                    let mut event = Event::new(
+                    let mut event = new_event(
                         event.id.into(),
                         "GCSuspendEE".into());
 
@@ -326,7 +335,7 @@ impl DotNetScenario {
                 },
 
                 8 => {
-                    let event = Event::new(
+                    let event = new_event(
                         event.id.into(),
                         "GCSuspendEEEnd".into());
 
@@ -338,7 +347,7 @@ impl DotNetScenario {
                 },
 
                 10 => {
-                    let mut event = Event::new(
+                    let mut event = new_event(
                         event.id.into(),
                         "GCAllocationTick".into());
 
@@ -404,7 +413,7 @@ impl DotNetScenario {
                 },
 
                 14 => {
-                    let event = Event::new(
+                    let event = new_event(
                         event.id.into(),
                         "GCFinalizersBegin".into());
 
@@ -416,7 +425,7 @@ impl DotNetScenario {
                 },
 
                 13 => {
-                    let mut event = Event::new(
+                    let mut event = new_event(
                         event.id.into(),
                         "GCFinalizersEnd".into());
 
@@ -443,7 +452,7 @@ impl DotNetScenario {
                 },
 
                 11 => {
-                    let event = Event::new(
+                    let event = new_event(
                         event.id.into(),
                         "GCCreateConcurrentThread".into());
 
@@ -455,7 +464,7 @@ impl DotNetScenario {
                 },
 
                 12 => {
-                    let event = Event::new(
+                    let event = new_event(
                         event.id.into(),
                         "GCTerminateConcurrentThread".into());
 
@@ -467,7 +476,7 @@ impl DotNetScenario {
                 },
 
                 80 => {
-                    let mut event = Event::new(
+                    let mut event = new_event(
                         event.id.into(),
                         "ExceptionThrown".into());
 
@@ -510,7 +519,7 @@ impl DotNetScenario {
                 },
 
                 50 => {
-                    let mut event = Event::new(
+                    let mut event = new_event(
                         event.id.into(),
                         "ThreadPoolWorkerThreadStart".into());
 
@@ -542,7 +551,7 @@ impl DotNetScenario {
                 },
 
                 51 => {
-                    let mut event = Event::new(
+                    let mut event = new_event(
                         event.id.into(),
                         "ThreadPoolWorkerThreadStop".into());
 
@@ -574,7 +583,7 @@ impl DotNetScenario {
                 },
 
                 52 => {
-                    let mut event = Event::new(
+                    let mut event = new_event(
                         event.id.into(),
                         "ThreadPoolWorkerThreadRetirementStart".into());
 
@@ -606,7 +615,7 @@ impl DotNetScenario {
                 },
 
                 53 => {
-                    let mut event = Event::new(
+                    let mut event = new_event(
                         event.id.into(),
                         "ThreadPoolWorkerThreadRetirementStop".into());
 
@@ -638,7 +647,7 @@ impl DotNetScenario {
                 },
 
                 54 => {
-                    let mut event = Event::new(
+                    let mut event = new_event(
                         event.id.into(),
                         "ThreadPoolWorkerThreadAdjustmentSample".into());
 
@@ -670,7 +679,7 @@ impl DotNetScenario {
                 },
 
                 55 => {
-                    let mut event = Event::new(
+                    let mut event = new_event(
                         event.id.into(),
                         "ThreadPoolWorkerThreadAdjustmentAdjustment".into());
 
@@ -713,7 +722,7 @@ impl DotNetScenario {
                 },
 
                 56 => {
-                    let mut event = Event::new(
+                    let mut event = new_event(
                         event.id.into(),
                         "ThreadPoolWorkerThreadAdjustmentStats".into());
 
@@ -790,7 +799,7 @@ impl DotNetScenario {
                 },
 
                 44 => {
-                    let mut event = Event::new(
+                    let mut event = new_event(
                         event.id.into(),
                         "IOThreadCreate".into());
 
@@ -827,7 +836,7 @@ impl DotNetScenario {
                 },
 
                 46 => {
-                    let mut event = Event::new(
+                    let mut event = new_event(
                         event.id.into(),
                         "IOThreadRetire".into());
 
@@ -864,7 +873,7 @@ impl DotNetScenario {
                 },
 
                 47 => {
-                    let mut event = Event::new(
+                    let mut event = new_event(
                         event.id.into(),
                         "IOThreadUnretire".into());
 
@@ -901,7 +910,7 @@ impl DotNetScenario {
                 },
 
                 45 => {
-                    let mut event = Event::new(
+                    let mut event = new_event(
                         event.id.into(),
                         "IOThreadTerminate".into());
 
@@ -938,7 +947,7 @@ impl DotNetScenario {
                 },
 
                 81 => {
-                    let mut event = Event::new(
+                    let mut event = new_event(
                         event.id.into(),
                         "ContentionStart".into());
 
@@ -965,7 +974,7 @@ impl DotNetScenario {
                 },
 
                 85 => {
-                    let mut event = Event::new(
+                    let mut event = new_event(
                         event.id.into(),
                         "ThreadCreated".into());
 
@@ -1013,7 +1022,7 @@ impl DotNetScenario {
                 },
 
                 86 => {
-                    let mut event = Event::new(
+                    let mut event = new_event(
                         event.id.into(),
                         "ThreadTerminated".into());
 
@@ -1045,7 +1054,7 @@ impl DotNetScenario {
                 },
 
                 87 => {
-                    let mut event = Event::new(
+                    let mut event = new_event(
                         event.id.into(),
                         "ThreadAppDomainEnter".into());
 
@@ -1077,7 +1086,7 @@ impl DotNetScenario {
                 },
 
                 83 => {
-                    let mut event = Event::new(
+                    let mut event = new_event(
                         event.id.into(),
                         "AppDomainMemAllocated".into());
 
@@ -1114,7 +1123,7 @@ impl DotNetScenario {
                 },
 
                 84 => {
-                    let mut event = Event::new(
+                    let mut event = new_event(
                         event.id.into(),
                         "AppDomainMemSurvived".into());
 
@@ -1156,7 +1165,7 @@ impl DotNetScenario {
                 },
 
                 91 => {
-                    let mut event = Event::new(
+                    let mut event = new_event(
                         event.id.into(),
                         "ContentionStop".into());
 
@@ -1189,10 +1198,8 @@ impl DotNetScenario {
                 sample.event.set_no_callstack_flag();
             }
 
-            samples.insert(event.id, sample);
+            add_sample(sample)
         }
-
-        samples
     }
 
     pub fn with_arm_threads(&mut self) {

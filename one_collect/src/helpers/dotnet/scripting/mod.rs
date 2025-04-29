@@ -1,7 +1,7 @@
 use crate::helpers::exporting::{
-    UniversalExporter,
     ScriptedUniversalExporter
 };
+use crate::helpers::exporting::scripting::UniversalExporterSwapper;
 use crate::helpers::exporting::process::MetricValue;
 use crate::helpers::dotnet::os::OSDotNetEventFactory;
 use crate::event::Event;
@@ -74,23 +74,41 @@ pub (crate) struct DotNetScenario {
     callstacks: bool,
 }
 
-pub (crate) trait DotNetScenarioOSHooks {
-    fn os_use_scenario(
-        &mut self,
-        exporter: UniversalExporter) -> UniversalExporter;
-}
-
 impl DotNetScenario {
-    pub fn runtime(&self) -> &DotNetEventGroup { &self.runtime }
-
     fn with_records(&mut self) { self.record = true; }
 
     fn with_callstacks(&mut self) { self.callstacks = true; }
 
     fn use_scenario(
         &mut self,
-        exporter: UniversalExporter) -> UniversalExporter {
-        self.os_use_scenario(exporter)
+        exporter: &Writable<UniversalExporterSwapper>,
+        factory: &Writable<OSDotNetEventFactory>) {
+        let mut add_sample = |sample: DotNetSample| {
+            let record = sample.record();
+
+            let (event, mut closure) = sample.take();
+
+            exporter.borrow_mut().add_event(
+                event,
+                move |built| {
+                    built.use_event_for_kind(record);
+
+                    Ok(())
+                },
+                move |trace| {
+                    let record_data = trace.data().event_data();
+
+                    let value = closure(record_data)?;
+
+                    if record {
+                        trace.add_sample_with_event_data(value, 0..record_data.len())
+                    } else {
+                        trace.add_sample(value)
+                    }
+                });
+        };
+
+        self.add_runtime_samples(&mut factory.borrow_mut(), &mut add_sample);
     }
 }
 
@@ -112,31 +130,35 @@ impl DotNetScripting for ScriptedUniversalExporter {
     fn enable_dotnet_scripting(&mut self) {
         self.rhai_engine().build_type::<DotNetScenario>();
 
+        let fn_exporter = self.export_swapper();
+
+        /* Singleton factory for scripts */
+        let factory = Writable::new(
+            OSDotNetEventFactory::new(
+                move |name| { fn_exporter.borrow_mut().new_proxy_event(name) }));
+
         self.rhai_engine().register_fn(
             "new_dotnet_scenario",
             || -> DotNetScenario { DotNetScenario::default() });
 
         let fn_exporter = self.export_swapper();
+        let fn_factory = factory.clone();
 
         self.rhai_engine().register_fn(
             "use_dotnet_scenario",
             move |mut scenario: DotNetScenario| {
-                fn_exporter.borrow_mut().swap(|exporter| {
-                    scenario.use_scenario(exporter)
-                });
+                scenario.use_scenario(
+                    &fn_exporter,
+                    &fn_factory);
             });
-
-        let fn_exporter = self.export_swapper();
-
-        let factory = Writable::new(
-            OSDotNetEventFactory::new(
-                move |name| { fn_exporter.borrow_mut().new_proxy_event(name) }));
 
         let fn_factory = factory.clone();
 
         self.export_swapper().borrow_mut().swap(move |exporter| {
-            factory.borrow_mut().hook_to_exporter(exporter)
+            fn_factory.borrow_mut().hook_to_exporter(exporter)
         });
+
+        let fn_factory = factory.clone();
 
         self.rhai_engine().register_fn(
             "event_from_dotnet",

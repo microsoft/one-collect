@@ -16,8 +16,6 @@ use crate::helpers::dotnet::*;
 use crate::helpers::dotnet::universal::UniversalDotNetHelperOSHooks;
 
 #[cfg(feature = "scripting")]
-use crate::helpers::dotnet::scripting::{DotNetScenario, DotNetScenarioOSHooks};
-#[cfg(feature = "scripting")]
 use crate::helpers::exporting::UniversalExporter;
 
 use crate::perf_event::*;
@@ -307,7 +305,7 @@ impl OSDotNetEventFactory {
 
     pub fn hook_to_exporter(
         &mut self,
-        exporter: UniversalExporter) -> UniversalExporter {
+        _exporter: UniversalExporter) -> UniversalExporter {
         todo!("Need to build hook");
     }
 
@@ -318,23 +316,12 @@ impl OSDotNetEventFactory {
         _level: u8,
         _id: usize,
         name: String) -> anyhow::Result<Event> {
-        let mut event = match (self.proxy)(name) {
+        let _event = match (self.proxy)(name) {
             Some(event) => { event },
             None => { anyhow::bail!("Event couldn't be created with proxy"); },
         };
 
         todo!("Need to proxy via user_events");
-
-        Ok(event)
-    }
-}
-
-#[cfg(all(target_os = "linux", feature = "scripting"))]
-impl DotNetScenarioOSHooks for DotNetScenario {
-    fn os_use_scenario(
-        &mut self,
-        exporter: UniversalExporter) -> UniversalExporter {
-        exporter
     }
 }
 
