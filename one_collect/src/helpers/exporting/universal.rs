@@ -16,6 +16,7 @@ impl<'a> UniversalParsedContext<'a> {
     pub fn machine_mut(&'a mut self) -> &'a mut ExportMachine { self.machine }
 }
 
+type BoxedSettingsCallback = Box<dyn FnMut(ExportSettings) -> anyhow::Result<ExportSettings>>;
 type BoxedBuildCallback = Box<dyn FnMut(SessionBuilder, &mut UniversalBuildSessionContext) -> anyhow::Result<SessionBuilder>>;
 type BoxedExportCallback = Box<dyn FnMut(&Writable<ExportMachine>) -> anyhow::Result<()>>;
 type BoxedParsedCallback = Box<dyn FnMut(&mut UniversalParsedContext) -> anyhow::Result<()>>;
@@ -23,6 +24,7 @@ type BoxedDropCallback = Box<dyn FnMut()>;
 
 pub struct UniversalExporter {
     settings: Option<ExportSettings>,
+    setting_hooks: Vec<BoxedSettingsCallback>,
     build_hooks: Vec<BoxedBuildCallback>,
     export_hooks: Vec<BoxedExportCallback>,
     parsed_hooks: Vec<BoxedParsedCallback>,
@@ -48,6 +50,7 @@ impl UniversalExporter {
 
         Self {
             settings: Some(settings),
+            setting_hooks: Vec::new(),
             build_hooks: Vec::new(),
             export_hooks: Vec::new(),
             parsed_hooks: Vec::new(),
@@ -81,6 +84,13 @@ impl UniversalExporter {
         mut self,
         bytes: usize) -> Self {
         self.cpu_buf_bytes = bytes;
+        self
+    }
+
+    pub fn with_settings_hook(
+        mut self,
+        hook: impl FnMut(ExportSettings) -> anyhow::Result<ExportSettings> + 'static) -> Self {
+        self.setting_hooks.push(Box::new(hook));
         self
     }
 
@@ -124,9 +134,18 @@ impl UniversalExporter {
     }
 
     pub fn parse_until(
-        self,
+        mut self,
         name: &str,
         until: impl Fn() -> bool + Send + 'static) -> anyhow::Result<Writable<ExportMachine>> {
+        /* Run Setting Hooks */
+        if let Some(mut settings) = self.settings.take() {
+            for hook in &mut self.setting_hooks {
+                settings = hook(settings)?;
+            }
+
+            self.settings = Some(settings);
+        }
+
         self.os_parse_until(
             name,
             until)
