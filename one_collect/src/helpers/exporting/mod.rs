@@ -519,6 +519,18 @@ impl ExportSettings {
         }
     }
 
+    pub fn for_each_event(
+        &self,
+        mut closure: impl FnMut(&Event)) {
+        if let Some(events) = &self.events {
+            for event in events {
+                if let Some(event) = &event.event {
+                    closure(event);
+                }
+            }
+        }
+    }
+
     pub fn has_unwinder(&self) -> bool { self.unwinder }
 
     pub fn new_proxy_event(
