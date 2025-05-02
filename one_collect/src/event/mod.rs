@@ -542,6 +542,45 @@ impl EventFormat {
         self.get_data_with_offset(field_ref, data, 0)
     }
 
+    /// Retrieves the range of the data within the relative dynamic data field.
+    ///
+    /// # Parameters
+    ///
+    /// - `field_ref`: A reference to the `EventField` for which to retrieve the data.
+    /// - `data`: The event data from which to retrieve the field value.
+    ///
+    /// # Returns
+    ///
+    /// - A `Result` which is:
+    ///     - `Ok` variant containing the range of the field if it exists;
+    ///     - `Err` variant containing an error if the field does not exist or cannot be read.
+    pub fn get_rel_loc(
+        &self,
+        field_ref: EventFieldRef,
+        data: &[u8]) -> Result<std::ops::Range<usize>, anyhow::Error> {
+        let index: usize = field_ref.into();
+
+        if index >= self.fields.len() {
+            anyhow::bail!("Invalid field ref");
+        }
+
+        let field = &self.fields[index];
+
+        if field.size != 4 {
+            anyhow::bail!("Field size must be 4");
+        }
+
+        let rel_loc = u32::from_ne_bytes(data[field.offset..field.offset+4].try_into()?);
+
+        let mut offset = field.offset;
+        offset += 4;
+        offset += (rel_loc & 0xFFFF) as usize;
+
+        let length = (rel_loc >> 16) as usize;
+
+        Ok(offset .. offset + length)
+    }
+
     /// Retrieves the value of a specified field from the event data as a 64-bit unsigned integer.
     ///
     /// # Parameters
@@ -1272,5 +1311,44 @@ mod tests {
         let third = e.try_get_field_data_closure("3");
         assert!(third.is_some());
         assert_eq!(&data[13..21], third.unwrap()(&data));
+    }
+
+    #[test]
+    fn get_rel_loc() {
+        let mut e = Event::new(1, "test".into());
+        let format = e.format_mut();
+
+        format.add_field(
+            EventField::new(
+                "data".into(), "__rel_loc u8[]".into(),
+                LocationType::DynRelative, 0, 4));
+
+        let rel_data = format.get_field_ref_unchecked("data");
+
+        /* 0 offset case */
+        let mut data = Vec::new();
+
+        let rel_loc = 4u32 << 16 | 0u32;
+        let actual = 123456789u32;
+
+        data.extend_from_slice(&rel_loc.to_ne_bytes());
+        data.extend_from_slice(&actual.to_ne_bytes());
+
+        let range = format.get_rel_loc(rel_data, &data).unwrap();
+        assert_eq!(data[4..8], data[range]);
+
+        /* Non-0 offset case */
+        let mut data = Vec::new();
+
+        let rel_loc = 4u32 << 16 | 4u32;
+        let pad = 987654321u32;
+        let actual = 123456789u32;
+
+        data.extend_from_slice(&rel_loc.to_ne_bytes());
+        data.extend_from_slice(&pad.to_ne_bytes());
+        data.extend_from_slice(&actual.to_ne_bytes());
+
+        let range = format.get_rel_loc(rel_data, &data).unwrap();
+        assert_eq!(data[8..12], data[range]);
     }
 }
