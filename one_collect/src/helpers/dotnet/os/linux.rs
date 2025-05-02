@@ -7,17 +7,17 @@ struct UnixStream {}
 use std::io::{Read, BufRead, BufReader, Write};
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::collections::{HashSet};
+use std::collections::{HashSet, HashMap};
 use std::sync::mpsc::{self, Sender, Receiver};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use crate::helpers::dotnet::*;
 use crate::helpers::dotnet::universal::UniversalDotNetHelperOSHooks;
+use crate::helpers::exporting::{UniversalExporter, ExportSettings};
 
-#[cfg(feature = "scripting")]
-use crate::helpers::exporting::UniversalExporter;
-
+use crate::user_events::*;
+use crate::tracefs::*;
 use crate::perf_event::*;
 use crate::openat::OpenAt;
 use crate::Writable;
@@ -292,36 +292,262 @@ impl DotNetHelperLinuxExt for DotNetHelper {
     }
 }
 
+struct LinuxDotNetProvider {
+    events: Writable<HashMap<usize, Vec<LinuxDotNetEvent>>>,
+}
+
+impl Default for LinuxDotNetProvider {
+    fn default() -> Self {
+        Self {
+            events: Writable::new(HashMap::new()),
+        }
+    }
+}
+
+impl LinuxDotNetProvider {
+    pub fn add_event(
+        &mut self,
+        dotnet_id: usize,
+        event: LinuxDotNetEvent) {
+        self.events
+            .borrow_mut()
+            .entry(dotnet_id)
+            .or_default()
+            .push(event)
+    }
+}
+
+struct LinuxDotNetEvent {
+    proxy_id: usize,
+    keyword: u64,
+    level: u8,
+}
+
+const DOTNET_HEADER_FIELDS: &str = "u16 event_id; __rel_loc u8[] payload; __rel_loc u8[] meta";
+
+struct DotNetEventDesc {
+    name: String,
+}
+
+impl DotNetEventDesc {
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+        }
+    }
+}
+
+impl UserEventDesc for DotNetEventDesc {
+    fn format(&self) -> String {
+        format!(
+            "{} {}",
+            self.name,
+            DOTNET_HEADER_FIELDS
+        )
+    }
+}
+
+fn register_dotnet_tracepoint(
+    provider: &LinuxDotNetProvider,
+    settings: ExportSettings,
+    tracefs: &TraceFS,
+    name: &str,
+    user_events: &UserEventsFactory,
+    callstacks: bool) -> anyhow::Result<ExportSettings> {
+    let events = provider.events.clone();
+
+    let _ = user_events.create(&DotNetEventDesc::new(name))?;
+
+    let mut event = tracefs.find_event("user_events", name)?;
+
+    if !callstacks {
+        event.set_no_callstack_flag();
+    }
+
+    let fmt = event.format();
+    let id = fmt.get_field_ref_unchecked("event_id");
+    let payload = fmt.get_field_ref_unchecked("payload");
+
+    let settings = settings.with_event(
+        event,
+        |_built| {
+            Ok(())
+        },
+        move |trace| {
+            let fmt = trace.data().format();
+            let data = trace.data().event_data();
+
+            /* Read DotNet ID */
+            let id = fmt.get_u16(id, data)? as usize;
+
+            /* Read payload range */
+            let payload_range = fmt.get_rel_loc(payload, data)?;
+
+            /* Lookup DotNet Event from ID */
+            if let Some(events) = events.borrow().get(&id) {
+                /* Proxy DotNet data to all proxy events */
+                for event in events {
+                    trace.proxy_event_data(
+                        event.proxy_id,
+                        payload_range.clone());
+                }
+            }
+
+            Ok(())
+        });
+
+    Ok(settings)
+}
+
 pub(crate) struct OSDotNetEventFactory {
     proxy: Box<dyn FnMut(String) -> Option<Event>>,
+    providers: Writable<HashMap<String, LinuxDotNetProvider>>,
 }
 
 impl OSDotNetEventFactory {
     pub fn new(proxy: impl FnMut(String) -> Option<Event> + 'static) -> Self {
         Self {
             proxy: Box::new(proxy),
+            providers: Writable::new(HashMap::new()),
         }
     }
 
     pub fn hook_to_exporter(
         &mut self,
-        _exporter: UniversalExporter) -> UniversalExporter {
-        todo!("Need to build hook");
+        exporter: UniversalExporter) -> UniversalExporter {
+        let fn_providers = self.providers.clone();
+        let tracefs = match TraceFS::open() {
+            Ok(tracefs) => { Some(tracefs) },
+            Err(_) => { None },
+        };
+
+        let user_events = match &tracefs {
+            Some(tracefs) => {
+                match tracefs.user_events_factory() {
+                    Ok(user_events) => { Some(user_events) },
+                    Err(_) => { None },
+                }
+            },
+            None => { None },
+        };
+
+        let user_events = Writable::new(user_events);
+        let fn_user_events = user_events.clone();
+
+        exporter.with_settings_hook(move |mut settings| {
+            let tracefs = match tracefs.as_ref() {
+                Some(tracefs) => { tracefs },
+                None => { anyhow::bail!("TraceFS is not accessible."); },
+            };
+
+            let user_events = fn_user_events.borrow();
+            let user_events = match user_events.as_ref() {
+                Some(user_events) => { user_events },
+                None => { anyhow::bail!("User events are not accessible."); },
+            };
+
+            let pid = std::process::id();
+            let mut wanted_ids = HashSet::new();
+
+            for (name, provider) in fn_providers.borrow().iter() {
+                /* Split proxy events by callstack flag */
+                let mut callstacks = HashSet::new();
+                let mut no_callstacks = HashSet::new();
+
+                /* Determine wanted PROXY IDs */
+                wanted_ids.clear();
+                for dotnet_events in provider.events.borrow().values() {
+                    for event in dotnet_events {
+                        wanted_ids.insert(event.proxy_id);
+                    }
+                }
+
+                /* Check proxy events */
+                settings.for_each_event(|event| {
+                    if !event.has_proxy_flag() {
+                        return;
+                    }
+
+                    if wanted_ids.contains(&event.id()) {
+                        if event.has_no_callstack_flag() {
+                            no_callstacks.insert(event.id());
+                        } else {
+                            callstacks.insert(event.id());
+                        }
+                    }
+                });
+
+                /* Remove TraceFS bad characters */
+                let safe_name = name
+                    .replace("-", "_")
+                    .replace("/", "")
+                    .replace("?", "")
+                    .replace("*", "");
+
+                /* Create event for each group, if any */
+                if !no_callstacks.is_empty() {
+                    let tracepoint = format!(
+                        "OC_DotNet_{}_{}",
+                        safe_name,
+                        pid);
+
+                    settings = register_dotnet_tracepoint(
+                        provider,
+                        settings,
+                        tracefs,
+                        &tracepoint,
+                        user_events,
+                        false)?;
+                }
+
+                if !callstacks.is_empty() {
+                    let tracepoint = format!(
+                        "OC_DotNet_{}_{}_C",
+                        safe_name,
+                        pid);
+
+                    settings = register_dotnet_tracepoint(
+                        provider,
+                        settings,
+                        tracefs,
+                        &tracepoint,
+                        user_events,
+                        true)?;
+                }
+            }
+
+            Ok(settings)
+        }).with_export_drop_hook(move || {
+            /* Drop factory: This ensures we keep user_events FD until drop */
+            let _ = user_events.borrow_mut().take();
+        })
     }
 
     pub fn new_event(
         &mut self,
-        _provider_name: &str,
-        _keyword: u64,
-        _level: u8,
-        _id: usize,
+        provider_name: &str,
+        keyword: u64,
+        level: u8,
+        id: usize,
         name: String) -> anyhow::Result<Event> {
-        let _event = match (self.proxy)(name) {
+        let event = match (self.proxy)(name) {
             Some(event) => { event },
             None => { anyhow::bail!("Event couldn't be created with proxy"); },
         };
 
-        todo!("Need to proxy via user_events");
+        let dotnet_event = LinuxDotNetEvent {
+            proxy_id: event.id(),
+            keyword,
+            level,
+        };
+
+        self.providers
+            .borrow_mut()
+            .entry(provider_name.into())
+            .or_default()
+            .add_event(id, dotnet_event);
+
+        Ok(event)
     }
 }
 
