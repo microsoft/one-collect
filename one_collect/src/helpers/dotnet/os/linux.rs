@@ -146,6 +146,130 @@ impl PerfMapContext {
     }
 }
 
+struct UserEventTracepointEvents {
+    tracepoint: String,
+    events: Vec<u16>,
+}
+
+#[derive(Default)]
+struct UserEventProviderEvents {
+    events: Vec<UserEventTracepointEvents>,
+    keyword: u64,
+    level: u8,
+}
+
+impl UserEventProviderEvents {
+    fn add(
+        &mut self,
+        tracepoint: String,
+        dotnet_events: &HashSet<usize>,
+        keyword: u64,
+        level: u8) {
+        let mut events = Vec::new();
+
+        for event in dotnet_events {
+            events.push(*event as u16);
+        }
+
+        self.keyword |= keyword;
+
+        if level > self.level {
+            self.level = level;
+        }
+
+        self.events.push(
+            UserEventTracepointEvents {
+                tracepoint,
+                events,
+            });
+    }
+}
+
+#[derive(Default)]
+struct UserEventTrackerSettings {
+    providers: HashMap<String, UserEventProviderEvents>,
+}
+
+struct UserEventTracker {
+    send: Sender<u32>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl UserEventTracker {
+    fn new(settings: Arc<Mutex<UserEventTrackerSettings>>) -> Self {
+        let (send, recv) = mpsc::channel();
+
+        let worker = thread::spawn(move || {
+            Self::worker_thread_proc(recv, settings);
+        });
+
+        Self {
+            send,
+            worker: Some(worker),
+        }
+    }
+
+    fn worker_thread_proc(
+        recv: Receiver<u32>,
+        arc: Arc<Mutex<UserEventTrackerSettings>>) {
+        let mut pids: HashMap<u32, UnixStream> = HashMap::new();
+        let mut path_buf = PathBuf::new();
+
+        loop {
+            let pid = match recv.recv() {
+                Ok(pid) => { pid },
+                Err(_) => { break; },
+            };
+
+            if pid == 0 {
+                break;
+            }
+
+            /* Skip if already enabled */
+            if pids.contains_key(&pid) {
+                continue;
+            }
+
+            let nspid = procfs::ns_pid(&mut path_buf, pid).unwrap_or(pid);
+
+            if let Ok(diag) = PerfMapContext::new(pid, nspid) {
+                if let Some(socket) = diag.open_diag_socket() {
+                    pids.insert(pid, socket);
+
+                    /* TODO: Enable Events */
+                }
+            }
+        }
+
+        /* Sessions will stop/close upon pids dropping */
+    }
+
+    fn track(
+        &mut self,
+        pid: u32) -> anyhow::Result<()> {
+        /* Prevent early stop, should never happen */
+        if pid == 0 {
+            return Ok(());
+        }
+
+        /* Enqueue PID to the worker thread */
+        Ok(self.send.send(pid)?)
+    }
+
+    fn disable(
+        &mut self) -> anyhow::Result<()> {
+        /* Enqueue stop message */
+        self.send.send(0)?;
+
+        /* Wait for worker to finish */
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+
+        Ok(())
+    }
+}
+
 struct PerfMapTracker {
     send: Sender<u32>,
     worker: Option<JoinHandle<()>>,
@@ -315,6 +439,23 @@ impl LinuxDotNetProvider {
             .or_default()
             .push(event)
     }
+
+    pub fn proxy_id_to_events(
+        &self,
+        proxy_id_set: &HashSet<usize>,
+        dotnet_id_set: &mut HashSet<usize>,
+        keyword: &mut u64,
+        level: &mut u8) {
+        for (dotnet_id, events) in self.events.borrow().iter() {
+            for event in events {
+                if proxy_id_set.contains(&event.proxy_id) {
+                    *keyword |= event.keyword;
+                    *level |= event.level;
+                    dotnet_id_set.insert(*dotnet_id);
+                }
+            }
+        }
+    }
 }
 
 struct LinuxDotNetEvent {
@@ -431,8 +572,11 @@ impl OSDotNetEventFactory {
             None => { None },
         };
 
+        let tracker_events = Arc::new(Mutex::new(UserEventTrackerSettings::default()));
+
         let user_events = Writable::new(user_events);
         let fn_user_events = user_events.clone();
+        let settings_tracker_events = tracker_events.clone();
 
         exporter.with_settings_hook(move |mut settings| {
             let tracefs = match tracefs.as_ref() {
@@ -484,6 +628,9 @@ impl OSDotNetEventFactory {
                     .replace("?", "")
                     .replace("*", "");
 
+                let mut provider_events = UserEventProviderEvents::default();
+                let mut dotnet_ids = HashSet::new();
+
                 /* Create event for each group, if any */
                 if !no_callstacks.is_empty() {
                     let tracepoint = format!(
@@ -498,6 +645,23 @@ impl OSDotNetEventFactory {
                         &tracepoint,
                         user_events,
                         false)?;
+
+                    let mut keyword = 0u64;
+                    let mut level = 0u8;
+
+                    dotnet_ids.clear();
+
+                    provider.proxy_id_to_events(
+                        &no_callstacks,
+                        &mut dotnet_ids,
+                        &mut keyword,
+                        &mut level);
+
+                    provider_events.add(
+                        tracepoint,
+                        &dotnet_ids,
+                        keyword,
+                        level);
                 }
 
                 if !callstacks.is_empty() {
@@ -513,10 +677,88 @@ impl OSDotNetEventFactory {
                         &tracepoint,
                         user_events,
                         true)?;
+
+                    let mut keyword = 0u64;
+                    let mut level = 0u8;
+
+                    dotnet_ids.clear();
+
+                    provider.proxy_id_to_events(
+                        &callstacks,
+                        &mut dotnet_ids,
+                        &mut keyword,
+                        &mut level);
+
+                    provider_events.add(
+                        tracepoint,
+                        &dotnet_ids,
+                        keyword,
+                        level);
+                }
+
+                match settings_tracker_events.lock() {
+                    Ok(mut tracker_events) => {
+                        tracker_events.providers.insert(
+                            name.to_owned(), provider_events);
+                    },
+                    Err(_) => { anyhow::bail!("Settings already locked."); },
                 }
             }
 
             Ok(settings)
+        }).with_build_hook(move |mut session, _context| {
+            let session_tracker_events = tracker_events.clone();
+
+            /* Hook session IPC integration */
+            Ok(session.with_hooks(
+                |_builder| {
+                    /* Nothing to build */
+                },
+
+                move |session| {
+                    /* Perf map support */
+                    let event = session.mmap_event();
+                    let fmt = event.format();
+                    let pid = fmt.get_field_ref_unchecked("pid");
+                    let prot = fmt.get_field_ref_unchecked("prot");
+                    let filename = fmt.get_field_ref_unchecked("filename[]");
+
+                    let tracker = Writable::new(
+                        UserEventTracker::new(session_tracker_events));
+
+                    let tracker_close = tracker.clone();
+
+                    event.add_callback(move |data| {
+                        let fmt = data.format();
+                        let data = data.event_data();
+
+                        let prot = fmt.get_u32(prot, data)? as i32;
+
+                        /* Skip non-executable mmaps */
+                        if prot & PROT_EXEC != PROT_EXEC {
+                            return Ok(());
+                        }
+
+                        let pid = fmt.get_u32(pid, data)?;
+                        let filename = fmt.get_str(filename, data)?;
+
+                        /* Check if dotnet process */
+                        if filename == "/memfd:doublemapper" {
+                            /* Attempt to track, will check diag sock, etc */
+                            tracker.borrow_mut().track(pid)?;
+                        }
+
+                        Ok(())
+                    });
+
+                    /* When session drops, stop worker thread */
+                    let event = session.drop_event();
+
+                    event.add_callback(move |_| {
+                        tracker_close.borrow_mut().disable()
+                    });
+                }
+            ))
         }).with_export_drop_hook(move || {
             /* Drop factory: This ensures we keep user_events FD until drop */
             let _ = user_events.borrow_mut().take();
