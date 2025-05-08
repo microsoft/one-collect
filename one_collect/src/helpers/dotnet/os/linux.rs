@@ -159,6 +159,16 @@ struct UserEventProviderEvents {
 }
 
 impl UserEventProviderEvents {
+    fn event_count(&self) -> usize {
+        let mut count = 0;
+
+        for event in &self.events {
+            count += event.events.len();
+        }
+
+        count
+    }
+
     fn add(
         &mut self,
         tracepoint: String,
@@ -209,11 +219,121 @@ impl UserEventTracker {
         }
     }
 
+    fn write_string(
+        buffer: &mut Vec<u8>,
+        value: &str) {
+        if value.is_empty() {
+            buffer.extend_from_slice(&0u32.to_le_bytes());
+            return;
+        }
+
+        let count = value.chars().count() as u32 + 1u32;
+
+        buffer.extend_from_slice(&count.to_le_bytes());
+
+        for c in value.chars() {
+            let c = c as u16;
+            buffer.extend_from_slice(&c.to_le_bytes());
+        }
+
+        buffer.extend_from_slice(&0u16.to_le_bytes());
+    }
+
+    fn enable_events(
+        socket: &mut UnixStream,
+        settings: &UserEventTrackerSettings,
+        buffer: &mut Vec<u8>) -> anyhow::Result<()> {
+        buffer.clear();
+
+        /* Magic */
+        buffer.extend_from_slice(b"DOTNET_IPC_V1\0");
+
+        /* Reserve size (u16): 14..16 */
+        buffer.extend_from_slice(b"\0\0");
+
+        /* EventPipe (2) -> CollectTracing5 (6) */
+        buffer.extend_from_slice(b"\x02\x06\x00\x00");
+
+        buffer.extend_from_slice(&1u32.to_le_bytes()); /* output_format */
+        buffer.extend_from_slice(&0u64.to_le_bytes()); /* rundownKeyword */
+
+        let count = settings.providers.len() as u32;
+        buffer.extend_from_slice(&count.to_le_bytes()); /* provider count */
+
+        /* Providers */
+        for (name, provider) in &settings.providers {
+            /* Level is u8, but u32 on wire */
+            let level = provider.level as u32;
+
+            buffer.extend_from_slice(&provider.keyword.to_le_bytes()); /* keywords */
+            buffer.extend_from_slice(&level.to_le_bytes()); /* logLevel */
+            Self::write_string(buffer, &name); /* provider_name */
+            Self::write_string(buffer, ""); /* filter_data */
+
+            /* event_filter */
+            let count = provider.event_count() as u32;
+            buffer.push(1u8); /* allow */
+            buffer.extend_from_slice(&count.to_le_bytes()); /* event count */
+            for tracepoint in &provider.events {
+                for event in &tracepoint.events {
+                    buffer.extend_from_slice(&event.to_le_bytes());
+                }
+            }
+
+            /* tracepoint_config */
+            Self::write_string(buffer, ""); /* def_tracepoint */
+            let count = provider.events.len() as u32;
+            buffer.extend_from_slice(&count.to_le_bytes()); /* tracepoint count */
+
+            for tracepoint in &provider.events {
+                let count = tracepoint.events.len() as u32;
+
+                Self::write_string(buffer, &tracepoint.tracepoint); /* tracepoint */
+                buffer.extend_from_slice(&count.to_le_bytes()); /* count */
+
+                for event in &tracepoint.events {
+                    buffer.extend_from_slice(&event.to_le_bytes());
+                }
+            }
+        }
+
+        /* Update length */
+        let len = buffer.len() as u16;
+        buffer[14..16].copy_from_slice(&len.to_le_bytes());
+
+        /* Send */
+        socket.write_all(buffer)?;
+
+        /* Send over user_events FD */
+        socket.write_all_with_user_events_fd(b"\0")?;
+
+        /* Check result */
+        let mut result = [0; 20];
+
+        socket.read_exact(&mut result)?;
+
+        if result[16] != 0xFF || result[17] != 0x00 {
+            let mut code = [0; 4];
+            socket.read_exact(&mut code)?;
+
+            let code = u32::from_le_bytes(code);
+
+            anyhow::bail!("IPC enablement with user_events failed with 0x{:X}.", code);
+        }
+
+        let mut session = [0; 8];
+
+        socket.read_exact(&mut session)?;
+
+        Ok(())
+    }
+
     fn worker_thread_proc(
         recv: Receiver<u32>,
         arc: Arc<Mutex<UserEventTrackerSettings>>) {
         let mut pids: HashMap<u32, UnixStream> = HashMap::new();
         let mut path_buf = PathBuf::new();
+        let mut buffer = Vec::new();
 
         loop {
             let pid = match recv.recv() {
@@ -233,10 +353,13 @@ impl UserEventTracker {
             let nspid = procfs::ns_pid(&mut path_buf, pid).unwrap_or(pid);
 
             if let Ok(diag) = PerfMapContext::new(pid, nspid) {
-                if let Some(socket) = diag.open_diag_socket() {
-                    pids.insert(pid, socket);
-
-                    /* TODO: Enable Events */
+                if let Some(mut socket) = diag.open_diag_socket() {
+                    if let Ok(settings) = arc.lock() {
+                        match Self::enable_events(&mut socket, &settings, &mut buffer) {
+                            Ok(()) => { pids.insert(pid, socket); },
+                            Err(_) => { /* Nothing */ },
+                        }
+                    }
                 }
             }
         }
