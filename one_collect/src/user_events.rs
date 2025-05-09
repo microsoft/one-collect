@@ -291,7 +291,12 @@ impl WithUserEventFD for UnixStream {
             *cmsg_data = user_fd;
 
             /* Send message with control message */
-            if libc::sendmsg(self.as_raw_fd(), &msg, libc::MSG_NOSIGNAL) == -1 {
+            let result = libc::sendmsg(self.as_raw_fd(), &msg, libc::MSG_NOSIGNAL);
+
+            /* Always close */
+            libc::close(user_fd);
+
+            if result == -1 {
                 anyhow::bail!(
                     "Unable to send message, error={}",
                     *libc::__errno_location());
