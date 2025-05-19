@@ -382,6 +382,147 @@ mod tests {
         ExportMapping::new(time, 0, start, end, 0, false, id, UnwindType::Prolog)
     }
 
+    // Mock implementation of ExportSymbolReader for testing
+    struct MockSymbolReader {
+        symbols: Vec<(u64, u64, String)>, // (start, end, name)
+        current_idx: usize,
+        reset_called: bool,
+    }
+
+    impl MockSymbolReader {
+        fn new(symbols: Vec<(u64, u64, String)>) -> Self {
+            Self {
+                symbols,
+                current_idx: 0,
+                reset_called: false,
+            }
+        }
+    }
+
+    impl ExportSymbolReader for MockSymbolReader {
+        fn reset(&mut self) {
+            self.current_idx = 0;
+            self.reset_called = true;
+        }
+
+        fn next(&mut self) -> bool {
+            if self.current_idx < self.symbols.len() {
+                self.current_idx += 1;
+                true
+            } else {
+                false
+            }
+        }
+
+        fn start(&self) -> u64 {
+            if self.current_idx > 0 && self.current_idx <= self.symbols.len() {
+                self.symbols[self.current_idx - 1].0
+            } else {
+                0
+            }
+        }
+
+        fn end(&self) -> u64 {
+            if self.current_idx > 0 && self.current_idx <= self.symbols.len() {
+                self.symbols[self.current_idx - 1].1
+            } else {
+                0
+            }
+        }
+
+        fn name(&self) -> &str {
+            if self.current_idx > 0 && self.current_idx <= self.symbols.len() {
+                &self.symbols[self.current_idx - 1].2
+            } else {
+                ""
+            }
+        }
+
+        fn demangle(&mut self) -> Option<String> {
+            // No demangling in the mock implementation
+            None
+        }
+    }
+
+    // Simple mock string interning for testing
+    struct MockInternedStrings {
+        strings: Vec<String>,
+    }
+
+    impl MockInternedStrings {
+        fn new() -> Self {
+            Self {
+                strings: Vec::new(),
+            }
+        }
+
+        fn to_id(&mut self, s: &str) -> usize {
+            for (i, string) in self.strings.iter().enumerate() {
+                if string == s {
+                    return i;
+                }
+            }
+            let id = self.strings.len();
+            self.strings.push(s.to_string());
+            id
+        }
+    }
+
+    #[test]
+    fn add_matching_symbols_test() {
+        let start = 4096;
+        let end = start + 4096;
+        let file_offset = 1024;
+
+        let mut mapping = ExportMapping::new(0, 0, start, end, file_offset, false, 0, UnwindType::Prolog);
+
+        // Create test symbols (file offsets and names)
+        let symbols = vec![
+            // Symbol that should match exactly (start IP = 4096)
+            (1024, 1100, "exact_match".to_string()),
+            
+            // Symbol that should match by range (contains IP 4200)
+            (1150, 1200, "range_match".to_string()),
+            
+            // Symbol that shouldn't match (no IPs in unique_ips list fall within its range)
+            (2000, 2100, "no_match".to_string()),
+        ];
+
+        let mut sym_reader = MockSymbolReader::new(symbols);
+        let mut strings = MockInternedStrings::new();
+        
+        // Create unique IPs for testing
+        // After file_to_va_range conversion:
+        // - 1024 file offset becomes 4096 VA (exact match)
+        // - 1175 file offset becomes 4247 VA (range match)
+        // - 3000 file offset is out of range
+        let mut unique_ips = vec![4096, 4247, 8000];
+
+        // Call the function being tested
+        mapping.add_matching_symbols(&mut unique_ips, &mut sym_reader, &mut strings);
+
+        // Verify results
+        assert_eq!(2, mapping.symbols().len(), "Should have added 2 symbols");
+        
+        // Verify that reset was called on the reader
+        assert!(sym_reader.reset_called, "Expected reset() to be called");
+
+        // Check that unique_ips was sorted
+        assert!(unique_ips.windows(2).all(|w| w[0] <= w[1]), "Expected unique_ips to be sorted");
+
+        // Verify the first symbol (exact match)
+        assert_eq!(4096, mapping.symbols()[0].start(), "First symbol should start at 4096");
+        assert_eq!(4172, mapping.symbols()[0].end(), "First symbol should end at 4172");
+        assert_eq!(0, mapping.symbols()[0].name_id(), "First symbol ID should be 0");
+        assert_eq!("exact_match", strings.strings[0], "First symbol should be 'exact_match'");
+
+        // Verify the second symbol (range match)
+        assert_eq!(4222, mapping.symbols()[1].start(), "Second symbol should start at 4222");
+        assert_eq!(4272, mapping.symbols()[1].end(), "Second symbol should end at 4272");
+        assert_eq!(1, mapping.symbols()[1].name_id(), "Second symbol ID should be 1");
+        assert_eq!("range_match", strings.strings[1], "Second symbol should be 'range_match'");
+    }
+
     #[test]
     fn lookup() {
         let mappings = vec!(
