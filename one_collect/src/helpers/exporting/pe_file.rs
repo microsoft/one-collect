@@ -905,12 +905,47 @@ mod tests {
     
     #[test]
     fn pdb_path_extraction() {
+        // Original test case from the PR that was failing
         let full_path = "C:\\Path\\To\\File.pdb";
-        let file_name = Path::new(full_path)
+        
+        // This is the expected result - just the filename without the path
+        let expected = "File.pdb";
+        
+        // This is what our code does - extract just the filename using Path::file_name()
+        let actual = Path::new(full_path)
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or(full_path);
         
-        assert_eq!("File.pdb", file_name);
+        // The filename extraction should work properly
+        assert_eq!(expected, actual);
+    }
+    
+    #[test]
+    fn pdb_path_integration_test() {
+        // Test that simulates the real-world scenario with full paths
+        // First with a Windows-style path
+        let win_path = "C:\\Path\\To\\File.pdb";
+        let result_win = Path::new(win_path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(win_path);
+        assert_eq!("File.pdb", result_win);
+        
+        // Then with a Unix-style path
+        let unix_path = "/path/to/file.pdb";
+        let result_unix = Path::new(unix_path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(unix_path);
+        assert_eq!("file.pdb", result_unix);
+        
+        // Test with just a filename (no path) - should remain unchanged
+        let just_filename = "simple.pdb";
+        let result_simple = Path::new(just_filename)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(just_filename);
+        assert_eq!("simple.pdb", result_simple);
     }
 }
