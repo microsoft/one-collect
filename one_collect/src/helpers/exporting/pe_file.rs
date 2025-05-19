@@ -1,6 +1,7 @@
 use std::io::{Read, Seek, SeekFrom};
 use std::fs::File;
 use std::mem::{zeroed, size_of};
+use std::path::Path;
 use std::string::{FromUtf8Error, FromUtf16Error};
 use std::slice;
 
@@ -662,14 +663,24 @@ fn get_pe_info(
                     read_cv_nb10(reader, &mut cv)?;
                     module.symbol_age = cv.pdb_age;
                     module.symbol_sig[0..4].clone_from_slice(&cv.pdb_sig);
-                    module.symbol_name_id = strings.to_id(get_string(&cv.pdb_name)?.as_str());
+                    let pdb_path_str = get_string(&cv.pdb_name)?;
+                    let file_name = Path::new(&pdb_path_str)
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or(&pdb_path_str);
+                    module.symbol_name_id = strings.to_id(file_name);
                 } else if cv_type == 0x53445352 {
                     /* RSDS */
                     let mut cv: CodeViewRsds = unsafe { zeroed() };
                     read_cv_rsds(reader, &mut cv)?;
                     module.symbol_age = cv.pdb_age;
                     module.symbol_sig[0..16].clone_from_slice(&cv.pdb_sig);
-                    module.symbol_name_id = strings.to_id(get_string(&cv.pdb_name)?.as_str());
+                    let pdb_path_str = get_string(&cv.pdb_name)?;
+                    let file_name = Path::new(&pdb_path_str)
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or(&pdb_path_str);
+                    module.symbol_name_id = strings.to_id(file_name);
                 }
             }
             /* PerfMap */
@@ -681,7 +692,12 @@ fn get_pe_info(
                 if cv.perfmap_magic == PERFMAP_MAGIC {
                     module.perfmap_sig[0..16].clone_from_slice(&cv.perfmap_sig);
                     module.perfmap_version = cv.perfmap_ver;
-                    module.perfmap_name_id = strings.to_id(get_string(&cv.perfmap_name)?.as_str());
+                    let perfmap_path_str = get_string(&cv.perfmap_name)?;
+                    let file_name = Path::new(&perfmap_path_str)
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or(&perfmap_path_str);
+                    module.perfmap_name_id = strings.to_id(file_name);
                 }
             }
         }
@@ -890,5 +906,16 @@ mod tests {
         expected.push_str("}");
 
         assert_eq!(expected, out);
+    }
+    
+    #[test]
+    fn pdb_path_extraction() {
+        let full_path = "C:\\Path\\To\\File.pdb";
+        let file_name = Path::new(full_path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(full_path);
+        
+        assert_eq!("File.pdb", file_name);
     }
 }
