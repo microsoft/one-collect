@@ -692,12 +692,7 @@ fn get_pe_info(
                 if cv.perfmap_magic == PERFMAP_MAGIC {
                     module.perfmap_sig[0..16].clone_from_slice(&cv.perfmap_sig);
                     module.perfmap_version = cv.perfmap_ver;
-                    let perfmap_path_str = get_string(&cv.perfmap_name)?;
-                    let file_name = Path::new(&perfmap_path_str)
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or(&perfmap_path_str);
-                    module.perfmap_name_id = strings.to_id(file_name);
+                    module.perfmap_name_id = strings.to_id(get_string(&cv.perfmap_name)?.as_str());
                 }
             }
         }
