@@ -1,7 +1,6 @@
 use std::io::{Read, Seek, SeekFrom};
 use std::fs::File;
 use std::mem::{zeroed, size_of};
-use std::path::Path;
 use std::string::{FromUtf8Error, FromUtf16Error};
 use std::slice;
 
@@ -615,6 +614,17 @@ fn get_string(
     String::from_utf8((&name[0..null_pos]).to_vec())
 }
 
+/// Extract the filename portion from a path string regardless of platform.
+/// Handles both Windows-style backslash and Unix-style forward slash separators.
+fn extract_filename(path: &str) -> &str {
+    let windows_pos = path.rfind('\\').map(|pos| pos + 1).unwrap_or(0);
+    let unix_pos = path.rfind('/').map(|pos| pos + 1).unwrap_or(0);
+    
+    // Take the rightmost separator position
+    let pos = windows_pos.max(unix_pos);
+    &path[pos..]
+}
+
 fn get_pe_info(
     reader: &mut (impl Read + Seek),
     module: &mut PEModuleMetadata,
@@ -664,10 +674,7 @@ fn get_pe_info(
                     module.symbol_age = cv.pdb_age;
                     module.symbol_sig[0..4].clone_from_slice(&cv.pdb_sig);
                     let pdb_path_str = get_string(&cv.pdb_name)?;
-                    let file_name = Path::new(&pdb_path_str)
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or(&pdb_path_str);
+                    let file_name = extract_filename(&pdb_path_str);
                     module.symbol_name_id = strings.to_id(file_name);
                 } else if cv_type == 0x53445352 {
                     /* RSDS */
@@ -676,10 +683,7 @@ fn get_pe_info(
                     module.symbol_age = cv.pdb_age;
                     module.symbol_sig[0..16].clone_from_slice(&cv.pdb_sig);
                     let pdb_path_str = get_string(&cv.pdb_name)?;
-                    let file_name = Path::new(&pdb_path_str)
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or(&pdb_path_str);
+                    let file_name = extract_filename(&pdb_path_str);
                     module.symbol_name_id = strings.to_id(file_name);
                 }
             }
@@ -903,49 +907,24 @@ mod tests {
         assert_eq!(expected, out);
     }
     
-    #[test]
-    fn pdb_path_extraction() {
-        // Original test case from the PR that was failing
-        let full_path = "C:\\Path\\To\\File.pdb";
-        
-        // This is the expected result - just the filename without the path
-        let expected = "File.pdb";
-        
-        // This is what our code does - extract just the filename using Path::file_name()
-        let actual = Path::new(full_path)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or(full_path);
-        
-        // The filename extraction should work properly
-        assert_eq!(expected, actual);
-    }
     
     #[test]
     fn pdb_path_integration_test() {
-        // Test that simulates the real-world scenario with full paths
-        // First with a Windows-style path
+        // Test that our cross-platform filename extraction works
+        // Windows-style path
         let win_path = "C:\\Path\\To\\File.pdb";
-        let result_win = Path::new(win_path)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or(win_path);
-        assert_eq!("File.pdb", result_win);
+        assert_eq!("File.pdb", extract_filename(win_path));
         
-        // Then with a Unix-style path
+        // Unix-style path
         let unix_path = "/path/to/file.pdb";
-        let result_unix = Path::new(unix_path)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or(unix_path);
-        assert_eq!("file.pdb", result_unix);
+        assert_eq!("file.pdb", extract_filename(unix_path));
         
-        // Test with just a filename (no path) - should remain unchanged
+        // Mixed separators
+        let mixed_path = "C:/Path\\to/File.pdb";
+        assert_eq!("File.pdb", extract_filename(mixed_path));
+        
+        // Just a filename (no path) - should remain unchanged
         let just_filename = "simple.pdb";
-        let result_simple = Path::new(just_filename)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or(just_filename);
-        assert_eq!("simple.pdb", result_simple);
+        assert_eq!("simple.pdb", extract_filename(just_filename));
     }
 }
