@@ -622,7 +622,7 @@ fn extract_filename(path: &str) -> &str {
     
     // Take the rightmost separator position
     let pos = windows_pos.max(unix_pos);
-    &path[pos..]
+    &path[pos..] 
 }
 
 fn get_pe_info(
