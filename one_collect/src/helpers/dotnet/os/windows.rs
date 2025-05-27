@@ -4,6 +4,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::helpers::dotnet::*;
 use crate::helpers::dotnet::universal::UniversalDotNetHelperOSHooks;
 
+#[cfg(feature = "scripting")]
+use crate::helpers::exporting::UniversalExporter;
+
 use crate::helpers::exporting::symbols::*;
 
 use crate::ReadOnly;
@@ -11,6 +14,11 @@ use crate::event::*;
 use crate::event::os::windows::WindowsEventExtension;
 
 use crate::etw::{Guid, EtwSession, AncillaryData};
+
+#[cfg(target_os = "windows")]
+use crypto::sha1::Sha1;
+#[cfg(target_os = "windows")]
+use crypto::digest::Digest;
 
 pub(crate) struct OSDotNetHelper {
     jit_symbols: bool,
@@ -33,6 +41,108 @@ impl DotNetHelperWindowsExt for DotNetHelper {
         self.os.jit_symbols = true;
 
         self
+    }
+}
+
+pub(crate) struct OSDotNetEventFactory {
+}
+
+impl OSDotNetEventFactory {
+    pub fn new(_proxy: impl FnMut(String) -> Option<Event> + 'static) -> Self {
+        Self {
+        }
+    }
+
+    pub fn hook_to_exporter(
+        &mut self,
+        exporter: UniversalExporter) -> UniversalExporter {
+        /* No hooks for ETW */
+        exporter
+    }
+
+    pub fn new_event(
+        &mut self,
+        provider_name: &str,
+        keyword: u64,
+        level: u8,
+        id: usize,
+        name: String) -> anyhow::Result<Event> {
+        let provider = match provider_name {
+            "Microsoft-Windows-DotNETRuntime" => {
+                Guid::from_u128(0xe13c0d23_ccbc_4e12_931b_d9cc2eee27e4)
+            },
+            "Microsoft-Windows-DotNETRuntimeRundown" => {
+                Guid::from_u128(0xA669021C_C450_4609_A035_5AF59AF4DF18)
+            },
+            "Microsoft-Windows-DotNETRuntimeStress" => {
+                Guid::from_u128(0xCC2BCBBA_16B6_4cf3_8990_D74C2E8AF500)
+            },
+            "Microsoft-Windows-DotNETRuntimePrivate" => {
+                Guid::from_u128(0x763FD754_7086_4dfe_95EB_C01A46FAF4CA)
+            },
+            "Microsoft-DotNETRuntimeMonoProfiler" => {
+                Guid::from_u128(0x7F442D82_0F1D_5155_4B8C_1529EB2E31C2)
+            },
+            _ => {
+                if provider_name.starts_with("{") {
+                    /* Direct Guid */
+                    let provider = provider_name
+                        .replace("-", "")
+                        .replace("{", "")
+                        .replace("}", "");
+
+                    match u128::from_str_radix(provider.trim(), 16) {
+                        Ok(provider) => { Guid::from_u128(provider) },
+                        Err(_) => { anyhow::bail!("Invalid provider format."); }
+                    }
+                } else {
+                    /* Event Source */
+                    let namespace_bytes: [u8; 16] = [
+                        0x48, 0x2C, 0x2D, 0xB2,
+                        0xC3, 0x90, 0x47, 0xC8,
+                        0x87, 0xF8, 0x1A, 0x15,
+                        0xBF, 0xC1, 0x30, 0xFB];
+
+                    let mut hasher = Sha1::new();
+
+                    hasher.input(&namespace_bytes);
+
+                    for c in provider_name.to_uppercase().chars() {
+                        let c = c as u16;
+                        hasher.input(&c.to_be_bytes());
+                    }
+
+                    let mut result: [u8; 20] = [0; 20];
+
+                    hasher.result(&mut result);
+
+                    let a = u32::from_ne_bytes(result[0..4].try_into()?);
+                    let b = u16::from_ne_bytes(result[4..6].try_into()?);
+                    let mut c = u16::from_ne_bytes(result[6..8].try_into()?);
+
+                    /* High 4 bits of octet 7 to 5, as per RFC 4122 */
+                    c = (c & 0x0FFF) | 0x5000;
+
+                    Guid {
+                        data1: a,
+                        data2: b,
+                        data3: c,
+                        data4: [
+                            result[8], result[9], result[10], result[11],
+                            result[12], result[13], result[14], result[15]
+                        ]
+                    }
+                }
+            }
+        };
+
+        let mut event = Event::new(id, name);
+
+        *event.extension_mut().provider_mut() = provider;
+        *event.extension_mut().level_mut() = level;
+        *event.extension_mut().keyword_mut() = keyword;
+
+        Ok(event)
     }
 }
 
@@ -303,5 +413,47 @@ impl DotNetHelp for EtwSession {
         }
 
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn event_factory() {
+        let mut id = 0;
+
+        let mut factory = OSDotNetEventFactory::new(
+            move |name| { id += 1; Some(Event::new(id, name)) });
+
+        let checks = vec!(
+            /* Standard */
+            ("Microsoft-Windows-DotNETRuntime", 0xe13c0d23_ccbc_4e12_931b_d9cc2eee27e4),
+            ("Microsoft-Windows-DotNETRuntimeRundown", 0xA669021C_C450_4609_A035_5AF59AF4DF18),
+            ("Microsoft-Windows-DotNETRuntimeStress", 0xCC2BCBBA_16B6_4cf3_8990_D74C2E8AF500),
+            ("Microsoft-Windows-DotNETRuntimePrivate", 0x763FD754_7086_4dfe_95EB_C01A46FAF4CA),
+            ("Microsoft-DotNETRuntimeMonoProfiler", 0x7F442D82_0F1D_5155_4B8C_1529EB2E31C2),
+
+            /* EventSource */
+            ("one-collect", 0x781c74e8_dd76_59a2_e52f_cb83919aa38b),
+
+            /* Direct GUID */
+            ("{12345678-9abc-def1-2345-6789abcdef12}", 0x12345678_9abc_def1_2345_6789abcdef12),
+        );
+
+        /* Validate all */
+        for (provider, guid) in checks {
+            let event = factory.new_event(
+                provider.into(),
+                0,
+                1,
+                2,
+                "Test".into()).unwrap();
+
+            let expected = Guid::from_u128(guid);
+
+            assert!(expected == *event.extension().provider());
+        }
     }
 }

@@ -23,6 +23,12 @@ struct Args {
 
     #[arg(long = "pid", help = "Capture data for the specified process ID.  Multiple pids can be specified, one per usage of --pid")]
     target_pids: Option<Vec<i32>>,
+
+    #[arg(long, help = "Script snippet to run to enable complex configurations")]
+    script: Option<String>,
+
+    #[arg(long, help = "Script file to run to enable complex configurations")]
+    script_file: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
@@ -47,6 +53,7 @@ pub (crate) struct RecordArgs {
     on_cpu: bool,
     off_cpu: bool,
     target_pids: Option<Vec<i32>>,
+    script: Option<String>,
 }
 
 impl RecordArgs {
@@ -64,17 +71,28 @@ impl RecordArgs {
             }
         };
 
+        let script = match command_args.script_file {
+            Some(script_file) => {
+                match std::fs::read_to_string(script_file) {
+                    Ok(script) => { Some(script) },
+                    Err(e) => panic!("{}", format!("Unable to read script file: {}", e))
+                }
+            },
+            None => { command_args.script },
+        };
+
         let args = Self {
             output_path,
             format: command_args.format,
             on_cpu: command_args.on_cpu,
             off_cpu: command_args.off_cpu,
             target_pids: command_args.target_pids,
+            script,
         };
 
         // Cross-argument validation.
-        if !args.on_cpu && !args.off_cpu {
-            eprintln!("No events selected. Exiting.");
+        if !args.on_cpu && !args.off_cpu && args.script.is_none() {
+            eprintln!("No events or scripts selected. Exiting.");
             process::exit(1);
         }
 
@@ -102,5 +120,9 @@ impl RecordArgs {
 
     pub (crate) fn target_pids(&self) -> &Option<Vec<i32>> {
         &self.target_pids
+    }
+
+    pub (crate) fn script(&self) -> &Option<String> {
+        &self.script
     }
 }

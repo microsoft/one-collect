@@ -283,7 +283,7 @@ impl From<EventFieldRef> for usize {
 
 /// `LocationType` is used to classify the type of location of an `EventField`.
 /// It describes if the location is static, dynamic, or a static string.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum LocationType {
     /// Represents a static location that holds binary data.
     Static,
@@ -431,33 +431,14 @@ impl EventFormat {
         None
     }
 
-    /// Retrieves the data associated with a given `EventFieldRef` within the provided data slice
-    /// and offset.
-    ///
-    /// # Parameters
-    /// - `field_ref`: A reference to the `EventField` for which to retrieve the data.
-    /// - `data`: The data slice from which to retrieve the field data.
-    /// - `offset`: The offset to use in addition to a static offset.
-    ///
-    /// # Returns
-    /// - A slice of the provided data that corresponds to the requested `EventFieldRef`.
-    pub fn get_data_with_offset<'a>(
-            &self,
-            field_ref: EventFieldRef,
-            data: &'a [u8],
-            offset: usize) -> &'a [u8] {
-        let index: usize = field_ref.into();
-
-        if index >= self.fields.len() {
-            return EMPTY;
-        }
-
-        let field = &self.fields[index];
-        let offset = field.offset + offset;
-
-        match &field.location {
+    fn get_data_with_offset_direct<'a>(
+        size: usize,
+        loc_type: LocationType,
+        offset: usize,
+        data: &'a [u8]) -> &'a [u8] {
+        match loc_type {
             LocationType::Static => {
-                let end = offset + field.size;
+                let end = offset + size;
 
                 if end > data.len() {
                     return EMPTY;
@@ -515,6 +496,37 @@ impl EventFormat {
         }
     }
 
+    /// Retrieves the data associated with a given `EventFieldRef` within the provided data slice
+    /// and offset.
+    ///
+    /// # Parameters
+    /// - `field_ref`: A reference to the `EventField` for which to retrieve the data.
+    /// - `data`: The data slice from which to retrieve the field data.
+    /// - `offset`: The offset to use in addition to a static offset.
+    ///
+    /// # Returns
+    /// - A slice of the provided data that corresponds to the requested `EventFieldRef`.
+    pub fn get_data_with_offset<'a>(
+            &self,
+            field_ref: EventFieldRef,
+            data: &'a [u8],
+            offset: usize) -> &'a [u8] {
+        let index: usize = field_ref.into();
+
+        if index >= self.fields.len() {
+            return EMPTY;
+        }
+
+        let field = &self.fields[index];
+        let offset = field.offset + offset;
+
+        Self::get_data_with_offset_direct(
+            field.size,
+            field.location,
+            offset,
+            data)
+    }
+
     /// Retrieves the data associated with a given `EventFieldRef` within the provided data slice.
     ///
     /// # Parameters
@@ -528,6 +540,45 @@ impl EventFormat {
             field_ref: EventFieldRef,
             data: &'a [u8]) -> &'a [u8] {
         self.get_data_with_offset(field_ref, data, 0)
+    }
+
+    /// Retrieves the range of the data within the relative dynamic data field.
+    ///
+    /// # Parameters
+    ///
+    /// - `field_ref`: A reference to the `EventField` for which to retrieve the data.
+    /// - `data`: The event data from which to retrieve the field value.
+    ///
+    /// # Returns
+    ///
+    /// - A `Result` which is:
+    ///     - `Ok` variant containing the range of the field if it exists;
+    ///     - `Err` variant containing an error if the field does not exist or cannot be read.
+    pub fn get_rel_loc(
+        &self,
+        field_ref: EventFieldRef,
+        data: &[u8]) -> Result<std::ops::Range<usize>, anyhow::Error> {
+        let index: usize = field_ref.into();
+
+        if index >= self.fields.len() {
+            anyhow::bail!("Invalid field ref");
+        }
+
+        let field = &self.fields[index];
+
+        if field.size != 4 {
+            anyhow::bail!("Field size must be 4");
+        }
+
+        let rel_loc = u32::from_ne_bytes(data[field.offset..field.offset+4].try_into()?);
+
+        let mut offset = field.offset;
+        offset += 4;
+        offset += (rel_loc & 0xFFFF) as usize;
+
+        let length = (rel_loc >> 16) as usize;
+
+        Ok(offset .. offset + length)
     }
 
     /// Retrieves the value of a specified field from the event data as a 64-bit unsigned integer.
@@ -721,6 +772,12 @@ impl EventFormat {
 }
 
 const EVENT_FLAG_NO_CALLSTACK:u64 = 1u64 << 0;
+const EVENT_FLAG_PROXY:u64 = 1u64 << 1;
+
+struct FieldSkip {
+    loc_type: LocationType,
+    offset: usize,
+}
 
 /// `Event` represents a system event in the context of event collection and profiling.
 pub struct Event {
@@ -752,6 +809,118 @@ impl Event {
         }
     }
 
+    fn get_field_data_closure<'a>(
+        offset: usize,
+        size: usize,
+        loc_type: LocationType,
+        skips: &Vec<FieldSkip>,
+        data: &'a [u8]) -> &'a [u8] {
+        let mut skip_offset = 0;
+
+        for skip in skips {
+            match skip.loc_type {
+                LocationType::StaticString => {
+                    for b in &data[skip_offset+skip.offset..] {
+                        skip_offset += 1;
+
+                        if *b == 0 {
+                            break;
+                        }
+                    }
+                },
+
+                LocationType::StaticUTF16String => {
+                    let slice = &data[skip_offset+skip.offset..];
+                    let chunks = slice.chunks_exact(2);
+
+                    for chunk in chunks {
+                        skip_offset += 2;
+
+                        if chunk[0] == 0 && chunk[1] == 0 {
+                            break;
+                        }
+                    }
+                },
+
+                _ => {
+                    /* Unexpected */
+                    return EMPTY;
+                },
+            }
+        }
+
+        EventFormat::get_data_with_offset_direct(
+            size,
+            loc_type,
+            offset + skip_offset,
+            data)
+    }
+
+    /// Tries to return a closure capable of getting the field data
+    /// dynamically.
+    ///
+    /// # Arguments
+    ///
+    /// * `field_name` - The name of the field to get.
+    pub fn try_get_field_data_closure(
+        &self,
+        field_name: &str) -> Option<Box<dyn FnMut(&[u8]) -> &[u8]>> {
+        let mut offset = 0;
+
+        let mut skips = Vec::new();
+
+        for field in &self.format().fields {
+            if field.name == field_name {
+                let size = field.size;
+                let location = field.location;
+
+                if skips.is_empty() {
+                    /* Direct access closure */
+                    return Some(Box::new(move |data| -> &[u8] {
+                        EventFormat::get_data_with_offset_direct(
+                            size,
+                            location,
+                            offset,
+                            data)
+                    }));
+                } else {
+                    /* Complicated access closure */
+                    return Some(Box::new(move |data| -> &[u8] {
+                        Self::get_field_data_closure(
+                            offset,
+                            size,
+                            location,
+                            &skips,
+                            data)
+                    }));
+                }
+            }
+
+            /* Check for dynamic data */
+            if field.size == 0 {
+                match field.location {
+                    LocationType::StaticString |
+                    LocationType::StaticUTF16String => {
+                        /* Known skippable types */
+                        skips.push(FieldSkip {
+                            loc_type: field.location,
+                            offset
+                        });
+                    },
+
+                    _ => {
+                        /* Cannot read field data via closure */
+                        return None;
+                    },
+                }
+            }
+
+            offset += field.size;
+        }
+
+        None
+    }
+
     /// Returns the ID of the event.
     pub fn id(&self) -> usize {
         self.id
@@ -772,6 +941,17 @@ impl Event {
     /// Checks if the no_callstack flag is set for the event.
     pub fn has_no_callstack_flag(&self) -> bool {
         self.flags & EVENT_FLAG_NO_CALLSTACK != 0
+    }
+
+    /// Sets the proxy flag for the event. Use this when events are used for proxy
+    /// scenarios. The underlying session will not actually enable / add these events.
+    pub fn set_proxy_flag(&mut self) {
+        self.flags |= EVENT_FLAG_PROXY;
+    }
+
+    /// Checks if the proxy flag is set for the event.
+    pub fn has_proxy_flag(&self) -> bool {
+        self.flags & EVENT_FLAG_PROXY != 0
     }
 
     /// Returns a mutable reference to the event format.
@@ -989,4 +1169,186 @@ mod tests {
         /* Ensure simple read works */
         assert_eq!(123, reader.value());
     } 
+
+    #[test]
+    fn field_data_closure() {
+        /* Static */
+        let mut e = Event::new(1, "test".into());
+        let format = e.format_mut();
+
+        format.add_field(
+            EventField::new(
+                "1".into(), "unsigned char".into(),
+                LocationType::Static, 0, 1));
+        format.add_field(
+            EventField::new(
+                "2".into(), "u32".into(),
+                LocationType::Static, 1, 4));
+        format.add_field(
+            EventField::new(
+                "3".into(), "u64".into(),
+                LocationType::Static, 5, 8));
+
+        let mut data = Vec::new();
+
+        data.push(b'1');
+        data.extend_from_slice(&2u32.to_ne_bytes());
+        data.extend_from_slice(&3u64.to_ne_bytes());
+
+        let first = e.try_get_field_data_closure("1");
+        assert!(first.is_some());
+        assert_eq!(&data[0..1], first.unwrap()(&data));
+
+        let second = e.try_get_field_data_closure("2");
+        assert!(second.is_some());
+        assert_eq!(&data[1..5], second.unwrap()(&data));
+
+        let third = e.try_get_field_data_closure("3");
+        assert!(third.is_some());
+        assert_eq!(&data[5..13], third.unwrap()(&data));
+
+        /* Dynamic */
+        let mut e = Event::new(1, "test".into());
+        let format = e.format_mut();
+
+        format.add_field(
+            EventField::new(
+                "1".into(), "string".into(),
+                LocationType::StaticString, 0, 0));
+        format.add_field(
+            EventField::new(
+                "2".into(), "wide_string".into(),
+                LocationType::StaticUTF16String, 0, 0));
+        format.add_field(
+            EventField::new(
+                "3".into(), "u64".into(),
+                LocationType::Static, 0, 8));
+
+        let mut data = Vec::new();
+
+        data.extend_from_slice(b"test\0");
+        data.extend_from_slice(b"t\0e\0s\0t\0\0\0");
+        data.extend_from_slice(&123456789u64.to_ne_bytes());
+
+        let first = e.try_get_field_data_closure("1");
+        assert!(first.is_some());
+        assert_eq!(&data[0..4], first.unwrap()(&data));
+
+        let second = e.try_get_field_data_closure("2");
+        assert!(second.is_some());
+        assert_eq!(&data[5..13], second.unwrap()(&data));
+
+        let third = e.try_get_field_data_closure("3");
+        assert!(third.is_some());
+        assert_eq!(&data[15..23], third.unwrap()(&data));
+
+        /* Mixed Middle */
+        let mut e = Event::new(1, "test".into());
+        let format = e.format_mut();
+
+        format.add_field(
+            EventField::new(
+                "1".into(), "string".into(),
+                LocationType::StaticString, 0, 0));
+        format.add_field(
+            EventField::new(
+                "2".into(), "u64".into(),
+                LocationType::Static, 0, 8));
+        format.add_field(
+            EventField::new(
+                "3".into(), "wide_string".into(),
+                LocationType::StaticUTF16String, 0, 0));
+
+        let mut data = Vec::new();
+
+        data.extend_from_slice(b"test\0");
+        data.extend_from_slice(&123456789u64.to_ne_bytes());
+        data.extend_from_slice(b"t\0e\0s\0t\0\0\0");
+
+        let first = e.try_get_field_data_closure("1");
+        assert!(first.is_some());
+        assert_eq!(&data[0..4], first.unwrap()(&data));
+
+        let second = e.try_get_field_data_closure("2");
+        assert!(second.is_some());
+        assert_eq!(&data[5..13], second.unwrap()(&data));
+
+        let third = e.try_get_field_data_closure("3");
+        assert!(third.is_some());
+        assert_eq!(&data[13..21], third.unwrap()(&data));
+
+        /* Mixed Start */
+        let mut e = Event::new(1, "test".into());
+        let format = e.format_mut();
+
+        format.add_field(
+            EventField::new(
+                "1".into(), "u64".into(),
+                LocationType::Static, 0, 8));
+        format.add_field(
+            EventField::new(
+                "2".into(), "string".into(),
+                LocationType::StaticString, 0, 0));
+        format.add_field(
+            EventField::new(
+                "3".into(), "wide_string".into(),
+                LocationType::StaticUTF16String, 0, 0));
+
+        let mut data = Vec::new();
+
+        data.extend_from_slice(&123456789u64.to_ne_bytes());
+        data.extend_from_slice(b"test\0");
+        data.extend_from_slice(b"t\0e\0s\0t\0\0\0");
+
+        let first = e.try_get_field_data_closure("1");
+        assert!(first.is_some());
+        assert_eq!(&data[0..8], first.unwrap()(&data));
+
+        let second = e.try_get_field_data_closure("2");
+        assert!(second.is_some());
+        assert_eq!(&data[8..12], second.unwrap()(&data));
+
+        let third = e.try_get_field_data_closure("3");
+        assert!(third.is_some());
+        assert_eq!(&data[13..21], third.unwrap()(&data));
+    }
+
+    #[test]
+    fn get_rel_loc() {
+        let mut e = Event::new(1, "test".into());
+        let format = e.format_mut();
+
+        format.add_field(
+            EventField::new(
+                "data".into(), "__rel_loc u8[]".into(),
+                LocationType::DynRelative, 0, 4));
+
+        let rel_data = format.get_field_ref_unchecked("data");
+
+        /* 0 offset case */
+        let mut data = Vec::new();
+
+        let rel_loc = 4u32 << 16 | 0u32;
+        let actual = 123456789u32;
+
+        data.extend_from_slice(&rel_loc.to_ne_bytes());
+        data.extend_from_slice(&actual.to_ne_bytes());
+
+        let range = format.get_rel_loc(rel_data, &data).unwrap();
+        assert_eq!(data[4..8], data[range]);
+
+        /* Non-0 offset case */
+        let mut data = Vec::new();
+
+        let rel_loc = 4u32 << 16 | 4u32;
+        let pad = 987654321u32;
+        let actual = 123456789u32;
+
+        data.extend_from_slice(&rel_loc.to_ne_bytes());
+        data.extend_from_slice(&pad.to_ne_bytes());
+        data.extend_from_slice(&actual.to_ne_bytes());
+
+        let range = format.get_rel_loc(rel_data, &data).unwrap();
+        assert_eq!(data[8..12], data[range]);
+    }
 }

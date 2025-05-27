@@ -10,11 +10,302 @@ use super::os::OSExportProcess;
 use super::mappings::ExportMappingLookup;
 use super::symbols::*;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub enum MetricValue {
     Count(u64),
     Duration(u64),
     Bytes(u64),
+}
+
+impl MetricValue {
+    pub fn try_get_value_closure(
+        metric_type: &str,
+        data_type: &str) -> Option<Box<dyn FnMut(&[u8]) -> anyhow::Result<MetricValue>>> {
+        let signed;
+        let size;
+
+        match data_type {
+            "char" | "s8" | "i8" => {
+                signed = true;
+                size = 1;
+            },
+
+            "unsigned char" | "u8" => {
+                signed = false;
+                size = 1;
+            },
+
+            "short" | "s16" | "i16" => {
+                signed = true;
+                size = 2;
+            },
+
+            "unsigned short" | "u16" => {
+                signed = false;
+                size = 2;
+            },
+
+            "int" | "s32" | "i32" => {
+                signed = true;
+                size = 4;
+            },
+
+            "unsigned int" | "u32" => {
+                signed = false;
+                size = 4;
+            },
+
+            "long" | "s64" | "i64" => {
+                signed = true;
+                size = 8;
+            },
+
+            "unsigned long" | "u64" => {
+                signed = false;
+                size = 8;
+            },
+
+            _ => { return None; },
+        }
+
+        match metric_type {
+            "count" => {
+                match size {
+                    1 => {
+                        if signed {
+                            Some(Box::new(|data| {
+                                let i = i8::from_ne_bytes(data[0..1].try_into()?);
+                                if i > 0 {
+                                    Ok(MetricValue::Count(i as u64))
+                                } else {
+                                    Ok(MetricValue::Count(0))
+                                }
+                            }))
+                        } else {
+                            Some(Box::new(|data| {
+                                Ok(MetricValue::Count(
+                                    u8::from_ne_bytes(data[0..1].try_into()?) as u64))
+                            }))
+                        }
+                    },
+
+                    2 => {
+                        if signed {
+                            Some(Box::new(|data| {
+                                let i = i16::from_ne_bytes(data[0..2].try_into()?);
+                                if i > 0 {
+                                    Ok(MetricValue::Count(i as u64))
+                                } else {
+                                    Ok(MetricValue::Count(0))
+                                }
+                            }))
+                        } else {
+                            Some(Box::new(|data| {
+                                Ok(MetricValue::Count(
+                                    u16::from_ne_bytes(data[0..2].try_into()?) as u64))
+                            }))
+                        }
+                    },
+
+                    4 => {
+                        if signed {
+                            Some(Box::new(|data| {
+                                let i = i32::from_ne_bytes(data[0..4].try_into()?);
+                                if i > 0 {
+                                    Ok(MetricValue::Count(i as u64))
+                                } else {
+                                    Ok(MetricValue::Count(0))
+                                }
+                            }))
+                        } else {
+                            Some(Box::new(|data| {
+                                Ok(MetricValue::Count(
+                                    u32::from_ne_bytes(data[0..4].try_into()?) as u64))
+                            }))
+                        }
+                    },
+
+                    8 => {
+                        if signed {
+                            Some(Box::new(|data| {
+                                let i = i64::from_ne_bytes(data[0..8].try_into()?);
+                                if i > 0 {
+                                    Ok(MetricValue::Count(i as u64))
+                                } else {
+                                    Ok(MetricValue::Count(0))
+                                }
+                            }))
+                        } else {
+                            Some(Box::new(|data| {
+                                Ok(MetricValue::Count(
+                                    u64::from_ne_bytes(data[0..8].try_into()?) as u64))
+                            }))
+                        }
+                    },
+
+                    _ => { None },
+                }
+            },
+
+            "duration" => {
+                match size {
+                    1 => {
+                        if signed {
+                            Some(Box::new(|data| {
+                                let i = i8::from_ne_bytes(data[0..1].try_into()?);
+                                if i > 0 {
+                                    Ok(MetricValue::Duration(i as u64))
+                                } else {
+                                    Ok(MetricValue::Duration(0))
+                                }
+                            }))
+                        } else {
+                            Some(Box::new(|data| {
+                                Ok(MetricValue::Count(
+                                    u8::from_ne_bytes(data[0..1].try_into()?) as u64))
+                            }))
+                        }
+                    },
+
+                    2 => {
+                        if signed {
+                            Some(Box::new(|data| {
+                                let i = i16::from_ne_bytes(data[0..2].try_into()?);
+                                if i > 0 {
+                                    Ok(MetricValue::Duration(i as u64))
+                                } else {
+                                    Ok(MetricValue::Duration(0))
+                                }
+                            }))
+                        } else {
+                            Some(Box::new(|data| {
+                                Ok(MetricValue::Duration(
+                                    u16::from_ne_bytes(data[0..2].try_into()?) as u64))
+                            }))
+                        }
+                    },
+
+                    4 => {
+                        if signed {
+                            Some(Box::new(|data| {
+                                let i = i32::from_ne_bytes(data[0..4].try_into()?);
+                                if i > 0 {
+                                    Ok(MetricValue::Duration(i as u64))
+                                } else {
+                                    Ok(MetricValue::Duration(0))
+                                }
+                            }))
+                        } else {
+                            Some(Box::new(|data| {
+                                Ok(MetricValue::Duration(
+                                    u32::from_ne_bytes(data[0..4].try_into()?) as u64))
+                            }))
+                        }
+                    },
+
+                    8 => {
+                        if signed {
+                            Some(Box::new(|data| {
+                                let i = i64::from_ne_bytes(data[0..8].try_into()?);
+                                if i > 0 {
+                                    Ok(MetricValue::Duration(i as u64))
+                                } else {
+                                    Ok(MetricValue::Duration(0))
+                                }
+                            }))
+                        } else {
+                            Some(Box::new(|data| {
+                                Ok(MetricValue::Duration(
+                                    u64::from_ne_bytes(data[0..8].try_into()?) as u64))
+                            }))
+                        }
+                    },
+
+                    _ => { None },
+                }
+            },
+
+            "bytes" => {
+                match size {
+                    1 => {
+                        if signed {
+                            Some(Box::new(|data| {
+                                let i = i8::from_ne_bytes(data[0..1].try_into()?);
+                                if i > 0 {
+                                    Ok(MetricValue::Bytes(i as u64))
+                                } else {
+                                    Ok(MetricValue::Bytes(0))
+                                }
+                            }))
+                        } else {
+                            Some(Box::new(|data| {
+                                Ok(MetricValue::Count(
+                                    u8::from_ne_bytes(data[0..1].try_into()?) as u64))
+                            }))
+                        }
+                    },
+
+                    2 => {
+                        if signed {
+                            Some(Box::new(|data| {
+                                let i = i16::from_ne_bytes(data[0..2].try_into()?);
+                                if i > 0 {
+                                    Ok(MetricValue::Bytes(i as u64))
+                                } else {
+                                    Ok(MetricValue::Bytes(0))
+                                }
+                            }))
+                        } else {
+                            Some(Box::new(|data| {
+                                Ok(MetricValue::Bytes(
+                                    u16::from_ne_bytes(data[0..2].try_into()?) as u64))
+                            }))
+                        }
+                    },
+
+                    4 => {
+                        if signed {
+                            Some(Box::new(|data| {
+                                let i = i32::from_ne_bytes(data[0..4].try_into()?);
+                                if i > 0 {
+                                    Ok(MetricValue::Bytes(i as u64))
+                                } else {
+                                    Ok(MetricValue::Bytes(0))
+                                }
+                            }))
+                        } else {
+                            Some(Box::new(|data| {
+                                Ok(MetricValue::Bytes(
+                                    u32::from_ne_bytes(data[0..4].try_into()?) as u64))
+                            }))
+                        }
+                    },
+
+                    8 => {
+                        if signed {
+                            Some(Box::new(|data| {
+                                let i = i64::from_ne_bytes(data[0..8].try_into()?);
+                                if i > 0 {
+                                    Ok(MetricValue::Bytes(i as u64))
+                                } else {
+                                    Ok(MetricValue::Bytes(0))
+                                }
+                            }))
+                        } else {
+                            Some(Box::new(|data| {
+                                Ok(MetricValue::Bytes(
+                                    u64::from_ne_bytes(data[0..8].try_into()?) as u64))
+                            }))
+                        }
+                    },
+
+                    _ => { None },
+                }
+            },
+
+            _ => { None },
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1055,6 +1346,93 @@ mod tests {
                 name_id,
                 start,
                 end))
+    }
+
+    #[test]
+    fn try_get_value_closure() {
+        /* Valid Cases */
+        let mut closure = MetricValue::try_get_value_closure("count", "i8").unwrap();
+        assert!(MetricValue::Count(2) == closure(&2i8.to_ne_bytes()).unwrap());
+        assert!(MetricValue::Count(0) == closure(&(-2i8).to_ne_bytes()).unwrap());
+
+        let mut closure = MetricValue::try_get_value_closure("count", "s8").unwrap();
+        assert!(MetricValue::Count(2) == closure(&2i8.to_ne_bytes()).unwrap());
+        assert!(MetricValue::Count(0) == closure(&(-2i8).to_ne_bytes()).unwrap());
+
+        let mut closure = MetricValue::try_get_value_closure("count", "char").unwrap();
+        assert!(MetricValue::Count(2) == closure(&2i8.to_ne_bytes()).unwrap());
+        assert!(MetricValue::Count(0) == closure(&(-2i8).to_ne_bytes()).unwrap());
+
+        let mut closure = MetricValue::try_get_value_closure("count", "u8").unwrap();
+        assert!(MetricValue::Count(2) == closure(&2u8.to_ne_bytes()).unwrap());
+
+        let mut closure = MetricValue::try_get_value_closure("count", "unsigned char").unwrap();
+        assert!(MetricValue::Count(2) == closure(&2u8.to_ne_bytes()).unwrap());
+
+        let mut closure = MetricValue::try_get_value_closure("count", "i16").unwrap();
+        assert!(MetricValue::Count(2) == closure(&2i16.to_ne_bytes()).unwrap());
+        assert!(MetricValue::Count(0) == closure(&(-2i16).to_ne_bytes()).unwrap());
+
+        let mut closure = MetricValue::try_get_value_closure("count", "s16").unwrap();
+        assert!(MetricValue::Count(2) == closure(&2i16.to_ne_bytes()).unwrap());
+        assert!(MetricValue::Count(0) == closure(&(-2i16).to_ne_bytes()).unwrap());
+
+        let mut closure = MetricValue::try_get_value_closure("count", "short").unwrap();
+        assert!(MetricValue::Count(2) == closure(&2i16.to_ne_bytes()).unwrap());
+        assert!(MetricValue::Count(0) == closure(&(-2i16).to_ne_bytes()).unwrap());
+
+        let mut closure = MetricValue::try_get_value_closure("count", "u16").unwrap();
+        assert!(MetricValue::Count(2) == closure(&2u16.to_ne_bytes()).unwrap());
+
+        let mut closure = MetricValue::try_get_value_closure("count", "unsigned short").unwrap();
+        assert!(MetricValue::Count(2) == closure(&2u16.to_ne_bytes()).unwrap());
+
+        let mut closure = MetricValue::try_get_value_closure("count", "i32").unwrap();
+        assert!(MetricValue::Count(2) == closure(&2i32.to_ne_bytes()).unwrap());
+        assert!(MetricValue::Count(0) == closure(&(-2i32).to_ne_bytes()).unwrap());
+
+        let mut closure = MetricValue::try_get_value_closure("count", "s32").unwrap();
+        assert!(MetricValue::Count(2) == closure(&2i32.to_ne_bytes()).unwrap());
+        assert!(MetricValue::Count(0) == closure(&(-2i32).to_ne_bytes()).unwrap());
+
+        let mut closure = MetricValue::try_get_value_closure("count", "int").unwrap();
+        assert!(MetricValue::Count(2) == closure(&2i32.to_ne_bytes()).unwrap());
+        assert!(MetricValue::Count(0) == closure(&(-2i32).to_ne_bytes()).unwrap());
+
+        let mut closure = MetricValue::try_get_value_closure("count", "u32").unwrap();
+        assert!(MetricValue::Count(2) == closure(&2u32.to_ne_bytes()).unwrap());
+
+        let mut closure = MetricValue::try_get_value_closure("count", "unsigned int").unwrap();
+        assert!(MetricValue::Count(2) == closure(&2u32.to_ne_bytes()).unwrap());
+
+        let mut closure = MetricValue::try_get_value_closure("count", "i64").unwrap();
+        assert!(MetricValue::Count(2) == closure(&2i64.to_ne_bytes()).unwrap());
+        assert!(MetricValue::Count(0) == closure(&(-2i64).to_ne_bytes()).unwrap());
+
+        let mut closure = MetricValue::try_get_value_closure("count", "s64").unwrap();
+        assert!(MetricValue::Count(2) == closure(&2i64.to_ne_bytes()).unwrap());
+        assert!(MetricValue::Count(0) == closure(&(-2i64).to_ne_bytes()).unwrap());
+
+        let mut closure = MetricValue::try_get_value_closure("count", "long").unwrap();
+        assert!(MetricValue::Count(2) == closure(&2i64.to_ne_bytes()).unwrap());
+        assert!(MetricValue::Count(0) == closure(&(-2i64).to_ne_bytes()).unwrap());
+
+        let mut closure = MetricValue::try_get_value_closure("count", "u64").unwrap();
+        assert!(MetricValue::Count(2) == closure(&2u64.to_ne_bytes()).unwrap());
+
+        let mut closure = MetricValue::try_get_value_closure("count", "unsigned long").unwrap();
+        assert!(MetricValue::Count(2) == closure(&2u64.to_ne_bytes()).unwrap());
+
+        /* Invalid */
+        assert!(MetricValue::try_get_value_closure("invalid", "unsigned long").is_none());
+        assert!(MetricValue::try_get_value_closure("count", "invalid").is_none());
+
+        /* Sanity other types */
+        let mut closure = MetricValue::try_get_value_closure("bytes", "u64").unwrap();
+        assert!(MetricValue::Bytes(2) == closure(&2u64.to_ne_bytes()).unwrap());
+
+        let mut closure = MetricValue::try_get_value_closure("duration", "u64").unwrap();
+        assert!(MetricValue::Duration(2) == closure(&2u64.to_ne_bytes()).unwrap());
     }
 
     #[test]

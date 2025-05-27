@@ -386,6 +386,8 @@ impl OSExportMachine {
                     &machine,
                     OSExportSampler::new(session)));
 
+            let shared_proxy = Writable::new(ExportProxy::default());
+
             for mut callback in events {
                 if callback.event.is_none() {
                     continue;
@@ -396,6 +398,7 @@ impl OSExportMachine {
 
                 let mut builder = ExportBuiltContext::new(
                     &mut event_machine,
+                    &event,
                     session);
 
                 /* Invoke built callback for setup, etc */
@@ -421,12 +424,14 @@ impl OSExportMachine {
 
                 /* Re-use sampler for all events */
                 let event_sampler = shared_sampler.clone();
+                let event_proxy = shared_proxy.clone();
 
                 /* Trampoline between event callback and exporter callback */
                 event.add_callback(move |data| {
                     (callback.trace)(
                         &mut ExportTraceContext::new(
-                            &mut event_sampler.borrow_mut(),
+                            event_sampler.clone(),
+                            event_proxy.clone(),
                             sample_kind,
                             record_type,
                             data))
@@ -443,8 +448,12 @@ impl OSExportMachine {
                     },
                 };
 
-                /* Add event to session */
-                session.add_event(event, options);
+                if event.has_proxy_flag() {
+                    shared_proxy.borrow_mut().add_event(event);
+                } else {
+                    /* Add event to session */
+                    session.add_event(event, options);
+                }
             }
         }
 

@@ -3,6 +3,9 @@ use one_collect::helpers::dotnet::UniversalDotNetHelp;
 use one_collect::helpers::{dotnet::universal::UniversalDotNetHelper, exporting::ExportSettings};
 use one_collect::helpers::exporting::universal::UniversalExporter;
 
+use one_collect::helpers::dotnet::DotNetScripting;
+use one_collect::helpers::exporting::ScriptedUniversalExporter;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::process;
@@ -49,8 +52,25 @@ impl Recorder {
         let dotnet = UniversalDotNetHelper::default()
             .with_dynamic_symbols();
 
-        let universal = UniversalExporter::new(settings)
-            .with_dotnet_help(dotnet);
+        let universal = match self.args.script() {
+            Some(script) => {
+                let mut scripted = ScriptedUniversalExporter::new(settings);
+
+                scripted.enable_os_scripting();
+                scripted.enable_dotnet_scripting();
+
+                match scripted.from_script(script) {
+                    Ok(universal) => { universal },
+                    Err(e) => {
+                        eprintln!("Error: {}", e);
+                        process::exit(1);
+                    }
+                }
+            },
+            None => {
+                UniversalExporter::new(settings)
+            }
+        }.with_dotnet_help(dotnet);
 
         // Record until the user hits CTRL+C.
         let continue_recording = Arc::new(AtomicBool::new(true));

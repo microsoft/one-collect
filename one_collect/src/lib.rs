@@ -17,6 +17,9 @@ pub mod user_events;
 #[cfg(any(doc, target_os = "windows"))]
 pub mod etw;
 
+#[cfg(feature = "scripting")]
+pub mod scripting;
+
 pub use sharing::{Writable, ReadOnly};
 
 pub mod pathbuf_ext;
