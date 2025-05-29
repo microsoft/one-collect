@@ -455,32 +455,71 @@ mod tests {
         let mut mapping = ExportMapping::new(0, 0, start, end, file_offset, false, 0, UnwindType::Prolog);
 
         // Create test symbols (file offsets and names)
+        // File offsets will be converted to VAs: VA = file_offset - 1024 + 4096
         let symbols = vec![
-            // Symbol that should match exactly (start IP = 4096)
-            (1024, 1100, "exact_match".to_string()),
+            // Symbol 1: file 1024-1100 -> VA 4096-4172
+            (1024, 1100, "symbol_at_start".to_string()),
             
-            // Symbol that should match by range (contains IP 4200)
-            (1150, 1200, "range_match".to_string()),
+            // Symbol 2: file 1150-1250 -> VA 4222-4322  
+            (1150, 1250, "symbol_middle_1".to_string()),
             
-            // Symbol that shouldn't match (no IPs in unique_ips list fall within its range)
-            (2000, 2100, "no_match".to_string()),
+            // Symbol 3: file 1300-1400 -> VA 4372-4472
+            (1300, 1400, "symbol_middle_2".to_string()),
+            
+            // Symbol 4: file 1500-1600 -> VA 4572-4672
+            (1500, 1600, "symbol_middle_3".to_string()),
+            
+            // Symbol 5: file 1700-1800 -> VA 4772-4872
+            (1700, 1800, "symbol_middle_4".to_string()),
+            
+            // Symbol 6: file 4900-5020 -> VA 7972-8092 (near end of mapping)
+            (4900, 5020, "symbol_near_end".to_string()),
+            
+            // Symbol that shouldn't match (outside mapping range)
+            (6000, 6100, "symbol_out_of_range".to_string()),
         ];
 
         let mut sym_reader = MockSymbolReader::new(symbols);
-        let mut strings = InternedStrings::new(16);
+        let mut strings = InternedStrings::new(32);
         
-        // Create unique IPs for testing
-        // After file_to_va_range conversion:
-        // - 1024 file offset becomes 4096 VA (exact match)
-        // - 1175 file offset becomes 4247 VA (range match)
-        // - 3000 file offset is out of range
-        let mut unique_ips = vec![4096, 4247, 8000];
+        // Create 20 unique IPs for comprehensive testing
+        let mut unique_ips = vec![
+            // Test beginning of symbols
+            4096,  // Start of symbol_at_start
+            4222,  // Start of symbol_middle_1
+            4372,  // Start of symbol_middle_2
+            
+            // Test end of symbols  
+            4172,  // End of symbol_at_start
+            4322,  // End of symbol_middle_1
+            4472,  // End of symbol_middle_2
+            
+            // Test middle of symbols
+            4136,  // Middle of symbol_at_start (4096-4172)
+            4272,  // Middle of symbol_middle_1 (4222-4322)
+            4422,  // Middle of symbol_middle_2 (4372-4472)
+            4622,  // Middle of symbol_middle_3 (4572-4672)
+            4822,  // Middle of symbol_middle_4 (4772-4872)
+            8032,  // Middle of symbol_near_end (7972-8092)
+            
+            // Test boundaries
+            4572,  // Start of symbol_middle_3
+            4672,  // End of symbol_middle_3
+            4772,  // Start of symbol_middle_4
+            4872,  // End of symbol_middle_4
+            7972,  // Start of symbol_near_end
+            8092,  // End of symbol_near_end
+            
+            // Test non-matching IPs
+            4200,  // Between symbols
+            8500,  // Beyond all symbols
+        ];
 
         // Call the function being tested
         mapping.add_matching_symbols(&mut unique_ips, &mut sym_reader, &mut strings);
 
-        // Verify results
-        assert_eq!(2, mapping.symbols().len(), "Should have added 2 symbols");
+        // Verify results - should have 6 matching symbols
+        assert_eq!(6, mapping.symbols().len(), "Should have added 6 symbols");
         
         // Verify that reset was called on the reader
         assert!(sym_reader.reset_called, "Expected reset() to be called");
@@ -488,17 +527,24 @@ mod tests {
         // Check that unique_ips was sorted
         assert!(unique_ips.windows(2).all(|w| w[0] <= w[1]), "Expected unique_ips to be sorted");
 
-        // Verify the first symbol (exact match)
-        assert_eq!(4096, mapping.symbols()[0].start(), "First symbol should start at 4096");
-        assert_eq!(4172, mapping.symbols()[0].end(), "First symbol should end at 4172");
-        assert_eq!(0, mapping.symbols()[0].name_id(), "First symbol ID should be 0");
-        assert_eq!("exact_match", strings.from_id(0).unwrap(), "First symbol should be 'exact_match'");
+        // Verify the symbols are in the expected order (should be sorted by start address)
+        let expected_symbols = vec![
+            ("symbol_at_start", 4096, 4172),
+            ("symbol_middle_1", 4222, 4322),
+            ("symbol_middle_2", 4372, 4472),
+            ("symbol_middle_3", 4572, 4672),
+            ("symbol_middle_4", 4772, 4872),
+            ("symbol_near_end", 7972, 8092),
+        ];
 
-        // Verify the second symbol (range match)
-        assert_eq!(4222, mapping.symbols()[1].start(), "Second symbol should start at 4222");
-        assert_eq!(4272, mapping.symbols()[1].end(), "Second symbol should end at 4272");
-        assert_eq!(1, mapping.symbols()[1].name_id(), "Second symbol ID should be 1");
-        assert_eq!("range_match", strings.from_id(1).unwrap(), "Second symbol should be 'range_match'");
+        for (i, (expected_name, expected_start, expected_end)) in expected_symbols.iter().enumerate() {
+            assert_eq!(*expected_start, mapping.symbols()[i].start(), 
+                "Symbol {} should start at {}", i, expected_start);
+            assert_eq!(*expected_end, mapping.symbols()[i].end(), 
+                "Symbol {} should end at {}", i, expected_end);
+            assert_eq!(*expected_name, strings.from_id(mapping.symbols()[i].name_id()).unwrap(), 
+                "Symbol {} should be '{}'", i, expected_name);
+        }
     }
 
     #[test]
