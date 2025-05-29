@@ -444,29 +444,7 @@ mod tests {
         }
     }
 
-    // Simple mock string interning for testing
-    struct MockInternedStrings {
-        strings: Vec<String>,
-    }
 
-    impl MockInternedStrings {
-        fn new() -> Self {
-            Self {
-                strings: Vec::new(),
-            }
-        }
-
-        fn to_id(&mut self, s: &str) -> usize {
-            for (i, string) in self.strings.iter().enumerate() {
-                if string == s {
-                    return i;
-                }
-            }
-            let id = self.strings.len();
-            self.strings.push(s.to_string());
-            id
-        }
-    }
 
     #[test]
     fn add_matching_symbols_test() {
@@ -489,7 +467,7 @@ mod tests {
         ];
 
         let mut sym_reader = MockSymbolReader::new(symbols);
-        let mut strings = MockInternedStrings::new();
+        let mut strings = InternedStrings::new(16);
         
         // Create unique IPs for testing
         // After file_to_va_range conversion:
@@ -514,13 +492,13 @@ mod tests {
         assert_eq!(4096, mapping.symbols()[0].start(), "First symbol should start at 4096");
         assert_eq!(4172, mapping.symbols()[0].end(), "First symbol should end at 4172");
         assert_eq!(0, mapping.symbols()[0].name_id(), "First symbol ID should be 0");
-        assert_eq!("exact_match", strings.strings[0], "First symbol should be 'exact_match'");
+        assert_eq!("exact_match", strings.from_id(0).unwrap(), "First symbol should be 'exact_match'");
 
         // Verify the second symbol (range match)
         assert_eq!(4222, mapping.symbols()[1].start(), "Second symbol should start at 4222");
         assert_eq!(4272, mapping.symbols()[1].end(), "Second symbol should end at 4272");
         assert_eq!(1, mapping.symbols()[1].name_id(), "Second symbol ID should be 1");
-        assert_eq!("range_match", strings.strings[1], "Second symbol should be 'range_match'");
+        assert_eq!("range_match", strings.from_id(1).unwrap(), "Second symbol should be 'range_match'");
     }
 
     #[test]
