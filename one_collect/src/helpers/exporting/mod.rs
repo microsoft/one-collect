@@ -176,17 +176,6 @@ impl ExportSampler {
             &self.frames))
     }
 
-    pub fn attach_record_to_sample(
-        &mut self,
-        sample: &mut ExportProcessSample,
-        record_type: u16,
-        record_data: &[u8]) -> anyhow::Result<()> {
-        self.exporter.borrow_mut().attach_record_to_sample(
-            sample,
-            record_type,
-            record_data)
-    }
-
     fn add_custom_sample(
         &mut self,
         pid: u32,
@@ -414,33 +403,6 @@ impl<'a> ExportTraceContext<'a> {
             self.sample_kind)
     }
 
-    pub fn make_sample_with_record(
-        &mut self,
-        value: MetricValue,
-        record_data: &[u8]) -> anyhow::Result<ExportProcessSample> {
-        let mut sample = self.make_sample_with_kind(
-            value,
-            self.sample_kind)?;
-
-        self.attach_record_to_sample(
-            &mut sample,
-            self.record_type,
-            record_data)?;
-
-        Ok(sample)
-    }
-
-    pub fn attach_record_to_sample(
-        &mut self,
-        sample: &mut ExportProcessSample,
-        record_type: u16,
-        record_data: &[u8]) -> anyhow::Result<()> {
-        self.sampler.borrow_mut().attach_record_to_sample(
-            sample,
-            record_type,
-            record_data)
-    }
-
     pub fn add_custom_sample(
         &mut self,
         pid: u32,
@@ -518,6 +480,71 @@ impl ExportEventCallback {
     }
 }
 
+pub struct ExportSampleFilterContext<'a> {
+    kinds: &'a Vec<String>,
+    strings: &'a InternedStrings,
+    proc: &'a ExportProcess,
+    sample: &'a ExportProcessSample,
+}
+
+impl<'a> ExportSampleFilterContext<'a> {
+    fn run_hooks(
+        &self,
+        hooks: &Vec<Box<dyn Fn(&ExportSampleFilterContext) -> ExportFilterAction>>) -> bool {
+        for hook in hooks {
+            match hook(&self) {
+                ExportFilterAction::Keep => { },
+                ExportFilterAction::Drop => { return false; },
+            }
+        }
+
+        return true;
+    }
+
+    pub fn sample(&self) -> &ExportProcessSample { self.sample }
+
+    pub fn pid(&self) -> u32 { self.proc.pid() }
+
+    pub fn sample_kind_str(&self) -> &str {
+        let kind = self.sample.kind() as usize;
+
+        if kind >= self.kinds.len() {
+            return "Unknown";
+        }
+
+        &self.kinds[kind]
+    }
+
+    pub fn comm_name(&self) -> &str {
+        match self.proc.comm_id() {
+            Some(id) => {
+                match self.strings.from_id(id) {
+                    Ok(name) => { name },
+                    Err(_) => { "Unknown" },
+                }
+            },
+            None => { "Unknown" },
+        }
+    }
+}
+
+macro_rules! filter_sample_ret_on_drop {
+    ($self: expr, $proc:expr, $sample:expr) => {
+        if !$self.sample_hooks.is_empty() {
+            let context = ExportSampleFilterContext {
+                kinds: &$self.kinds,
+                strings: &$self.strings,
+                proc: $proc,
+                sample: $sample,
+            };
+
+            if !context.run_hooks(&$self.sample_hooks) {
+                return Ok(());
+            }
+        }
+    }
+}
+
 pub struct ExportSettings {
     string_buckets: usize,
     callstack_buckets: usize,
@@ -528,6 +555,7 @@ pub struct ExportSettings {
     callstack_helper: Option<CallstackHelper>,
     os: OSExportSettings,
     events: Option<Vec<ExportEventCallback>>,
+    sample_hooks: Option<Vec<Box<dyn Fn(&ExportSampleFilterContext) -> ExportFilterAction>>>,
     target_pids: Option<Vec<i32>>,
     proxy_id: usize,
 }
@@ -553,6 +581,7 @@ impl ExportSettings {
             unwinder,
             os: OSExportSettings::new(),
             events: None,
+            sample_hooks: None,
             target_pids: None,
             proxy_id: 0,
         }
@@ -581,6 +610,22 @@ impl ExportSettings {
         event.set_proxy_flag();
 
         event
+    }
+
+    pub fn with_sample_hook(
+        self,
+        hook: impl Fn(&ExportSampleFilterContext) -> ExportFilterAction + 'static) -> Self {
+
+        let mut clone = self;
+
+        let hook = Box::new(hook);
+
+        match clone.sample_hooks.as_mut() {
+            Some(hooks) => { hooks.push(hook); },
+            None => { clone.sample_hooks = Some(vec![hook]); }
+        }
+
+        clone
     }
 
     pub fn with_event(
@@ -650,6 +695,11 @@ impl ExportSettings {
     pub fn cpu_freq(&self) -> u64 { self.cpu_freq }
 }
 
+pub enum ExportFilterAction {
+    Keep,
+    Drop,
+}
+
 pub struct ExportMachine {
     settings: ExportSettings,
     strings: InternedStrings,
@@ -667,6 +717,7 @@ pub struct ExportMachine {
     start_qpc: Option<u64>,
     end_qpc: Option<u64>,
     duration: Option<Duration>,
+    sample_hooks: Vec<Box<dyn Fn(&ExportSampleFilterContext) -> ExportFilterAction>>,
 }
 
 pub trait ExportMachineSessionHooks {
@@ -712,9 +763,10 @@ pub type CommMap = HashMap<Option<usize>, Vec<u32>>;
 const NO_FRAMES: [u64; 1] = [0; 1];
 
 impl ExportMachine {
-    pub fn new(settings: ExportSettings) -> Self {
+    pub fn new(mut settings: ExportSettings) -> Self {
         let mut strings = InternedStrings::new(settings.string_buckets);
         let callstacks = InternedCallstacks::new(settings.callstack_buckets);
+        let sample_hooks = settings.sample_hooks.take().unwrap_or_default();
         let mut records = Vec::new();
         let mut record_types = Vec::new();
 
@@ -742,6 +794,7 @@ impl ExportMachine {
             start_qpc: None,
             end_qpc: None,
             duration: None,
+            sample_hooks,
         }
     }
 
@@ -766,6 +819,12 @@ impl ExportMachine {
             Some(node) => { self.module_metadata.get(node) },
             None => { None }
         }
+    }
+
+    pub fn add_sample_hook(
+        &mut self,
+        hook: impl Fn(&ExportSampleFilterContext) -> ExportFilterAction + 'static) {
+        self.sample_hooks.push(Box::new(hook));
     }
 
     pub fn replay_by_time(
@@ -1124,19 +1183,28 @@ impl ExportMachine {
             kind,
             frames);
 
-        self.process_mut(pid).add_sample(sample);
+        let proc = self.procs.entry(pid).or_insert_with(|| ExportProcess::new(pid));
+
+        filter_sample_ret_on_drop!(self, &proc, &sample);
+
+        proc.add_sample(sample);
 
         Ok(())
     }
 
-    pub fn attach_record_to_sample(
+    fn attach_record_to_sample(
         &mut self,
-        sample: &mut ExportProcessSample,
+        pid: u32,
+        mut sample: ExportProcessSample,
         record_type: u16,
         record_data: &[u8]) -> anyhow::Result<()> {
         if sample.has_record() {
             anyhow::bail!("Record is already attached.");
         }
+
+        let proc = self.procs.entry(pid).or_insert_with(|| ExportProcess::new(pid));
+
+        filter_sample_ret_on_drop!(self, &proc, &sample);
 
         /*
          * Add record data to global data slice:
@@ -1159,6 +1227,8 @@ impl ExportMachine {
         /* Associate record with sample and add */
         sample.attach_record(record_id);
 
+        proc.add_sample(sample);
+
         Ok(())
     }
 
@@ -1173,7 +1243,7 @@ impl ExportMachine {
         record_type: u16,
         record_data: &[u8],
         frames: &[u64]) -> anyhow::Result<()> {
-        let mut sample = self.make_sample(
+        let sample = self.make_sample(
             time,
             value,
             tid,
@@ -1182,22 +1252,36 @@ impl ExportMachine {
             frames);
 
         self.attach_record_to_sample(
-            &mut sample,
+            pid,
+            sample,
             record_type,
-            record_data)?;
-
-        self.process_mut(pid).add_sample(sample);
-
-        Ok(())
+            record_data)
     }
 
     pub fn add_custom_sample(
         &mut self,
         pid: u32,
         sample: ExportProcessSample) -> anyhow::Result<()> {
-        self.process_mut(pid).add_sample(sample);
+        let proc = self.procs.entry(pid).or_insert_with(|| ExportProcess::new(pid));
+
+        filter_sample_ret_on_drop!(self, &proc, &sample);
+
+        proc.add_sample(sample);
 
         Ok(())
+    }
+
+    pub fn add_custom_sample_with_record(
+        &mut self,
+        pid: u32,
+        sample: ExportProcessSample,
+        record_type: u16,
+        record_data: &[u8]) -> anyhow::Result<()> {
+        self.attach_record_to_sample(
+            pid,
+            sample,
+            record_type,
+            record_data)
     }
 
     pub fn load_pe_metadata(
