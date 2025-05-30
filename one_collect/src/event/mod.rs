@@ -875,6 +875,9 @@ impl Event {
                 let location = field.location;
 
                 if skips.is_empty() {
+                    /* Use direct field offset to allow for gaps */
+                    offset = field.offset;
+
                     /* Direct access closure */
                     return Some(Box::new(move |data| -> &[u8] {
                         EventFormat::get_data_with_offset_direct(
@@ -1288,11 +1291,11 @@ mod tests {
         format.add_field(
             EventField::new(
                 "2".into(), "string".into(),
-                LocationType::StaticString, 0, 0));
+                LocationType::StaticString, 8, 0));
         format.add_field(
             EventField::new(
                 "3".into(), "wide_string".into(),
-                LocationType::StaticUTF16String, 0, 0));
+                LocationType::StaticUTF16String, 8, 0));
 
         let mut data = Vec::new();
 
