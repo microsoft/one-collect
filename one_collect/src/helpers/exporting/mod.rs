@@ -294,6 +294,16 @@ impl<'a> ExportBuiltContext<'a> {
         }
     }
 
+    pub fn duration_to_qpc(
+        &self,
+        duration: Duration) -> u64 {
+        let ns = duration.as_nanos() as f64;
+        let freq = self.exporter.qpc_freq();
+        let ns_per_tick = freq as f64 / 1000000000f64;
+
+        (ns * ns_per_tick).floor() as u64
+    }
+
     pub fn set_sample_kind(
         &mut self,
         kind: &str) -> u16 {
@@ -404,6 +414,22 @@ impl<'a> ExportTraceContext<'a> {
             self.sample_kind)
     }
 
+    pub fn make_sample_with_record(
+        &mut self,
+        value: MetricValue,
+        record_data: &[u8]) -> anyhow::Result<ExportProcessSample> {
+        let mut sample = self.make_sample_with_kind(
+            value,
+            self.sample_kind)?;
+
+        self.attach_record_to_sample(
+            &mut sample,
+            self.record_type,
+            record_data)?;
+
+        Ok(sample)
+    }
+
     pub fn attach_record_to_sample(
         &mut self,
         sample: &mut ExportProcessSample,
@@ -419,6 +445,19 @@ impl<'a> ExportTraceContext<'a> {
         &mut self,
         pid: u32,
         sample: ExportProcessSample) -> anyhow::Result<()> {
+        self.sampler.borrow_mut().add_custom_sample(
+            pid,
+            sample)
+    }
+
+    pub fn add_pid_sample(
+        &mut self,
+        pid: u32,
+        value: MetricValue) -> anyhow::Result<()> {
+        let sample = self.make_sample_with_kind(
+            value,
+            self.sample_kind)?;
+
         self.sampler.borrow_mut().add_custom_sample(
             pid,
             sample)
