@@ -4,7 +4,7 @@ use one_collect::helpers::{dotnet::universal::UniversalDotNetHelper, exporting::
 use one_collect::helpers::exporting::universal::UniversalExporter;
 
 use one_collect::helpers::dotnet::DotNetScripting;
-use one_collect::helpers::exporting::ScriptedUniversalExporter;
+use one_collect::helpers::exporting::{ExportMachine, ExportFilterAction, ScriptedUniversalExporter};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -40,6 +40,110 @@ impl Recorder {
         // Context switches.
         if self.args.off_cpu() {
             settings = settings.with_cswitches();
+        }
+
+        // Live.
+        if self.args.live() {
+            use one_collect::helpers::exporting::process::MetricValue;
+
+            let now = std::time::Instant::now();
+
+            settings = settings.with_sample_hook(move |context| {
+                let elapsed = now.elapsed();
+
+                match context.sample().value() {
+                    MetricValue::Count(count) => {
+                        println!(
+                            "+{:.8}: {}({}, PID={}): Count={}",
+                            elapsed.as_secs_f64(),
+                            context.sample_kind_str(),
+                            context.comm_name(),
+                            context.pid(),
+                            count);
+                    },
+                    MetricValue::Bytes(bytes) => {
+                        let kb = bytes as f64 / 1024.0;
+                        let mb = kb / 1024.0;
+                        let gb = mb / 1024.0;
+
+                        if gb >= 1.0 {
+                            println!(
+                                "+{:.8}: {}({}, PID={}): Bytes={:.2} GB",
+                                elapsed.as_secs_f64(),
+                                context.sample_kind_str(),
+                                context.comm_name(),
+                                context.pid(),
+                                gb);
+                        } else if mb >= 1.0 {
+                            println!(
+                                "+{:.8}: {}({}, PID={}): Bytes={:.2} MB",
+                                elapsed.as_secs_f64(),
+                                context.sample_kind_str(),
+                                context.comm_name(),
+                                context.pid(),
+                                mb);
+                        } else if kb >= 1.0 {
+                            println!(
+                                "+{:.8}: {}({}, PID={}): Bytes={:.2} KB",
+                                elapsed.as_secs_f64(),
+                                context.sample_kind_str(),
+                                context.comm_name(),
+                                context.pid(),
+                                kb);
+                        } else {
+                            println!(
+                                "+{:.8}: {}({}, PID={}): Bytes={}",
+                                elapsed.as_secs_f64(),
+                                context.sample_kind_str(),
+                                context.comm_name(),
+                                context.pid(),
+                                bytes);
+                        }
+                    },
+                    MetricValue::Duration(duration) => {
+                        let ns = duration * 1000000000 / ExportMachine::qpc_freq();
+                        let us = ns as f64 / 1000.0;
+                        let ms = us / 1000.0;
+                        let secs = ms / 1000.0;
+
+                        if secs >= 1.0 {
+                            println!(
+                                "+{:.8}: {}({}, PID={}): Duration={:.8} secs",
+                                elapsed.as_secs_f64(),
+                                context.sample_kind_str(),
+                                context.comm_name(),
+                                context.pid(),
+                                secs);
+                        } else if ms >= 1.0 {
+                            println!(
+                                "+{:.8}: {}({}, PID={}): Duration={:.8} ms",
+                                elapsed.as_secs_f64(),
+                                context.sample_kind_str(),
+                                context.comm_name(),
+                                context.pid(),
+                                ms);
+                        } else if us >= 1.0 {
+                            println!(
+                                "+{:.8}: {}({}, PID={}): Duration={:.8} us",
+                                elapsed.as_secs_f64(),
+                                context.sample_kind_str(),
+                                context.comm_name(),
+                                context.pid(),
+                                us);
+                        } else {
+                            println!(
+                                "+{:.8}: {}({}, PID={}): Duration={} ns",
+                                elapsed.as_secs_f64(),
+                                context.sample_kind_str(),
+                                context.comm_name(),
+                                context.pid(),
+                                ns);
+                        }
+                    },
+                }
+
+                ExportFilterAction::Keep
+            });
         }
 
         // Filter pids.

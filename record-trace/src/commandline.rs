@@ -21,6 +21,9 @@ struct Args {
     #[arg(long, help = "Capture context switches")]
     off_cpu: bool,
 
+    #[arg(long, help = "Display samples live")]
+    live: bool,
+
     #[arg(long = "pid", help = "Capture data for the specified process ID.  Multiple pids can be specified, one per usage of --pid")]
     target_pids: Option<Vec<i32>>,
 
@@ -52,6 +55,7 @@ pub (crate) struct RecordArgs {
     format: Format,
     on_cpu: bool,
     off_cpu: bool,
+    live: bool,
     target_pids: Option<Vec<i32>>,
     script: Option<String>,
 }
@@ -86,6 +90,7 @@ impl RecordArgs {
             format: command_args.format,
             on_cpu: command_args.on_cpu,
             off_cpu: command_args.off_cpu,
+            live: command_args.live,
             target_pids: command_args.target_pids,
             script,
         };
@@ -116,6 +121,10 @@ impl RecordArgs {
 
     pub (crate) fn off_cpu(&self) -> bool {
         self.off_cpu
+    }
+
+    pub (crate) fn live(&self) -> bool {
+        self.live
     }
 
     pub (crate) fn target_pids(&self) -> &Option<Vec<i32>> {
