@@ -287,7 +287,7 @@ impl<'a> ExportBuiltContext<'a> {
         &self,
         duration: Duration) -> u64 {
         let ns = duration.as_nanos() as f64;
-        let freq = self.exporter.qpc_freq();
+        let freq = ExportMachine::qpc_freq();
         let ns_per_tick = freq as f64 / 1000000000f64;
 
         (ns * ns_per_tick).floor() as u64
@@ -751,11 +751,11 @@ pub trait ExportMachineOSHooks {
         &mut self,
         symbol: &DynamicSymbol) -> anyhow::Result<()>;
 
-    fn os_qpc_time(&self) -> u64;
+    fn os_qpc_time() -> u64;
 
-    fn os_qpc_freq(&self) -> u64;
+    fn os_qpc_freq() -> u64;
 
-    fn os_cpu_count(&self) -> u32;
+    fn os_cpu_count() -> u32;
 }
 
 pub type CommMap = HashMap<Option<usize>, Vec<u32>>;
@@ -808,9 +808,11 @@ impl ExportMachine {
 
     pub fn settings(&self) -> &ExportSettings { &self.settings }
 
-    pub fn qpc_freq(&self) -> u64 { self.os_qpc_freq() }
+    pub fn qpc_time() -> u64 { Self::os_qpc_time() }
 
-    pub fn cpu_count(&self) -> u32 { self.os_cpu_count() }
+    pub fn qpc_freq() -> u64 { Self::os_qpc_freq() }
+
+    pub fn cpu_count() -> u32 { Self::os_cpu_count() }
 
     pub fn get_mapping_metadata(
         &self,
@@ -895,7 +897,7 @@ impl ExportMachine {
     pub fn mark_start(&mut self) {
         self.mark_start_direct(
             Utc::now(),
-            self.os_qpc_time());
+            Self::os_qpc_time());
     }
 
     pub fn mark_start_direct(
@@ -908,8 +910,8 @@ impl ExportMachine {
 
     pub fn mark_end(&mut self) {
         if let Some(start_qpc) = self.start_qpc {
-            let end_qpc = self.os_qpc_time();
-            let qpc_freq = self.os_qpc_freq();
+            let end_qpc = Self::os_qpc_time();
+            let qpc_freq = Self::os_qpc_freq();
 
             let qpc_duration = end_qpc - start_qpc;
             let micros = (qpc_duration * 1000000u64) / qpc_freq;

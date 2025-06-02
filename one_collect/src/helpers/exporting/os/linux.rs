@@ -1348,7 +1348,7 @@ impl ExportMachineOSHooks for ExportMachine {
         OSExportMachine::resolve_perf_map_symbols(self);
     }
 
-    fn os_qpc_time(&self) -> u64 {
+    fn os_qpc_time() -> u64 {
         let mut t = libc::timespec {
             tv_sec: 0,
             tv_nsec: 0,
@@ -1363,7 +1363,7 @@ impl ExportMachineOSHooks for ExportMachine {
         ((t.tv_sec * 1000000000) + t.tv_nsec) as u64
     }
 
-    fn os_qpc_freq(&self) -> u64 {
+    fn os_qpc_freq() -> u64 {
         let mut t = libc::timespec {
             tv_sec: 0,
             tv_nsec: 0,
@@ -1378,7 +1378,7 @@ impl ExportMachineOSHooks for ExportMachine {
         (1000000000 / t.tv_nsec) as u64
     }
 
-    fn os_cpu_count(&self) -> u32 {
+    fn os_cpu_count() -> u32 {
         unsafe {
             libc::sysconf(libc::_SC_NPROCESSORS_ONLN) as u32
         }
