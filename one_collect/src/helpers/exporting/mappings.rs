@@ -382,6 +382,171 @@ mod tests {
         ExportMapping::new(time, 0, start, end, 0, false, id, UnwindType::Prolog)
     }
 
+    // Mock implementation of ExportSymbolReader for testing
+    struct MockSymbolReader {
+        symbols: Vec<(u64, u64, String)>, // (start, end, name)
+        current_idx: usize,
+        reset_called: bool,
+    }
+
+    impl MockSymbolReader {
+        fn new(symbols: Vec<(u64, u64, String)>) -> Self {
+            Self {
+                symbols,
+                current_idx: 0,
+                reset_called: false,
+            }
+        }
+    }
+
+    impl ExportSymbolReader for MockSymbolReader {
+        fn reset(&mut self) {
+            self.current_idx = 0;
+            self.reset_called = true;
+        }
+
+        fn next(&mut self) -> bool {
+            if self.current_idx < self.symbols.len() {
+                self.current_idx += 1;
+                true
+            } else {
+                false
+            }
+        }
+
+        fn start(&self) -> u64 {
+            if self.current_idx > 0 && self.current_idx <= self.symbols.len() {
+                self.symbols[self.current_idx - 1].0
+            } else {
+                0
+            }
+        }
+
+        fn end(&self) -> u64 {
+            if self.current_idx > 0 && self.current_idx <= self.symbols.len() {
+                self.symbols[self.current_idx - 1].1
+            } else {
+                0
+            }
+        }
+
+        fn name(&self) -> &str {
+            if self.current_idx > 0 && self.current_idx <= self.symbols.len() {
+                &self.symbols[self.current_idx - 1].2
+            } else {
+                ""
+            }
+        }
+
+        fn demangle(&mut self) -> Option<String> {
+            // No demangling in the mock implementation
+            None
+        }
+    }
+
+
+
+    #[test]
+    fn add_matching_symbols_test() {
+        let start = 4096;
+        let end = start + 4096;
+        let file_offset = 1024;
+
+        let mut mapping = ExportMapping::new(0, 0, start, end, file_offset, false, 0, UnwindType::Prolog);
+
+        // Create test symbols (file offsets and names)
+        // File offsets will be converted to VAs: VA = file_offset - 1024 + 4096
+        let symbols = vec![
+            // Symbol 1: file 1024-1100 -> VA 4096-4172
+            (1024, 1100, "symbol_at_start".to_string()),
+            
+            // Symbol 2: file 1150-1250 -> VA 4222-4322  
+            (1150, 1250, "symbol_middle_1".to_string()),
+            
+            // Symbol 3: file 1300-1400 -> VA 4372-4472
+            (1300, 1400, "symbol_middle_2".to_string()),
+            
+            // Symbol 4: file 1500-1600 -> VA 4572-4672
+            (1500, 1600, "symbol_middle_3".to_string()),
+            
+            // Symbol 5: file 1700-1800 -> VA 4772-4872
+            (1700, 1800, "symbol_middle_4".to_string()),
+            
+            // Symbol 6: file 4900-5020 -> VA 7972-8092 (near end of mapping)
+            (4900, 5020, "symbol_near_end".to_string()),
+            
+            // Symbol that shouldn't match (outside mapping range)
+            (6000, 6100, "symbol_out_of_range".to_string()),
+        ];
+
+        let mut sym_reader = MockSymbolReader::new(symbols);
+        let mut strings = InternedStrings::new(32);
+        
+        // Create 20 unique IPs for comprehensive testing
+        let mut unique_ips = vec![
+            // Test beginning of symbols
+            4096,  // Start of symbol_at_start
+            4222,  // Start of symbol_middle_1
+            4372,  // Start of symbol_middle_2
+            
+            // Test end of symbols  
+            4172,  // End of symbol_at_start
+            4322,  // End of symbol_middle_1
+            4472,  // End of symbol_middle_2
+            
+            // Test middle of symbols
+            4136,  // Middle of symbol_at_start (4096-4172)
+            4272,  // Middle of symbol_middle_1 (4222-4322)
+            4422,  // Middle of symbol_middle_2 (4372-4472)
+            4622,  // Middle of symbol_middle_3 (4572-4672)
+            4822,  // Middle of symbol_middle_4 (4772-4872)
+            8032,  // Middle of symbol_near_end (7972-8092)
+            
+            // Test boundaries
+            4572,  // Start of symbol_middle_3
+            4672,  // End of symbol_middle_3
+            4772,  // Start of symbol_middle_4
+            4872,  // End of symbol_middle_4
+            7972,  // Start of symbol_near_end
+            8092,  // End of symbol_near_end
+            
+            // Test non-matching IPs
+            4200,  // Between symbols
+            8500,  // Beyond all symbols
+        ];
+
+        // Call the function being tested
+        mapping.add_matching_symbols(&mut unique_ips, &mut sym_reader, &mut strings);
+
+        // Verify results - should have 6 matching symbols
+        assert_eq!(6, mapping.symbols().len(), "Should have added 6 symbols");
+        
+        // Verify that reset was called on the reader
+        assert!(sym_reader.reset_called, "Expected reset() to be called");
+
+        // Check that unique_ips was sorted
+        assert!(unique_ips.windows(2).all(|w| w[0] <= w[1]), "Expected unique_ips to be sorted");
+
+        // Verify the symbols are in the expected order (should be sorted by start address)
+        let expected_symbols = vec![
+            ("symbol_at_start", 4096, 4172),
+            ("symbol_middle_1", 4222, 4322),
+            ("symbol_middle_2", 4372, 4472),
+            ("symbol_middle_3", 4572, 4672),
+            ("symbol_middle_4", 4772, 4872),
+            ("symbol_near_end", 7972, 8092),
+        ];
+
+        for (i, (expected_name, expected_start, expected_end)) in expected_symbols.iter().enumerate() {
+            assert_eq!(*expected_start, mapping.symbols()[i].start(), 
+                "Symbol {} should start at {}", i, expected_start);
+            assert_eq!(*expected_end, mapping.symbols()[i].end(), 
+                "Symbol {} should end at {}", i, expected_end);
+            assert_eq!(*expected_name, strings.from_id(mapping.symbols()[i].name_id()).unwrap(), 
+                "Symbol {} should be '{}'", i, expected_name);
+        }
+    }
+
     #[test]
     fn lookup() {
         let mappings = vec!(
