@@ -157,6 +157,7 @@ impl ExportSampler {
         &mut self,
         data: &EventData,
         value: MetricValue,
+        tid: u32,
         kind: u16) -> anyhow::Result<ExportProcessSample> {
         self.frames.clear();
 
@@ -164,7 +165,6 @@ impl ExportSampler {
         self.os_event_callstack(data)?;
 
         let time = self.os_event_time(data)?;
-        let tid = self.os_event_tid(data)?;
         let cpu = self.os_event_cpu(data)?;
 
         Ok(self.exporter.borrow_mut().make_sample(
@@ -388,18 +388,22 @@ impl<'a> ExportTraceContext<'a> {
     pub fn make_sample_with_kind(
         &mut self,
         value: MetricValue,
+        tid: u32,
         kind: u16) -> anyhow::Result<ExportProcessSample> {
         self.sampler.borrow_mut().make_sample(
             self.data,
             value,
+            tid,
             kind)
     }
 
     pub fn make_sample(
         &mut self,
-        value: MetricValue) -> anyhow::Result<ExportProcessSample> {
+        value: MetricValue,
+        tid: u32) -> anyhow::Result<ExportProcessSample> {
         self.make_sample_with_kind(
             value,
+            tid,
             self.sample_kind)
     }
 
@@ -415,9 +419,11 @@ impl<'a> ExportTraceContext<'a> {
     pub fn add_pid_sample(
         &mut self,
         pid: u32,
+        tid: u32,
         value: MetricValue) -> anyhow::Result<()> {
         let sample = self.make_sample_with_kind(
             value,
+            tid,
             self.sample_kind)?;
 
         self.sampler.borrow_mut().add_custom_sample(

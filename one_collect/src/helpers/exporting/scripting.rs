@@ -189,6 +189,7 @@ macro_rules! apply_timeline {
     ($self:expr, $exporter:expr, $size:expr) => {
         struct TimelineValues {
             pid: u32,
+            tid: u32,
             time: u64,
         }
 
@@ -233,6 +234,7 @@ macro_rules! apply_timeline {
                             if duration >= *qpc_min.borrow() {
                                 trace.add_pid_sample(
                                     values.pid,
+                                    values.tid,
                                     MetricValue::Duration(duration))?;
                             }
                         }
@@ -253,6 +255,7 @@ macro_rules! apply_timeline {
 
                         let values = TimelineValues {
                             pid: trace.pid()?,
+                            tid: trace.tid()?,
                             time: trace.time()?,
                         };
 
