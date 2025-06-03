@@ -20,16 +20,21 @@ impl TraceFS {
         let mounts = File::open("/proc/mounts")?;
         let reader = BufReader::new(mounts);
 
-        for line in reader.lines().flatten() {
-            let mut parts = line.split_whitespace();
+        for line in reader.lines() {
+            match line {
+                Ok(line) => {
+                    let mut parts = line.split_whitespace();
 
-            /* Format: fsspec path vfstype */
-            if let Some(path) = parts.nth(1) {
-                if let Some(fstype) = parts.next() {
-                    if fstype == "tracefs" {
-                        return Self::open_at(path);
+                    /* Format: fsspec path vfstype */
+                    if let Some(path) = parts.nth(1) {
+                        if let Some(fstype) = parts.next() {
+                            if fstype == "tracefs" {
+                                return Self::open_at(path);
+                            }
+                        }
                     }
-                }
+                },
+                Err(_) => { break; },
             }
         }
 
