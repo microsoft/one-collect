@@ -1075,6 +1075,20 @@ impl ExportMachine {
         min: u32,
         ino: u64,
         filename: &str) -> anyhow::Result<()> {
+        /*
+         * PID 0 is reserved for the kernel, and shouldn't get exec'd
+         * while we are tracing. If PID 0 access is required, we must
+         * have an explicit method for it.
+         *
+         * NOTE:
+         * On Linux, processes in containers outside of the current
+         * container get a PID of 0. This causes the kernel process to
+         * have modules added incorrectly.
+         */
+        if pid == 0 {
+            return Ok(());
+        }
+
         let anon = filename.is_empty() ||
             filename.starts_with('[') ||
             filename.starts_with("/memfd:") ||
@@ -1120,6 +1134,20 @@ impl ExportMachine {
         pid: u32,
         comm: &str,
         time_qpc: u64) -> anyhow::Result<()> {
+        /*
+         * PID 0 is reserved for the kernel, and shouldn't get exec'd
+         * while we are tracing. If PID 0 access is required, we must
+         * have an explicit method for it.
+         *
+         * NOTE:
+         * On Linux, processes in containers outside of the current
+         * container get a PID of 0. This causes the kernel process to
+         * have it's comm name changed incorrectly.
+         */
+        if pid == 0 {
+            return Ok(());
+        }
+
         let comm_id = self.intern(comm);
 
         let proc = self.process_mut(pid);
@@ -1136,6 +1164,10 @@ impl ExportMachine {
         &mut self,
         pid: u32,
         time_qpc: u64) -> anyhow::Result<()> {
+        if pid == 0 {
+            return Ok(());
+        }
+
         self.process_mut(pid).set_exit_time_qpc(time_qpc);
 
         Ok(())
