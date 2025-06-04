@@ -6,6 +6,7 @@ type PidCallback = Box<dyn Fn(&EventData) -> anyhow::Result<i32>>;
 #[derive(Default)]
 pub struct EventExtension {
     provider: Guid,
+    lookup_provider: Option<Guid>,
     level: u8,
     keyword: u64,
     soft_pid: Option<PidCallback>,
@@ -18,6 +19,14 @@ impl EventExtension {
 
     pub fn provider_mut(&mut self) -> &mut Guid {
         &mut self.provider
+    }
+
+    pub fn lookup_provider(&self) -> &Option<Guid> {
+        &self.lookup_provider
+    }
+
+    pub fn lookup_provider_mut(&mut self) -> &mut Option<Guid> {
+        &mut self.lookup_provider
     }
 
     pub fn level(&self) -> u8 { self.level }
