@@ -148,7 +148,7 @@ impl PerfMapContext {
 
 struct UserEventTracepointEvents {
     tracepoint: String,
-    events: Vec<u16>,
+    events: Vec<u32>,
 }
 
 #[derive(Default)]
@@ -178,7 +178,7 @@ impl UserEventProviderEvents {
         let mut events = Vec::new();
 
         for event in dotnet_events {
-            events.push(*event as u16);
+            events.push(*event as u32);
         }
 
         self.keyword |= keyword;
@@ -587,7 +587,7 @@ struct LinuxDotNetEvent {
     level: u8,
 }
 
-const DOTNET_HEADER_FIELDS: &str = "u16 event_id; __rel_loc u8[] payload; __rel_loc u8[] meta";
+const DOTNET_HEADER_FIELDS: &str = "u8 version; u16 event_id; __rel_loc u8[] extension; __rel_loc u8[] payload; __rel_loc u8[] meta";
 
 struct DotNetEventDesc {
     name: String,
