@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 use super::{EventField, Event, LocationType};
 
 pub fn lost() -> Event {

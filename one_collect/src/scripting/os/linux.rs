@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 use crate::tracefs::TraceFS;
 use crate::scripting::ScriptEvent;
 use crate::Writable;

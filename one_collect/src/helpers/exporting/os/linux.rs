@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 use std::collections::hash_map::Entry;
 use std::collections::hash_map::Entry::{Vacant, Occupied};
 use std::path::{Path, PathBuf};

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 use std::array::TryFromSliceError;
 
 // Current possible sample layout:

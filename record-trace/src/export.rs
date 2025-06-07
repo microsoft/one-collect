@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 use one_collect::helpers::exporting::ExportMachine;
 use one_collect::helpers::exporting::formats::nettrace::*;
 use one_collect::helpers::exporting::formats::perf_view::*;

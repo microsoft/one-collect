@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 use crate::event::{Event, EventData};
 use crate::etw::Guid;
 

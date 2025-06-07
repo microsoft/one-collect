@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 use std::mem::size_of;
 
 #[cfg(target_os = "linux")]

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 use std::hash::{BuildHasherDefault, Hash, Hasher};
 use std::collections::{HashMap, HashSet};
 use std::thread::{self};

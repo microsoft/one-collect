@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 use super::*;
 
 type BoxedBuilderHook = Box<dyn FnOnce(&mut RingBufSessionBuilder)>;

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 #[cfg(target_os = "windows")]
 fn main() {
     println!("uprobes are Linux only");

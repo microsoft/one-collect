@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 use std::fs::File;
 use std::path::PathBuf;
 use std::os::fd::{FromRawFd, IntoRawFd, RawFd};
