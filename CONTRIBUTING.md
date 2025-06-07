@@ -45,17 +45,11 @@ cd record-trace
 cargo build
 ```
 
-To build all projects from the repository root:
+To build the unwinding library:
 
 ```bash
-# Build one_collect library
-cd one_collect && cargo build && cd ..
-
-# Build record-trace tool
-cd record-trace && cargo build && cd ..
-
-# Build ruwind library
-cd ruwind && cargo build && cd ..
+cd ruwind
+cargo build
 ```
 
 ### Running Tests
@@ -67,13 +61,27 @@ cd one_collect
 cargo test
 ```
 
-Note: Some tests may be ignored on certain platforms or require specific permissions (especially tests that interact with perf events on Linux).
+To run tests for the command-line tool:
+
+```bash
+cd record-trace
+cargo test
+```
+
+To run tests for the unwinding library:
+
+```bash
+cd ruwind
+cargo test
+```
+
+Note: Some tests may be ignored on certain platforms or require specific permissions (especially tests that interact with perf events on Linux). These tests can be run locally with appropriate permissions (e.g. sudo).
 
 ### Platform-Specific Notes
 
 #### Linux Development
 
-On Linux, this framework primarily uses the perf events facility. Some functionality may require:
+On Linux, this framework primarily uses the perf events facility. When running one-collect to capture traces and resolve symbols, some functionality may require:
 
 - Root privileges for certain perf events
 - Kernel headers installed
@@ -81,7 +89,7 @@ On Linux, this framework primarily uses the perf events facility. Some functiona
 
 #### Windows Development
 
-On Windows, this framework uses ETW (Event Tracing for Windows).
+On Windows, this framework uses ETW (Event Tracing for Windows). Running one-collect will require elevated privileges on Windows.
 
 ### Contributing Code
 
@@ -107,7 +115,7 @@ If you want to contribute a new export file format:
 When reporting bugs or issues:
 
 - Include enough details to reproduce the issue
-- Specify your operating system and Rust version
+- Specify your operating system
 - Include relevant error messages or logs
 - If possible, provide a minimal reproduction case
 
@@ -120,4 +128,4 @@ This framework is highly composable and built around event pipelines:
 - Base pipelines expose key events for building additional functionality
 - The exporting pipeline is built on top of these base events
 
-The framework supports callstack unwinding using live DWARF decoding on x64 Linux, with support for anonymous code sections from JIT compilers like C# and Java.
+The framework supports callstack unwinding using live DWARF decoding on x64 Linux, with support for anonymous code sections from JIT compilers like C# and Java. On Windows, the framework uses the built-in Windows unwind functions for x64.
