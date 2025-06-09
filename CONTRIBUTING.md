@@ -91,34 +91,6 @@ On Linux, this framework primarily uses the perf events facility. When running o
 
 On Windows, this framework uses ETW (Event Tracing for Windows). Running one-collect will require elevated privileges on Windows.
 
-### Contributing Code
-
-#### Adding New File Formats
-
-If you want to contribute a new export file format:
-
-1. Add a new file under `one_collect/src/helpers/exporting/formats/`
-2. If the format works per-process, add a trait extending `ExportGraph` with a method named `to_<format_name>()`
-3. If the format works with many processes, also extend `ExportMachine` with the same method name
-4. See `perf_view.rs` and `pprof.rs` as examples
-
-#### Pull Request Guidelines
-
-- Ensure your code builds on both Linux and Windows when applicable
-- Run tests before submitting your PR
-- For large changes, consider opening an issue first to discuss the approach
-- Include tests for new functionality
-- Follow existing code style and conventions
-
-#### Reporting Issues
-
-When reporting bugs or issues:
-
-- Include enough details to reproduce the issue
-- Specify your operating system
-- Include relevant error messages or logs
-- If possible, provide a minimal reproduction case
-
 ### Architecture Overview
 
 This framework is highly composable and built around event pipelines:
