@@ -243,13 +243,18 @@ pub fn ns_pid(
     path_buf.push("status");
 
     if let Ok(file) = File::open(&path_buf) {
-        for line in BufReader::new(file).lines().flatten() {
-            if line.starts_with("NSpid:\t") {
-                let (_, value) = line.split_at(7);
+        for line in BufReader::new(file).lines() {
+            match line {
+                Ok(line) => {
+                    if line.starts_with("NSpid:\t") {
+                        let (_, value) = line.split_at(7);
 
-                if let Ok(nspid) = value.parse::<u32>() {
-                    return Some(nspid);
-                }
+                        if let Ok(nspid) = value.parse::<u32>() {
+                            return Some(nspid);
+                        }
+                    }
+                },
+                Err(_) => { break; },
             }
         }
     }
@@ -282,9 +287,14 @@ pub fn iter_proc_modules(
     path_buf.push("maps");
 
     if let Ok(file) = File::open(&path_buf) {
-        for line in BufReader::new(file).lines().flatten() {
-            if let Some(module) = ModuleInfo::from_line(&line) {
-                (callback)(&module);
+        for line in BufReader::new(file).lines() {
+            match line {
+                Ok(line) => {
+                    if let Some(module) = ModuleInfo::from_line(&line) {
+                        (callback)(&module);
+                    }
+                },
+                Err(_) => { break; },
             }
         }
     }
@@ -308,9 +318,14 @@ pub fn iter_modules(
         path.pop();
 
         if let Ok(file) = result {
-            for line in BufReader::new(file).lines().flatten() {
-                if let Some(module) = ModuleInfo::from_line(&line) {
-                    (callback)(pid, &module);
+            for line in BufReader::new(file).lines() {
+                match line {
+                    Ok(line) => {
+                        if let Some(module) = ModuleInfo::from_line(&line) {
+                            (callback)(pid, &module);
+                        }
+                    },
+                    Err(_) => { break; },
                 }
             }
         }

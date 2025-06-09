@@ -1166,8 +1166,8 @@ impl NetTraceFormat for ExportMachine {
             None => { anyhow::bail!("No start qpc saved, invoke mark_start()."); },
         };
 
-        let qpc_freq = self.qpc_freq();
-        let cpu_count = self.cpu_count();
+        let qpc_freq = Self::qpc_freq();
+        let cpu_count = Self::cpu_count();
         let sample_freq = self.settings().cpu_freq() as u32;
 
         let mut writer = NetTraceWriter::new(path)?;

@@ -845,11 +845,11 @@ impl ExportMachineOSHooks for ExportMachine {
         Ok(())
     }
 
-    fn os_qpc_time(&self) -> u64 {
+    fn os_qpc_time() -> u64 {
         qpc_time()
     }
 
-    fn os_qpc_freq(&self) -> u64 {
+    fn os_qpc_freq() -> u64 {
         let mut t = 0u64;
 
         unsafe {
@@ -859,7 +859,7 @@ impl ExportMachineOSHooks for ExportMachine {
         t
     }
 
-    fn os_cpu_count(&self) -> u32 {
+    fn os_cpu_count() -> u32 {
         unsafe {
             GetActiveProcessorCount(0xFFFF)
         }

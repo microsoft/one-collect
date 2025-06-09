@@ -71,7 +71,7 @@ impl Exporter for PerfViewExporter {
         machine: &mut ExportMachine,
         args: &RecordArgs) -> anyhow::Result<()> {
         
-        let converter = PerfViewExportGraphMetricValueConverter::new(machine.qpc_freq());
+        let converter = PerfViewExportGraphMetricValueConverter::new(ExportMachine::qpc_freq());
 
         /* Split by comm name */
         let comm_map = machine.split_processes_by_comm();
