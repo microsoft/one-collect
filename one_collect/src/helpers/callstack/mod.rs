@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 #[cfg_attr(target_os = "linux", path = "os/linux.rs")]
 #[cfg_attr(target_os = "windows", path = "os/windows.rs")]
 pub mod os;

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 use std::io::{Read, Seek, SeekFrom};
 use std::fs::File;
 use std::mem::{zeroed, size_of};

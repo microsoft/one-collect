@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 use one_collect::helpers::dotnet::*;
 
 use one_collect::helpers::exporting::*;

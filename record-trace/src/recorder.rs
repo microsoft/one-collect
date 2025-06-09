@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 use crate::commandline::RecordArgs;
 use one_collect::helpers::dotnet::UniversalDotNetHelp;
 use one_collect::helpers::{dotnet::universal::UniversalDotNetHelper, exporting::ExportSettings};

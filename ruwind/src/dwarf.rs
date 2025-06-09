@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 use std::io::{Error, ErrorKind, Read, Seek, SeekFrom};
 use std::fmt;
 

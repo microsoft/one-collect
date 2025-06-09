@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 use clap::{Parser, ValueEnum};
 use std::env;
 use std::fmt;

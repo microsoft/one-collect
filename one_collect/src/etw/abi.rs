@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 /*
  * std::os::windows::RawHandle is not available when
  * documenting windows code on non-windows builds.

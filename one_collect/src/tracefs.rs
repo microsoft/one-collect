@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 use std::io::{Result, Error, BufRead, BufReader, ErrorKind, Write};
 use std::path::PathBuf;
 use std::fs::{File, OpenOptions};

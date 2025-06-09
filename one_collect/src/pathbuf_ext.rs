@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 /// `PathBufInteger` is a trait that extends the functionality of `std::path::PathBuf`
 /// with methods for pushing integer values to the path buffer temporary allocations.
 pub trait PathBufInteger {

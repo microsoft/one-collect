@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 /* Windows */
 #[cfg(any(doc, target_os = "windows"))]
 pub mod windows;

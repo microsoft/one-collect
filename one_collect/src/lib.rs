@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 pub mod event;
 pub mod sharing;
 pub mod helpers;

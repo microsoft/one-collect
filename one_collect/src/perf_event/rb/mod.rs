@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 use std::marker::PhantomData;
 use std::arch::asm;
 use std::rc::Rc;
