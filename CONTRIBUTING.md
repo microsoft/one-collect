@@ -75,7 +75,7 @@ cd ruwind
 cargo test
 ```
 
-Note: Some tests may be ignored on certain platforms or require specific permissions (especially tests that interact with perf events on Linux). These tests can be run locally with appropriate permissions (e.g. sudo).
+Note: Some tests may be ignored on certain platforms or require specific permissions (especially tests that interact with perf events on Linux or ETW on Windows). These tests can be run locally with appropriate permissions (e.g. sudo, elevated).
 
 ### Platform-Specific Notes
 
