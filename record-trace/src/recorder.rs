@@ -7,10 +7,17 @@ use one_collect::helpers::{dotnet::universal::UniversalDotNetHelper, exporting::
 use one_collect::helpers::exporting::universal::UniversalExporter;
 
 use one_collect::helpers::dotnet::DotNetScripting;
-use one_collect::helpers::exporting::{ExportMachine, ExportFilterAction, ScriptedUniversalExporter};
+use one_collect::helpers::exporting::{
+    ExportMachine,
+    ExportFilterAction,
+    ExportSampleFilterContext,
+    ScriptedUniversalExporter
+};
+use one_collect::Writable;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::fmt::Write;
 use std::process;
 
 const DEFAULT_CPU_FREQUENCY: u64 = 1000;
@@ -50,100 +57,112 @@ impl Recorder {
             use one_collect::helpers::exporting::process::MetricValue;
 
             let now = std::time::Instant::now();
+            let qpc_freq = ExportMachine::qpc_freq();
+
+            fn append_count(
+                count: u64,
+                out: &mut String) {
+                let _ = write!(out, "{} Count", count);
+            }
+
+            fn append_bytes(
+                bytes: u64,
+                out: &mut String) {
+                let kb = bytes as f64 / 1024.0;
+                let mb = kb / 1024.0;
+                let gb = mb / 1024.0;
+
+                let _ = if gb >= 1.0 {
+                    write!(out, "{:.2} GB", gb)
+                } else if mb >= 1.0 {
+                    write!(out, "{:.2} MB", mb)
+                } else if kb >= 1.0 {
+                    write!(out, "{:.2} KB", kb)
+                } else {
+                    write!(out, "{} Bytes", bytes)
+                };
+            }
+
+            fn append_qpc_duration(
+                qpc_freq: u64,
+                qpc_duration: u64,
+                out: &mut String) {
+                let ns = ExportMachine::qpc_to_ns(qpc_freq, qpc_duration);
+                let us = ns as f64 / 1000.0;
+                let ms = us / 1000.0;
+                let secs = ms / 1000.0;
+
+                let _ = if secs >= 1.0 {
+                    write!(out, "{:.2} secs", secs)
+                } else if ms >= 1.0 {
+                    write!(out, "{:.2} ms", ms)
+                } else if us >= 1.0 {
+                    write!(out, "{:.2} us", us)
+                } else {
+                    write!(out, "{} ns", ns)
+                };
+            }
+
+            fn append_span(
+                context: &ExportSampleFilterContext,
+                qpc_freq: u64,
+                out: &mut String) {
+                let _ = if let Some(span) = context.sample_span() {
+                    append_qpc_duration(qpc_freq, span.qpc_duration(), out);
+
+                    let children = span.children();
+
+                    if !children.is_empty() {
+                        let _ = write!(out, ", Spans={{");
+
+                        for child in children {
+                            let _ = write!(out, " {}(", context.span_name(child));
+                            append_qpc_duration(qpc_freq, child.qpc_duration(), out);
+                            let _ = write!(out, ")");
+                        }
+
+                        write!(out, " }}")
+                    } else {
+                        Ok(())
+                    }
+                } else {
+                    write!(out, "ERROR: Orphaned Span")
+                };
+            }
+
+            let line = Writable::new(String::with_capacity(512));
 
             settings = settings.with_sample_hook(move |context| {
                 let elapsed = now.elapsed();
 
+                let mut line = line.borrow_mut();
+
+                line.clear();
+
+                let _ = write!(
+                    line,
+                    "+{:.4}: {}({}, PID={}): ",
+                    elapsed.as_secs_f64(),
+                    context.sample_kind_str(),
+                    context.comm_name(),
+                    context.pid());
+
                 match context.sample().value() {
                     MetricValue::Count(count) => {
-                        println!(
-                            "+{:.8}: {}({}, PID={}): Count={}",
-                            elapsed.as_secs_f64(),
-                            context.sample_kind_str(),
-                            context.comm_name(),
-                            context.pid(),
-                            count);
+                        append_count(count, &mut line);
                     },
                     MetricValue::Bytes(bytes) => {
-                        let kb = bytes as f64 / 1024.0;
-                        let mb = kb / 1024.0;
-                        let gb = mb / 1024.0;
-
-                        if gb >= 1.0 {
-                            println!(
-                                "+{:.8}: {}({}, PID={}): Bytes={:.2} GB",
-                                elapsed.as_secs_f64(),
-                                context.sample_kind_str(),
-                                context.comm_name(),
-                                context.pid(),
-                                gb);
-                        } else if mb >= 1.0 {
-                            println!(
-                                "+{:.8}: {}({}, PID={}): Bytes={:.2} MB",
-                                elapsed.as_secs_f64(),
-                                context.sample_kind_str(),
-                                context.comm_name(),
-                                context.pid(),
-                                mb);
-                        } else if kb >= 1.0 {
-                            println!(
-                                "+{:.8}: {}({}, PID={}): Bytes={:.2} KB",
-                                elapsed.as_secs_f64(),
-                                context.sample_kind_str(),
-                                context.comm_name(),
-                                context.pid(),
-                                kb);
-                        } else {
-                            println!(
-                                "+{:.8}: {}({}, PID={}): Bytes={}",
-                                elapsed.as_secs_f64(),
-                                context.sample_kind_str(),
-                                context.comm_name(),
-                                context.pid(),
-                                bytes);
-                        }
+                        append_bytes(bytes, &mut line);
                     },
-                    MetricValue::Duration(duration) => {
-                        let ns = duration * 1000000000 / ExportMachine::qpc_freq();
-                        let us = ns as f64 / 1000.0;
-                        let ms = us / 1000.0;
-                        let secs = ms / 1000.0;
-
-                        if secs >= 1.0 {
-                            println!(
-                                "+{:.8}: {}({}, PID={}): Duration={:.8} secs",
-                                elapsed.as_secs_f64(),
-                                context.sample_kind_str(),
-                                context.comm_name(),
-                                context.pid(),
-                                secs);
-                        } else if ms >= 1.0 {
-                            println!(
-                                "+{:.8}: {}({}, PID={}): Duration={:.8} ms",
-                                elapsed.as_secs_f64(),
-                                context.sample_kind_str(),
-                                context.comm_name(),
-                                context.pid(),
-                                ms);
-                        } else if us >= 1.0 {
-                            println!(
-                                "+{:.8}: {}({}, PID={}): Duration={:.8} us",
-                                elapsed.as_secs_f64(),
-                                context.sample_kind_str(),
-                                context.comm_name(),
-                                context.pid(),
-                                us);
-                        } else {
-                            println!(
-                                "+{:.8}: {}({}, PID={}): Duration={} ns",
-                                elapsed.as_secs_f64(),
-                                context.sample_kind_str(),
-                                context.comm_name(),
-                                context.pid(),
-                                ns);
-                        }
+                    MetricValue::Duration(qpc_duration) => {
+                        append_qpc_duration(qpc_freq, qpc_duration, &mut line);
+                    },
+                    MetricValue::Span(_) => {
+                        append_span(context, qpc_freq, &mut line);
                     },
                 }
+
+                println!("{}", line);
 
                 ExportFilterAction::Keep
             });
