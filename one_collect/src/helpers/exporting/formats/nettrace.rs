@@ -548,7 +548,7 @@ impl NetTraceWriter {
         let id = *self.saved_callstacks.entry(key).or_insert(len);
 
         /* Write out event */
-        let value = converter.convert(sample.value());
+        let value = converter.convert(machine, sample.value());
 
         self.buffer.clear();
         self.buffer.write_varint(value)?;

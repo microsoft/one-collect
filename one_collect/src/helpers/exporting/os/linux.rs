@@ -1625,7 +1625,7 @@ mod tests {
                     sample.callstack_id(),
                     sample.tid(),
                     kinds[sample.kind() as usize],
-                    converter.convert(sample.value()));
+                    converter.convert(&exporter, sample.value()));
             }
 
             if process.samples().len() > 0 {

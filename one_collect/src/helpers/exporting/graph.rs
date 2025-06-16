@@ -66,18 +66,32 @@ impl Node {
 }
 
 pub trait ExportGraphMetricValueConverter {
-    fn convert(&self, value: MetricValue) -> u64;
+    fn convert(
+        &self,
+        machine: &ExportMachine,
+        value: MetricValue) -> u64;
 }
 
 pub struct DefaultExportGraphMetricValueConverter {
 }
 
 impl ExportGraphMetricValueConverter for DefaultExportGraphMetricValueConverter {
-    fn convert(&self, value: MetricValue) -> u64 {
+    fn convert(
+        &self,
+        machine: &ExportMachine,
+        value: MetricValue) -> u64 {
         match value {
             MetricValue::Count(value) => { value },
             MetricValue::Bytes(value) => { value },
             MetricValue::Duration(value) => { value },
+            MetricValue::Span(_) => {
+                match machine.span_from_value(value) {
+                    Some(span) => {
+                        span.end_time() - span.start_time()
+                    },
+                    None => { 0 },
+                }
+            }
         }
     }
 }
@@ -306,7 +320,7 @@ impl ExportGraph {
             }
 
             let callstack_id = sample.callstack_id();
-            let value = converter.convert(sample.value());
+            let value = converter.convert(exporter, sample.value());
             let time = sample.time();
 
             /* Import common frames, if not already */
