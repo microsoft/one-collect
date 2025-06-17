@@ -244,6 +244,12 @@ impl ExportSampler {
             record_data,
             &self.frames)
     }
+
+    fn add_span(
+        &mut self,
+        span: ExportSpan) -> anyhow::Result<MetricValue> {
+        Ok(self.exporter.borrow_mut().span_to_value(span))
+    }
 }
 
 pub struct ExportBuiltContext<'a> {
@@ -469,6 +475,12 @@ impl<'a> ExportTraceContext<'a> {
             self.sample_kind,
             self.record_type,
             record_data)
+    }
+
+    pub fn add_span(
+        &mut self,
+        span: ExportSpan) -> anyhow::Result<MetricValue> {
+        self.sampler.borrow_mut().add_span(span)
     }
 }
 

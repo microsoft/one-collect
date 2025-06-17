@@ -39,8 +39,18 @@ impl ExportSpan {
 
     pub fn children(&self) -> &[ExportSpan] { &self.children }
 
+    pub fn children_mut(&mut self) -> &mut [ExportSpan] { &mut self.children }
+
     pub fn qpc_duration(&self) -> u64 {
         self.end_time - self.start_time
+    }
+
+    pub fn mark_last_child_end(
+        &mut self,
+        end_time: u64) {
+        if let Some(last) = self.children.last_mut() {
+            last.mark_end(end_time);
+        }
     }
 
     pub fn mark_end(
