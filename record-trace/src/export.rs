@@ -27,11 +27,23 @@ struct PerfViewExportGraphMetricValueConverter {
 }
 
 impl ExportGraphMetricValueConverter for PerfViewExportGraphMetricValueConverter {
-    fn convert(&self, value: MetricValue) -> u64 {
+    fn convert(
+        &self,
+        machine: &ExportMachine,
+        value: MetricValue) -> u64 {
         match value {
             MetricValue::Count(count) => count,
             MetricValue::Duration(qpc_time) => { ((qpc_time as f64 * 1000.0) / self.qpc_freq as f64) as u64 },
             MetricValue::Bytes(bytes) => bytes,
+            MetricValue::Span(_) => {
+                match machine.span_from_value(value) {
+                    Some(span) => {
+                        let qpc_time = span.end_time() - span.start_time();
+                        ((qpc_time as f64 * 1000.0) / self.qpc_freq as f64) as u64
+                    },
+                    None => { 0 },
+                }
+            }
         }
     }
 }

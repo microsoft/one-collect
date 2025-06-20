@@ -18,6 +18,7 @@ pub enum MetricValue {
     Count(u64),
     Duration(u64),
     Bytes(u64),
+    Span(usize),
 }
 
 impl MetricValue {

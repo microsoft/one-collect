@@ -60,7 +60,37 @@ impl UniversalExporterSwapper {
 struct TimelineEvent {
     event: Event,
     id_closure: Box<dyn FnMut(&ExportTraceContext, &mut [u8])>,
-    completes: bool,
+    flags: TimelineEventFlags,
+}
+
+#[derive(Default, Clone)]
+pub struct TimelineEventFlags {
+    flags: u8,
+}
+
+impl CustomType for TimelineEventFlags {
+    fn build(mut builder: TypeBuilder<Self>) {
+        builder
+            .with_fn("should_start", Self::should_start)
+            .with_fn("should_end", Self::should_end)
+            .with_fn("clear", Self::clear);
+    }
+}
+
+impl TimelineEventFlags {
+    const TIMELINE_EVENT_FLAG_NONE: u8 = 0x0;
+    const TIMELINE_EVENT_FLAG_START: u8 = 0x1;
+    const TIMELINE_EVENT_FLAG_END: u8 = 0x2;
+
+    pub fn will_start(&self) -> bool { self.flags & Self::TIMELINE_EVENT_FLAG_START != 0 }
+
+    pub fn should_start(&mut self) { self.flags |= Self::TIMELINE_EVENT_FLAG_START; }
+
+    pub fn will_end(&self) -> bool { self.flags & Self::TIMELINE_EVENT_FLAG_END != 0 }
+
+    pub fn should_end(&mut self) { self.flags |= Self::TIMELINE_EVENT_FLAG_END; }
+
+    pub fn clear(&mut self) { self.flags = Self::TIMELINE_EVENT_FLAG_NONE; }
 }
 
 #[derive(Clone)]
@@ -87,11 +117,11 @@ impl ScriptTimeline {
         &mut self,
         event: ScriptEvent,
         fields: &Vec<&str>,
-        completes: bool) -> Result<(), Box<EvalAltResult>> {
+        flags: TimelineEventFlags) -> Result<(), Box<EvalAltResult>> {
         match self.timeline.borrow_mut().track_event(
             event.to_event().ok_or("Event has already been used.")?,
             fields,
-            completes)
+            flags)
         {
             Ok(()) => { Ok(()) },
             Err(e) => { Err(format!("{}", e).into()) },
@@ -135,11 +165,11 @@ impl ScriptTimeline {
         &mut self,
         event: ScriptEvent,
         id_field: String,
-        completes: bool) -> Result<(), Box<EvalAltResult>> {
+        flags: TimelineEventFlags) -> Result<(), Box<EvalAltResult>> {
         let mut fields = Vec::new();
         fields.push(id_field.as_str());
 
-        self.with_event(event, &fields, completes)
+        self.with_event(event, &fields, flags)
     }
 
     pub fn with_event_two(
@@ -147,12 +177,12 @@ impl ScriptTimeline {
         event: ScriptEvent,
         id_field_one: String,
         id_field_two: String,
-        completes: bool) -> Result<(), Box<EvalAltResult>> {
+        flags: TimelineEventFlags) -> Result<(), Box<EvalAltResult>> {
         let mut fields = Vec::new();
         fields.push(id_field_one.as_str());
         fields.push(id_field_two.as_str());
 
-        self.with_event(event, &fields, completes)
+        self.with_event(event, &fields, flags)
     }
 
     pub fn with_event_three(
@@ -161,13 +191,13 @@ impl ScriptTimeline {
         id_field_one: String,
         id_field_two: String,
         id_field_three: String,
-        completes: bool) -> Result<(), Box<EvalAltResult>> {
+        flags: TimelineEventFlags) -> Result<(), Box<EvalAltResult>> {
         let mut fields = Vec::new();
         fields.push(id_field_one.as_str());
         fields.push(id_field_two.as_str());
         fields.push(id_field_three.as_str());
 
-        self.with_event(event, &fields, completes)
+        self.with_event(event, &fields, flags)
     }
 
     pub fn with_event_four(
@@ -177,36 +207,42 @@ impl ScriptTimeline {
         id_field_two: String,
         id_field_three: String,
         id_field_four: String,
-        completes: bool) -> Result<(), Box<EvalAltResult>> {
+        flags: TimelineEventFlags) -> Result<(), Box<EvalAltResult>> {
         let mut fields = Vec::new();
         fields.push(id_field_one.as_str());
         fields.push(id_field_two.as_str());
         fields.push(id_field_three.as_str());
         fields.push(id_field_four.as_str());
 
-        self.with_event(event, &fields, completes)
+        self.with_event(event, &fields, flags)
     }
 }
 
 macro_rules! apply_timeline {
     ($self:expr, $exporter:expr, $size:expr) => {
         struct TimelineValues {
+            span: ExportSpan,
             pid: u32,
             tid: u32,
-            time: u64,
         }
 
-        /* TODO: When spans are available, store each time step */
         let map: HashMap<[u8; $size], TimelineValues> = HashMap::new();
         let map = Writable::new(map);
 
         let min_duration = $self.min_duration.clone();
+        let mut capacity = 0;
 
-        /* TODO: Allow spans to flush once available */
+        /* Determine how many spans we likely will have */
+        for event in &$self.events {
+            if !event.flags.will_end() {
+                capacity += 1;
+            }
+        }
+
         for mut event in $self.events.drain(..) {
             let fn_map = map.clone();
 
-            if event.completes {
+            if event.flags.will_end() {
                 let name = $self.name.clone();
 
                 let qpc_min = Writable::new(0u64);
@@ -231,39 +267,91 @@ macro_rules! apply_timeline {
                         (event.id_closure)(trace, &mut id);
 
                         /* First complete event flushes duration */
-                        if let Some(values) = map.remove(&id) {
-                            let duration = trace.time()? - values.time;
+                        if let Some(mut values) = map.remove(&id) {
+                            let time = trace.time()?;
 
-                            if duration >= *qpc_min.borrow() {
+                            values.span.mark_last_child_end(time);
+                            values.span.mark_end(time);
+
+                            if values.span.qpc_duration() >= *qpc_min.borrow() {
+                                let value = trace.add_span(values.span)?;
+
                                 trace.add_pid_sample(
                                     values.pid,
                                     values.tid,
-                                    MetricValue::Duration(duration))?;
+                                    value)?;
                             }
                         }
 
                         Ok(())
                     });
             } else {
+                let timeline_name = $self.name.clone();
+                let event_name = event.event.name().to_owned();
+
+                #[derive(Default)]
+                struct SharedContext {
+                    name_id: usize,
+                    timeline_name_id: usize,
+                }
+
+                let context = Writable::new(SharedContext::default());
+                let fn_context = context.clone();
+                let will_start = event.flags.will_start();
+
                 $exporter.add_event(
                     event.event,
-                    move |_built| {
+                    move |built| {
+                        let exporter = built.exporter_mut();
+
+                        /* Pre-cache intern names */
+                        let mut context = fn_context.borrow_mut();
+                        context.name_id = exporter.intern(&event_name);
+                        context.timeline_name_id = exporter.intern(&timeline_name);
+
                         Ok(())
                     },
                     move |trace| {
+                        let context = context.borrow();
                         let mut map = fn_map.borrow_mut();
                         let mut id: [u8; $size] = [0; $size];
 
                         (event.id_closure)(trace, &mut id);
 
-                        let values = TimelineValues {
-                            pid: trace.pid()?,
-                            tid: trace.tid()?,
-                            time: trace.time()?,
-                        };
+                        let pid = trace.pid()?;
+                        let tid = trace.tid()?;
+                        let time = trace.time()?;
 
-                        /* First non-complete event sets values */
-                        map.entry(id).or_insert(values);
+                        if will_start {
+                            /* First will_start event sets pid/tid values */
+                            let values = map.entry(id).or_insert_with(|| {
+                                TimelineValues {
+                                    span: ExportSpan::start(
+                                        context.timeline_name_id,
+                                        time,
+                                        capacity),
+                                    pid,
+                                    tid,
+                                }});
+
+                            /* Add new child, ending last child if any */
+                            values.span.mark_last_child_end(time);
+
+                            values.span.add_child(
+                                ExportSpan::start(
+                                    context.name_id,
+                                    time,
+                                    0));
+                        } else if let Some(values) = map.get_mut(&id) {
+                            /* Add new child, ending last child if any */
+                            values.span.mark_last_child_end(time);
+
+                            values.span.add_child(
+                                ExportSpan::start(
+                                    context.name_id,
+                                    time,
+                                    0));
+                        }
 
                         Ok(())
                     });
@@ -299,7 +387,11 @@ impl ExporterTimeline {
         &mut self,
         event: Event,
         id_fields: &Vec<&str>,
-        completes: bool) -> anyhow::Result<()> {
+        flags: TimelineEventFlags) -> anyhow::Result<()> {
+        if flags.will_end() && flags.will_start() {
+            anyhow::bail!("Event cannot both start and end, check flags.");
+        }
+
         let mut id_closures = Vec::new();
 
         if id_fields.is_empty() {
@@ -357,7 +449,7 @@ impl ExporterTimeline {
             TimelineEvent {
                 event,
                 id_closure,
-                completes,
+                flags,
             });
 
         Ok(())
@@ -371,16 +463,19 @@ impl ExporterTimeline {
         }
 
         let mut has_completes = false;
+        let mut has_starts = false;
 
         for event in &self.events {
-            if event.completes {
-                has_completes = true;
-                break;
-            }
+            has_completes |= event.flags.will_end();
+            has_starts |= event.flags.will_start();
         }
 
         if !has_completes {
             anyhow::bail!("Timelines must have at least 1 completion event.");
+        }
+
+        if !has_starts {
+            anyhow::bail!("Timelines must have at least 1 start event.");
         }
 
         /* Apply closures based on ID size */
@@ -433,6 +528,13 @@ impl ScriptedUniversalExporter {
             });
 
         self.rhai_engine().build_type::<ScriptTimeline>();
+        self.rhai_engine().build_type::<TimelineEventFlags>();
+
+        self.rhai_engine().register_fn(
+            "new_timeline_event_flags",
+            || -> Result<TimelineEventFlags, Box<EvalAltResult>> {
+                Ok(TimelineEventFlags::default())
+        });
 
         self.rhai_engine().register_fn(
             "new_timeline",
@@ -564,5 +666,92 @@ mod tests {
         let exporter = scripted.from_script("with_per_cpu_buffer_bytes(1234);").expect("Should work");
 
         assert_eq!(1234, exporter.cpu_buf_bytes());
+    }
+
+    #[test]
+    fn timeline_events() {
+        fn create_event(id: usize) -> Event {
+            let mut event = Event::new(id, "Test".into());
+            let format = event.format_mut();
+
+            format.add_field(
+                EventField::new(
+                    "1".into(), "char".into(),
+                    LocationType::Static, 0, 1));
+            format.add_field(
+                EventField::new(
+                    "2".into(), "int".into(),
+                    LocationType::Static, 0, 4));
+            format.add_field(
+                EventField::new(
+                    "3".into(), "long".into(),
+                    LocationType::Static, 0, 8));
+            format.add_field(
+                EventField::new(
+                    "4".into(), "uuid".into(),
+                    LocationType::Static, 0, 16));
+            format.add_field(
+                EventField::new(
+                    "5".into(), "uuid".into(),
+                    LocationType::Static, 0, 16));
+
+            event
+        }
+
+        let mut flags = TimelineEventFlags::default();
+
+        /* Normal, should work */
+        let mut timeline = ExporterTimeline::new("Test".into());
+        timeline.track_event(create_event(1), &vec!("1", "2"), flags.clone()).unwrap();
+
+        /* Mis-matched key size should fail */
+        assert!(timeline.track_event(create_event(1), &vec!("2", "3"), flags.clone()).is_err());
+
+        /* Start/End together should fail */
+        let mut timeline = ExporterTimeline::new("Test".into());
+        flags.should_start();
+        flags.should_end();
+        assert!(timeline.track_event(create_event(1), &vec!("1", "2"), flags.clone()).is_err());
+        flags.clear();
+
+        /* Not found field should fail */
+        let mut timeline = ExporterTimeline::new("Test".into());
+        assert!(timeline.track_event(create_event(1), &vec!("NotHere"), flags.clone()).is_err());
+
+        /* Single event should not apply */
+        let mut timeline = ExporterTimeline::new("Test".into());
+        timeline.track_event(create_event(1), &vec!("1", "2"), flags.clone()).unwrap();
+
+        let scripted = ScriptedUniversalExporter::new(ExportSettings::default());
+        let swapper = scripted.export_swapper();
+        assert!(timeline.apply(&mut swapper.borrow_mut()).is_err());
+
+        /* Two events should apply */
+        let mut timeline = ExporterTimeline::new("Test".into());
+        flags.clear();
+        flags.should_start();
+        timeline.track_event(create_event(1), &vec!("1", "2"), flags.clone()).unwrap();
+
+        flags.clear();
+        flags.should_end();
+        timeline.track_event(create_event(2), &vec!("1", "2"), flags.clone()).unwrap();
+
+        let scripted = ScriptedUniversalExporter::new(ExportSettings::default());
+        let swapper = scripted.export_swapper();
+        timeline.apply(&mut swapper.borrow_mut()).unwrap();
+
+        /* IDs over 32-bytes should fail */
+        let mut timeline = ExporterTimeline::new("Test".into());
+        flags.clear();
+        flags.should_start();
+        timeline.track_event(create_event(1), &vec!("1", "4", "5"), flags.clone()).unwrap();
+
+        flags.clear();
+        flags.should_end();
+        timeline.track_event(create_event(2), &vec!("1", "4", "5"), flags.clone()).unwrap();
+
+        let scripted = ScriptedUniversalExporter::new(ExportSettings::default());
+        let swapper = scripted.export_swapper();
+        assert!(timeline.apply(&mut swapper.borrow_mut()).is_err());
     }
 }

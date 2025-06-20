@@ -20,7 +20,7 @@ use crate::helpers::callstack::CallstackHelper;
 
 use modulemetadata::ModuleMetadata;
 use pe_file::PEModuleMetadata;
-use process::MetricValue;
+use process::MetricValue::{self, Span};
 use ruwind::UnwindType;
 use chrono::{DateTime, Utc};
 
@@ -30,6 +30,9 @@ pub mod record;
 use record::ExportRecordType;
 use record::ExportRecordData;
 use record::ExportRecord;
+
+pub mod span;
+use span::ExportSpan;
 
 pub mod os;
 use os::OSExportMachine;
@@ -42,6 +45,8 @@ pub use os::linux::ExportSettingsLinuxExt;
 
 pub const KERNEL_START:u64 = 0xFFFF800000000000;
 pub const KERNEL_END:u64 = 0xFFFFFFFFFFFFFFFF;
+
+const NANOS_IN_SEC:u64 = 1000000000;
 
 pub type ExportDevNode = ruwind::ModuleKey;
 
@@ -239,6 +244,12 @@ impl ExportSampler {
             record_data,
             &self.frames)
     }
+
+    fn add_span(
+        &mut self,
+        span: ExportSpan) -> anyhow::Result<MetricValue> {
+        Ok(self.exporter.borrow_mut().span_to_value(span))
+    }
 }
 
 pub struct ExportBuiltContext<'a> {
@@ -291,7 +302,7 @@ impl<'a> ExportBuiltContext<'a> {
         duration: Duration) -> u64 {
         let ns = duration.as_nanos() as f64;
         let freq = ExportMachine::qpc_freq();
-        let ns_per_tick = freq as f64 / 1000000000f64;
+        let ns_per_tick = freq as f64 / NANOS_IN_SEC as f64;
 
         (ns * ns_per_tick).floor() as u64
     }
@@ -465,6 +476,12 @@ impl<'a> ExportTraceContext<'a> {
             self.record_type,
             record_data)
     }
+
+    pub fn add_span(
+        &mut self,
+        span: ExportSpan) -> anyhow::Result<MetricValue> {
+        self.sampler.borrow_mut().add_span(span)
+    }
 }
 
 type BoxedBuiltCallback = Box<dyn FnMut(&mut ExportBuiltContext) -> anyhow::Result<()>>;
@@ -491,6 +508,7 @@ impl ExportEventCallback {
 
 pub struct ExportSampleFilterContext<'a> {
     kinds: &'a Vec<String>,
+    spans: &'a Vec<ExportSpan>,
     strings: &'a InternedStrings,
     proc: &'a ExportProcess,
     sample: &'a ExportProcessSample,
@@ -511,6 +529,22 @@ impl<'a> ExportSampleFilterContext<'a> {
     }
 
     pub fn sample(&self) -> &ExportProcessSample { self.sample }
+
+    pub fn sample_span(&self) -> Option<&ExportSpan> {
+        if let MetricValue::Span(id) = self.sample.value() {
+            if id < self.spans.len() {
+                return Some(&self.spans[id]);
+            }
+        }
+
+        None
+    }
+
+    pub fn span_name(
+        &self,
+        span: &ExportSpan) -> &str {
+        span.name(self.strings)
+    }
 
     pub fn pid(&self) -> u32 { self.proc.pid() }
 
@@ -543,6 +577,7 @@ macro_rules! filter_sample_ret_on_drop {
             let context = ExportSampleFilterContext {
                 kinds: &$self.kinds,
                 strings: &$self.strings,
+                spans: &$self.spans,
                 proc: $proc,
                 sample: $sample,
             };
@@ -716,6 +751,7 @@ pub struct ExportMachine {
     pub(crate) os: OSExportMachine,
     procs: HashMap<u32, ExportProcess>,
     records: Vec<ExportRecord>,
+    spans: Vec<ExportSpan>,
     record_data: Vec<u8>,
     module_metadata: ModuleMetadataLookup,
     kinds: Vec<String>,
@@ -793,6 +829,7 @@ impl ExportMachine {
             os: OSExportMachine::new(),
             procs: HashMap::new(),
             records,
+            spans: Vec::new(),
             record_data: Vec::new(),
             module_metadata: ModuleMetadataLookup::new(),
             kinds: Vec::new(),
@@ -820,6 +857,27 @@ impl ExportMachine {
     pub fn qpc_time() -> u64 { Self::os_qpc_time() }
 
     pub fn qpc_freq() -> u64 { Self::os_qpc_freq() }
+
+    pub fn qpc_to_ns(
+        freq: u64,
+        mut qpc: u64) -> u64 {
+        let mut ns: u64 = 0;
+
+        while qpc >= freq {
+            ns += NANOS_IN_SEC;
+            qpc -= NANOS_IN_SEC;
+        }
+
+        ns += qpc * NANOS_IN_SEC / freq;
+
+        ns
+    }
+
+    pub fn qpc_to_duration(
+        freq: u64,
+        qpc: u64) -> Duration {
+        Duration::from_nanos(Self::qpc_to_ns(freq, qpc))
+    }
 
     pub fn cpu_count() -> u32 { Self::os_cpu_count() }
 
@@ -921,12 +979,10 @@ impl ExportMachine {
         if let Some(start_qpc) = self.start_qpc {
             let end_qpc = Self::os_qpc_time();
             let qpc_freq = Self::os_qpc_freq();
-
-            let qpc_duration = end_qpc - start_qpc;
-            let micros = (qpc_duration * 1000000u64) / qpc_freq;
+            let duration = Self::qpc_to_duration(qpc_freq, end_qpc - start_qpc);
 
             self.end_qpc = Some(end_qpc);
-            self.duration = Some(Duration::from_micros(micros));
+            self.duration = Some(duration);
         }
     }
 
@@ -952,6 +1008,34 @@ impl ExportMachine {
             record_type_id,
             &self.record_types[record_type_id as usize],
             &self.record_data[record.start()..record.end()])
+    }
+
+    pub fn sample_span(
+        &self,
+        sample: &ExportProcessSample) -> Option<&ExportSpan> {
+        self.span_from_value(sample.value())
+    }
+
+    pub fn span_from_value(
+        &self,
+        value: MetricValue) -> Option<&ExportSpan> {
+        if let Span(id) = value {
+            if id < self.spans.len() {
+                return Some(&self.spans[id]);
+            }
+        }
+
+        None
+    }
+
+    pub fn span_to_value(
+        &mut self,
+        span: ExportSpan) -> MetricValue {
+        let id = self.spans.len();
+
+        self.spans.push(span);
+
+        MetricValue::Span(id)
     }
 
     pub fn find_sample_kind(
