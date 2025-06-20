@@ -191,6 +191,19 @@ impl ExportSampler {
         self.exporter.borrow_mut().add_custom_sample(pid, sample)
     }
 
+    fn add_custom_sample_with_record(
+        &mut self,
+        pid: u32,
+        sample: ExportProcessSample,
+        record_type: u16,
+        record_data: &[u8]) -> anyhow::Result<()> {
+        self.exporter.borrow_mut().add_custom_sample_with_record(
+            pid,
+            sample,
+            record_type,
+            record_data)
+    }
+
     fn add_sample(
         &mut self,
         data: &EventData,
@@ -430,6 +443,18 @@ impl<'a> ExportTraceContext<'a> {
             sample)
     }
 
+    pub fn add_custom_sample_with_record(
+        &mut self,
+        pid: u32,
+        sample: ExportProcessSample,
+        record_data: &[u8]) -> anyhow::Result<()> {
+        self.sampler.borrow_mut().add_custom_sample_with_record(
+            pid,
+            sample,
+            self.record_type,
+            record_data)
+    }
+
     pub fn add_pid_sample(
         &mut self,
         pid: u32,
@@ -443,6 +468,24 @@ impl<'a> ExportTraceContext<'a> {
         self.sampler.borrow_mut().add_custom_sample(
             pid,
             sample)
+    }
+
+    pub fn add_pid_sample_with_record(
+        &mut self,
+        pid: u32,
+        tid: u32,
+        value: MetricValue,
+        record_data: &[u8]) -> anyhow::Result<()> {
+        let sample = self.make_sample_with_kind(
+            value,
+            tid,
+            self.sample_kind)?;
+
+        self.sampler.borrow_mut().add_custom_sample_with_record(
+            pid,
+            sample,
+            self.record_type,
+            record_data)
     }
 
     pub fn add_sample(
@@ -509,6 +552,9 @@ impl ExportEventCallback {
 pub struct ExportSampleFilterContext<'a> {
     kinds: &'a Vec<String>,
     spans: &'a Vec<ExportSpan>,
+    record_types: &'a Vec<ExportRecordType>,
+    record_type_id: u16,
+    record_data: Option<&'a [u8]>,
     strings: &'a InternedStrings,
     proc: &'a ExportProcess,
     sample: &'a ExportProcessSample,
@@ -548,6 +594,17 @@ impl<'a> ExportSampleFilterContext<'a> {
 
     pub fn pid(&self) -> u32 { self.proc.pid() }
 
+    pub fn sample_record_data(&self) -> Option<ExportRecordData> {
+        if self.record_data.is_none() {
+            return None;
+        }
+
+        Some(ExportRecordData::new(
+            self.record_type_id,
+            &self.record_types[self.record_type_id as usize],
+            &self.record_data.unwrap()))
+    }
+
     pub fn sample_kind_str(&self) -> &str {
         let kind = self.sample.kind() as usize;
 
@@ -572,11 +629,14 @@ impl<'a> ExportSampleFilterContext<'a> {
 }
 
 macro_rules! filter_sample_ret_on_drop {
-    ($self: expr, $proc:expr, $sample:expr) => {
+    ($self: expr, $proc:expr, $sample:expr, $record_type_id:expr, $record_data:expr) => {
         if !$self.sample_hooks.is_empty() {
             let context = ExportSampleFilterContext {
                 kinds: &$self.kinds,
                 strings: &$self.strings,
+                record_types: &$self.record_types,
+                record_type_id: $record_type_id,
+                record_data: $record_data,
                 spans: &$self.spans,
                 proc: $proc,
                 sample: $sample,
@@ -1312,7 +1372,7 @@ impl ExportMachine {
 
         let proc = self.procs.entry(pid).or_insert_with(|| ExportProcess::new(pid));
 
-        filter_sample_ret_on_drop!(self, &proc, &sample);
+        filter_sample_ret_on_drop!(self, &proc, &sample, 0, None);
 
         proc.add_sample(sample);
 
@@ -1331,7 +1391,7 @@ impl ExportMachine {
 
         let proc = self.procs.entry(pid).or_insert_with(|| ExportProcess::new(pid));
 
-        filter_sample_ret_on_drop!(self, &proc, &sample);
+        filter_sample_ret_on_drop!(self, &proc, &sample, record_type, Some(record_data));
 
         /*
          * Add record data to global data slice:
@@ -1391,7 +1451,7 @@ impl ExportMachine {
         sample: ExportProcessSample) -> anyhow::Result<()> {
         let proc = self.procs.entry(pid).or_insert_with(|| ExportProcess::new(pid));
 
-        filter_sample_ret_on_drop!(self, &proc, &sample);
+        filter_sample_ret_on_drop!(self, &proc, &sample, 0, None);
 
         proc.add_sample(sample);
 
@@ -1521,8 +1581,6 @@ mod tests {
             &record_data,
             &frames).unwrap();
 
-        let sample_kinds = machine.sample_kinds();
-        let record_types = machine.record_types();
         let proc = machine.find_process(0).unwrap();
         let samples = proc.samples();
 

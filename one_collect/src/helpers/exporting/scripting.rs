@@ -57,15 +57,20 @@ impl UniversalExporterSwapper {
     }
 }
 
+type TimelineEventIdFn = Box<dyn FnMut(&ExportTraceContext, &mut [u8])>;
+type TimelineEventRecFn = Box<dyn FnMut(&ExportTraceContext, &mut Vec<u8>)>;
+
 struct TimelineEvent {
     event: Event,
-    id_closure: Box<dyn FnMut(&ExportTraceContext, &mut [u8])>,
+    id_closure: TimelineEventIdFn,
+    record_closure: Option<TimelineEventRecFn>,
     flags: TimelineEventFlags,
 }
 
 #[derive(Default, Clone)]
 pub struct TimelineEventFlags {
     flags: u8,
+    record_fields: Vec<String>,
 }
 
 impl CustomType for TimelineEventFlags {
@@ -73,6 +78,7 @@ impl CustomType for TimelineEventFlags {
         builder
             .with_fn("should_start", Self::should_start)
             .with_fn("should_end", Self::should_end)
+            .with_fn("should_record_field", Self::should_record_field)
             .with_fn("clear", Self::clear);
     }
 }
@@ -90,7 +96,18 @@ impl TimelineEventFlags {
 
     pub fn should_end(&mut self) { self.flags |= Self::TIMELINE_EVENT_FLAG_END; }
 
-    pub fn clear(&mut self) { self.flags = Self::TIMELINE_EVENT_FLAG_NONE; }
+    pub fn should_record_field(
+        &mut self,
+        field: String) {
+        self.record_fields.push(field);
+    }
+
+    pub fn record_fields(&self) -> &[String] { &self.record_fields }
+
+    pub fn clear(&mut self) {
+        self.flags = Self::TIMELINE_EVENT_FLAG_NONE;
+        self.record_fields.clear();
+    }
 }
 
 #[derive(Clone)]
@@ -221,6 +238,7 @@ impl ScriptTimeline {
 macro_rules! apply_timeline {
     ($self:expr, $exporter:expr, $size:expr) => {
         struct TimelineValues {
+            record: Vec<u8>,
             span: ExportSpan,
             pid: u32,
             tid: u32,
@@ -239,23 +257,54 @@ macro_rules! apply_timeline {
             }
         }
 
+        let record_capacity = if let Some(last) = $self.record_format.fields().last() {
+            last.offset + last.size
+        } else {
+            0
+        };
+
+        let should_record = record_capacity != 0;
+
         for mut event in $self.events.drain(..) {
             let fn_map = map.clone();
 
             if event.flags.will_end() {
                 let name = $self.name.clone();
 
-                let qpc_min = Writable::new(0u64);
-                let set_qpc_min = qpc_min.clone();
+                #[derive(Default)]
+                struct SharedContext {
+                    qpc_min: u64,
+                    record_format: Option<EventFormat>,
+                }
+
+                let event_id = event.event.id();
+                let context = Writable::new(SharedContext::default());
+                let fn_context = context.clone();
+
+                if should_record {
+                    context.borrow_mut().record_format = Some(
+                        $self.record_format.clone());
+                }
 
                 $exporter.add_event(
                     event.event,
                     move |built| {
-                        built.set_sample_kind(&name);
+                        let mut context = fn_context.borrow_mut();
+
+                        let kind = built.set_sample_kind(&name);
 
                         /* Calculate QPC min duration if any */
                         if let Some(min_duration) = min_duration {
-                            *set_qpc_min.borrow_mut() = built.duration_to_qpc(min_duration);
+                            context.qpc_min = built.duration_to_qpc(min_duration);
+                        }
+
+                        if let Some(record_format) = context.record_format.take() {
+                            built.set_record_type(
+                                ExportRecordType::new(
+                                    kind,
+                                    event_id,
+                                    name.clone(),
+                                    record_format));
                         }
 
                         Ok(())
@@ -268,18 +317,32 @@ macro_rules! apply_timeline {
 
                         /* First complete event flushes duration */
                         if let Some(mut values) = map.remove(&id) {
+                            let context = context.borrow();
+
                             let time = trace.time()?;
 
                             values.span.mark_last_child_end(time);
                             values.span.mark_end(time);
 
-                            if values.span.qpc_duration() >= *qpc_min.borrow() {
+                            if values.span.qpc_duration() >= context.qpc_min {
                                 let value = trace.add_span(values.span)?;
 
-                                trace.add_pid_sample(
-                                    values.pid,
-                                    values.tid,
-                                    value)?;
+                                if should_record {
+                                    if let Some(record_closure) = event.record_closure.as_mut() {
+                                        record_closure(trace, &mut values.record);
+                                    }
+
+                                    trace.add_pid_sample_with_record(
+                                        values.pid,
+                                        values.tid,
+                                        value,
+                                        &values.record)?;
+                                } else {
+                                    trace.add_pid_sample(
+                                        values.pid,
+                                        values.tid,
+                                        value)?;
+                                }
                             }
                         }
 
@@ -322,18 +385,23 @@ macro_rules! apply_timeline {
                         let tid = trace.tid()?;
                         let time = trace.time()?;
 
-                        if will_start {
+                        let values = if will_start {
                             /* First will_start event sets pid/tid values */
-                            let values = map.entry(id).or_insert_with(|| {
+                            Some(map.entry(id).or_insert_with(|| {
                                 TimelineValues {
+                                    record: Vec::with_capacity(record_capacity),
                                     span: ExportSpan::start(
                                         context.timeline_name_id,
                                         time,
                                         capacity),
                                     pid,
                                     tid,
-                                }});
+                                }}))
+                        } else {
+                            map.get_mut(&id)
+                        };
 
+                        if let Some(values) = values {
                             /* Add new child, ending last child if any */
                             values.span.mark_last_child_end(time);
 
@@ -342,15 +410,10 @@ macro_rules! apply_timeline {
                                     context.name_id,
                                     time,
                                     0));
-                        } else if let Some(values) = map.get_mut(&id) {
-                            /* Add new child, ending last child if any */
-                            values.span.mark_last_child_end(time);
 
-                            values.span.add_child(
-                                ExportSpan::start(
-                                    context.name_id,
-                                    time,
-                                    0));
+                            if let Some(record_closure) = event.record_closure.as_mut() {
+                                record_closure(trace, &mut values.record);
+                            }
                         }
 
                         Ok(())
@@ -365,6 +428,7 @@ pub struct ExporterTimeline {
     events: Vec<TimelineEvent>,
     id_size: usize,
     min_duration: Option<Duration>,
+    record_format: EventFormat,
 }
 
 impl ExporterTimeline {
@@ -374,6 +438,7 @@ impl ExporterTimeline {
             events: Vec::new(),
             id_size: 0,
             min_duration: None,
+            record_format: EventFormat::default(),
         }
     }
 
@@ -445,10 +510,110 @@ impl ExporterTimeline {
             }
         });
 
+        struct RecordContext {
+            write_offset: usize,
+            closure: Box<dyn FnMut(&[u8]) -> &[u8]>,
+        }
+
+        let mut record_closures = Vec::new();
+
+        for record_field in flags.record_fields() {
+            if let Some(event_field) = event.format().get_field(record_field) {
+                if event_field.size == 0 ||
+                   event_field.location == LocationType::DynRelative ||
+                   event_field.location == LocationType::DynAbsolute {
+                    anyhow::bail!(
+                        "Record field \"{}\" must have a static size.",
+                        record_field);
+                }
+
+                let write_offset = match self.record_format.get_field(record_field) {
+                    Some(existing_field) => {
+                        if event_field.type_name != existing_field.type_name {
+                            anyhow::bail!(
+                                "Record field \"{}\" must all have the same type.",
+                                record_field);
+                        }
+
+                        if event_field.size != existing_field.size {
+                            anyhow::bail!(
+                                "Record field \"{}\" must all have the same size.",
+                                record_field);
+                        }
+
+                        if event_field.location != existing_field.location {
+                            anyhow::bail!(
+                                "Record field \"{}\" must all have the same location.",
+                                record_field);
+                        }
+
+                        existing_field.offset
+                    },
+                    None => {
+                        let mut new_field = event_field.clone();
+
+                        let offset = match self.record_format.fields().last() {
+                            Some(last_field) => { last_field.offset + last_field.size },
+                            None => { 0 },
+                        };
+
+                        new_field.offset = offset;
+
+                        self.record_format.add_field(new_field);
+
+                        offset
+                    }
+                };
+
+                match event.try_get_field_data_closure(record_field) {
+                    Some(closure) => {
+                        record_closures.push(
+                            RecordContext {
+                                write_offset,
+                                closure,
+                            });
+                    },
+                    None => {
+                        anyhow::bail!(
+                            "Unable to get record from \"{}\".",
+                            record_field);
+                    },
+                }
+            } else {
+                anyhow::bail!(
+                    "Record field \"{}\" does not exist.",
+                    record_field);
+            }
+        }
+
+        let mut record_closure: Option<TimelineEventRecFn> = None;
+
+        if !record_closures.is_empty() {
+            record_closure = Some(Box::new(move |trace, record_data| {
+                let event_data = trace.data.event_data();
+
+                for closure in &mut record_closures {
+                    let data = (closure.closure)(event_data);
+                    let len = data.len();
+                    let start = closure.write_offset;
+                    let end = start + len;
+
+                    /* Ensure enough space */
+                    if record_data.len() < end {
+                        record_data.resize(end, 0);
+                    }
+
+                    /* Copy */
+                    record_data[start..end].copy_from_slice(data);
+                }
+            }));
+        }
+
         self.events.push(
             TimelineEvent {
                 event,
                 id_closure,
+                record_closure,
                 flags,
             });
 
