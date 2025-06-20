@@ -54,10 +54,15 @@ impl Recorder {
 
         // Live.
         if self.args.live() {
+            use std::collections::HashMap;
             use one_collect::helpers::exporting::process::MetricValue;
 
             let now = std::time::Instant::now();
             let qpc_freq = ExportMachine::qpc_freq();
+
+            type FormatWriteFn = Box<dyn FnMut(&mut String, &[u8])>;
+            let record_lookup: HashMap<u16, FormatWriteFn> = HashMap::new();
+            let record_lookup = Writable::new(record_lookup);
 
             fn append_count(
                 count: u64,
@@ -134,7 +139,6 @@ impl Recorder {
 
             settings = settings.with_sample_hook(move |context| {
                 let elapsed = now.elapsed();
-
                 let mut line = line.borrow_mut();
 
                 line.clear();
@@ -162,8 +166,20 @@ impl Recorder {
                     },
                 }
 
-                println!("{}", line);
+                if let Some(record) = context.sample_record_data() {
+                    let mut record_lookup = record_lookup.borrow_mut();
 
+                    let id = record.record_type_id();
+
+                    let closure = record_lookup.entry(id).or_insert_with(|| {
+                        record.record_type().format().get_write_closure()
+                    });
+
+                    let _ = write!(line, "\nRecord: ");
+                    closure(&mut line, record.record_data());
+                }
+
+                println!("{}", line);
                 ExportFilterAction::Keep
             });
         }
