@@ -863,12 +863,14 @@ impl ExportMachine {
         mut qpc: u64) -> u64 {
         let mut ns: u64 = 0;
 
-        while qpc >= freq {
-            ns += NANOS_IN_SEC;
-            qpc -= NANOS_IN_SEC;
-        }
+        if freq != 0 {
+            while qpc >= freq {
+                ns += NANOS_IN_SEC;
+                qpc -= freq;
+            }
 
-        ns += qpc * NANOS_IN_SEC / freq;
+            ns += qpc * NANOS_IN_SEC / freq;
+        }
 
         ns
     }
