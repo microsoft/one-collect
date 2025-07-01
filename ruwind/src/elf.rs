@@ -1260,11 +1260,26 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn symbols() {
         #[cfg(target_arch = "x86_64")]
-        let path = "/usr/lib/x86_64-linux-gnu/libc.so.6";
+        let paths = [
+            "/usr/lib/x86_64-linux-gnu/libc.so.6",
+            "/usr/lib/libc.so.6"
+        ];
 
         #[cfg(target_arch = "aarch64")]
-        let path = "/usr/lib/aarch64-linux-gnu/libc.so.6";
+        let paths = [
+            "/usr/lib/aarch64-linux-gnu/libc.so.6",
+            "/usr/lib/libc.so.6"
+        ];
 
+        let mut test_path = None;
+        for path in &paths {
+            if std::path::Path::new(path).exists() {
+                test_path = Some(*path);
+                break;
+            }
+        }
+
+        let path = test_path.expect("No libc.so.6 found in any of the expected locations");
         let mut file = File::open(path).unwrap();
         let mut sections = Vec::new();
 
