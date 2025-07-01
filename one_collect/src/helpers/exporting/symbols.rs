@@ -757,6 +757,7 @@ impl ExportSymbolReader for R2RLoadedLayoutSymbolTransformer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn kernel_symbol_reader() {
@@ -903,10 +904,21 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn elf_symbol_reader() {
         #[cfg(target_arch = "x86_64")]
-        let path = "/usr/lib/x86_64-linux-gnu/libc.so.6";
+        let possible_paths = [
+            "/usr/lib/x86_64-linux-gnu/libc.so.6",
+            "/usr/lib/libc.so.6"
+        ];
 
         #[cfg(target_arch = "aarch64")]
-        let path = "/usr/lib/aarch64-linux-gnu/libc.so.6";
+        let possible_paths = [
+            "/usr/lib/aarch64-linux-gnu/libc.so.6",
+            "/usr/lib/libc.so.6"
+        ];
+
+        let path = possible_paths
+            .iter()
+            .find(|&p| Path::new(p).exists())
+            .expect("Could not find libc.so.6 in any expected location");
 
         if let Ok(file) = File::open(path) {
             let mut reader = ElfSymbolReader::new(file);

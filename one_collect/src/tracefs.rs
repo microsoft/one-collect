@@ -429,6 +429,7 @@ impl TraceFS {
 mod tests {
     use super::*;
     use std::io::{Write, BufWriter};
+    use std::path::Path;
 
     #[test]
     fn it_works() {
@@ -523,10 +524,27 @@ mod tests {
             "malloc");
 
         #[cfg(all(target_arch = "x86_64"))]
+        let possible_paths = [
+            "/usr/lib/x86_64-linux-gnu/libc.so.6",
+            "/usr/lib/libc.so.6"
+        ];
+
+        #[cfg(all(target_arch = "aarch64"))]
+        let possible_paths = [
+            "/usr/lib/aarch64-linux-gnu/libc.so.6",
+            "/usr/lib/libc.so.6"
+        ];
+
+        let libc_path = possible_paths
+            .iter()
+            .find(|&p| Path::new(p).exists())
+            .expect("Could not find libc.so.6 in any expected location");
+
+        #[cfg(all(target_arch = "x86_64"))]
         let event = tracefs.register_uprobe(
             "unit_test",
             "malloc",
-            "/usr/lib/x86_64-linux-gnu/libc.so.6",
+            libc_path,
             0x0,
             "size=%di:u64").unwrap();
 
@@ -534,7 +552,7 @@ mod tests {
         let event = tracefs.register_uprobe(
             "unit_test",
             "malloc",
-            "/usr/lib/aarch64-linux-gnu/libc.so.6",
+            libc_path,
             0x0,
             "size=%x0:u64").unwrap();
 
