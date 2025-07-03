@@ -123,6 +123,7 @@ pub fn default_unwinder() -> impl MachineUnwinder {
 }
 
 #[cfg(test)]
+#[cfg(target_arch = "x86_64")]
 mod tests {
     use super::*;
     use std::fs::{self, File};
