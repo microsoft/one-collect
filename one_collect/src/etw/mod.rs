@@ -496,9 +496,16 @@ impl EtwSession {
 
     pub fn add_event(
         &mut self,
-        event: Event,
+        mut event: Event,
         properties: Option<u32>) {
         let provider = *event.extension().provider();
+        let lookup_provider = event.extension_mut().lookup_provider_mut().take();
+
+        /* Swap lookup provider to actual provider before adding */
+        if let Some(lookup_provider) = lookup_provider {
+            *event.extension_mut().provider_mut() = lookup_provider;
+        }
+
         let level = event.extension().level();
         let keyword = event.extension().keyword();
 

@@ -55,7 +55,7 @@ impl ScriptEvent {
                     name,
                     type_name,
                     location,
-                    offset + size as usize,
+                    offset,
                     size as usize));
         }
     }
