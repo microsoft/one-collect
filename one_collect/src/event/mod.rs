@@ -562,6 +562,276 @@ impl EventFormat {
             data)
     }
 
+    /// Tries to return a closure capable of filtering the field data
+    /// by the operation and value passed in.
+    ///
+    /// # Arguments
+    ///
+    /// * `field_name` - The name of the field to get.
+    /// * `operation` - The operation of the filter.
+    /// Numerical fields (u8/s8, u16/s16/short, u32/s32/int, u64/s64/long) can use ==, !=, >, >=, <, and <=.
+    /// String fields (char, wchar, string) can use ==, !=, contains, not_contains, starts_with, and ends_with.
+    /// The string operations ==, !=, contains, not_contains, starts_with, and ends_with are case sensitive.
+    /// * `value` - The value to use for the operation.
+    ///
+    /// # Returns
+    ///
+    /// A `Box<dyn FnMut(&[u8])` closure that takes event data and returns a bool
+    /// result for the operation and value if the operation and value are appropriate
+    /// for the field. If the operation or value are not, then None is returned. For
+    /// example, an operation of ">" requires a numeric value and a field that has a
+    /// numeric type.
+    pub fn try_get_field_filter_closure(
+        &self,
+        field_name: &str,
+        mut operation: &str,
+        value: &str) -> Option<Box<dyn FnMut(&[u8]) -> bool>> {
+        if let Some(mut data_closure) = self.try_get_field_data_closure(field_name) {
+            if let Some(field) = self.get_field(field_name) {
+                /* Swap numeric to string operations for ambigious cases */
+                match operation {
+                    "==" => {
+                        match field.type_name.as_str() {
+                            "char" | "unsigned char" | "string" | "wstring" | "wchar" => {
+                                operation = "equals";
+                            }
+                            _ => { },
+                        }
+                    },
+
+                    "!=" => {
+                        match field.type_name.as_str() {
+                            "char" | "unsigned char" | "string" | "wstring" | "wchar" => {
+                                operation = "not_equals";
+                            }
+                            _ => { },
+                        }
+                    },
+
+                    _ => {},
+                }
+
+                match operation {
+                    /* Numeric */
+                    ">" | ">=" | "<" | "<=" | "==" | "!=" => {
+                        /* Common closure code */
+                        macro_rules! closure {
+                            ($type:ty, $value:expr, $operation:tt) => {
+                                return Some(Box::new(move |data| {
+                                    if let Ok(data) = data_closure(data).try_into() {
+                                        <$type>::from_ne_bytes(data) $operation $value
+                                    } else {
+                                        false
+                                    }
+                                }));
+                            }
+                        }
+
+                        /* Common comparison code */
+                        macro_rules! compare {
+                            ($type:ty) => {
+                                /* Ensure value is valid outside of closure */
+                                if let Ok(value) = value.parse::<$type>() {
+                                    /* Use pre-parsed value within closure for speed */
+                                    match operation {
+                                        ">" => { closure!($type, value, >); },
+                                        ">=" => { closure!($type, value, >=); },
+                                        "==" => { closure!($type, value, ==); },
+                                        "!=" => { closure!($type, value, !=); },
+                                        "<" => { closure!($type, value, <); },
+                                        "<=" => { closure!($type, value, <=); },
+
+                                        _ => { return None; },
+                                    }
+                                } else {
+                                    /* Passed in value is not compatible */
+                                    return None;
+                                }
+                            }
+                        }
+
+                        /* Handle closures by type */
+                        match field.type_name.as_str() {
+                            "u8" => { compare!(u8); }
+                            "s8" => { compare!(i8); }
+
+                            "u16" | "unsigned short" => { compare!(u16); }
+                            "s16" | "short" => { compare!(i16); }
+
+                            "u32" | "unsigned int" => { compare!(u32); }
+                            "s32" | "int" => { compare!(i32); }
+
+                            "u64" | "unsigned long" => { compare!(u64); }
+                            "s64" | "long" => { compare!(i64); }
+
+                            _ => { },
+                        }
+                    },
+
+                    /* Strings */
+                    "contains" | "not_contains" |
+                    "starts_with" | "ends_with" |
+                    "equals" | "not_equals" => {
+                        let mut bytes = Vec::new();
+                        let mut utf16 = false;
+
+                        /* Convert to bytes, no conversion during closure */
+                        match field.type_name.as_str() {
+                            "char" | "unsigned char" | "string" => {
+                                /* Push in bytes directly */
+                                for b in value.as_bytes() {
+                                    bytes.push(*b);
+                                }
+                            },
+
+                            "wchar" | "wstring" => {
+                                /* Push in UTF16 characters */
+                                for c in value.chars() {
+                                    let c = c as u16;
+
+                                    bytes.extend_from_slice(&c.to_ne_bytes());
+                                }
+
+                                utf16 = true;
+                            },
+
+                            /* Unsupported, bail */
+                            _ => { return None; },
+                        }
+
+                        /* Remove any excess allocated space */
+                        bytes.shrink_to_fit();
+
+                        macro_rules! utf16_null_term_str {
+                            ($slice:expr) => {
+                                /* Trim to first null */
+                                for (i, b) in $slice.chunks_exact(2).enumerate() {
+                                    if b[0] == 0 && b[1] == 0 {
+                                        $slice = &$slice[..i*2];
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
+                        macro_rules! utf8_null_term_str {
+                            ($slice:expr) => {
+                                /* Trim to first null */
+                                for (i, b) in $slice.into_iter().enumerate() {
+                                    if *b == 0 {
+                                        $slice = &$slice[..i];
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
+                        /* Closure by operation using bytes */
+                        match operation {
+                            "contains" => {
+                                return Some(Box::new(move |data| {
+                                    let compare = bytes.as_slice();
+                                    let len = compare.len();
+
+                                    for window in data_closure(data).windows(len) {
+                                        if window == compare {
+                                            return true;
+                                        }
+                                    }
+
+                                    false
+                                }));
+                            },
+
+                            "not_contains" => {
+                                return Some(Box::new(move |data| {
+                                    let compare = bytes.as_slice();
+                                    let len = compare.len();
+
+                                    for window in data_closure(data).windows(len) {
+                                        if window == compare {
+                                            return false;
+                                        }
+                                    }
+
+                                    true
+                                }));
+                            },
+
+                            "starts_with" => {
+                                return Some(Box::new(move |data| {
+                                    data_closure(data).starts_with(bytes.as_slice())
+                                }));
+                            },
+
+                            "ends_with" => {
+                                if utf16 {
+                                    return Some(Box::new(move |data| {
+                                        let mut slice = data_closure(data);
+                                        utf16_null_term_str!(slice);
+
+                                        slice.ends_with(bytes.as_slice())
+                                    }));
+                                } else {
+                                    return Some(Box::new(move |data| {
+                                        let mut slice = data_closure(data);
+                                        utf8_null_term_str!(slice);
+
+                                        slice.ends_with(bytes.as_slice())
+                                    }));
+                                }
+                            },
+
+                            "equals" => {
+                                if utf16 {
+                                    return Some(Box::new(move |data| {
+                                        let mut slice = data_closure(data);
+                                        utf16_null_term_str!(slice);
+
+                                        bytes.as_slice() == slice
+                                    }));
+                                } else {
+                                    return Some(Box::new(move |data| {
+                                        let mut slice = data_closure(data);
+                                        utf8_null_term_str!(slice);
+
+                                        bytes.as_slice() == slice
+                                    }));
+                                }
+                            },
+
+                            "not_equals" => {
+                                if utf16 {
+                                    return Some(Box::new(move |data| {
+                                        let mut slice = data_closure(data);
+                                        utf16_null_term_str!(slice);
+
+                                        bytes.as_slice() != slice
+                                    }));
+                                } else {
+                                    return Some(Box::new(move |data| {
+                                        let mut slice = data_closure(data);
+                                        utf8_null_term_str!(slice);
+
+                                        bytes.as_slice() != slice
+                                    }));
+                                }
+                            },
+
+                            /* Unsupported */
+                            _ => { },
+                        }
+                    },
+
+                    /* Others */
+                    _ => { },
+                }
+            }
+        }
+
+        None
+    }
+
     /// Returns a closure capable of writing all the field data
     /// dynamically to a string.
     pub fn get_write_closure(&self) -> Box<dyn FnMut(&mut String, &[u8])> {
@@ -1149,6 +1419,26 @@ impl Event {
         }
     }
 
+    /// Tries to return a closure capable of filtering the field data
+    /// by the operation and value passed in.
+    ///
+    /// # Arguments
+    ///
+    /// * `field_name` - The name of the field to get.
+    /// * `operation` - The operation of the filter.
+    /// Currently supported operations are =, >, >=, <, <=, ==, contains, starts_with, ends_with.
+    /// * `value` - The value to use for the operation.
+    pub fn try_get_field_filter_closure(
+        &self,
+        field_name: &str,
+        operation: &str,
+        value: &str) -> Option<Box<dyn FnMut(&[u8]) -> bool>> {
+        self.format.try_get_field_filter_closure(
+            field_name,
+            operation,
+            value)
+    }
+
     /// Returns a closure capable of writing all the field data
     /// dynamically to a string.
     pub fn get_write_closure(&self) -> Box<dyn FnMut(&mut String, &[u8])> {
@@ -1426,7 +1716,509 @@ mod tests {
 
         /* Ensure simple read works */
         assert_eq!(123, reader.value());
-    } 
+    }
+
+    #[test]
+    fn field_filter_closure_value_types() {
+        let mut e = Event::new(1, "test".into());
+        let format = e.format_mut();
+
+        format.add_field(
+            EventField::new(
+                "u16".into(), "u16".into(),
+                LocationType::Static, 0, 2));
+
+        format.add_field(
+            EventField::new(
+                "wchar".into(), "wchar".into(),
+                LocationType::Static, 0, 4));
+
+        /* Strings */
+        assert!(format.try_get_field_filter_closure(
+            "wchar",
+            ">",
+            "A").is_none());
+
+        assert!(format.try_get_field_filter_closure(
+            "wchar",
+            "<",
+            "A").is_none());
+
+        assert!(format.try_get_field_filter_closure(
+            "wchar",
+            "<=",
+            "A").is_none());
+
+        assert!(format.try_get_field_filter_closure(
+            "wchar",
+            ">=",
+            "A").is_none());
+
+        /* Numerics */
+        assert!(format.try_get_field_filter_closure(
+            "u16",
+            ">",
+            "A").is_none());
+
+        assert!(format.try_get_field_filter_closure(
+            "u16",
+            "<",
+            "A").is_none());
+
+        assert!(format.try_get_field_filter_closure(
+            "u16",
+            ">=",
+            "A").is_none());
+
+        assert!(format.try_get_field_filter_closure(
+            "u16",
+            "<=",
+            "A").is_none());
+
+        assert!(format.try_get_field_filter_closure(
+            "u16",
+            "==",
+            "A").is_none());
+    }
+
+    #[test]
+    fn field_filter_closure_numeric() {
+        let mut e = Event::new(1, "test".into());
+        let format = e.format_mut();
+        let mut data = Vec::new();
+
+        format.add_field(
+            EventField::new(
+                "u8".into(), "u8".into(),
+                LocationType::Static, data.len(), 1));
+        data.push(1u8);
+
+        format.add_field(
+            EventField::new(
+                "s8".into(), "s8".into(),
+                LocationType::Static, data.len(), 1));
+        data.push(-2i8 as u8);
+
+        format.add_field(
+            EventField::new(
+                "u16".into(), "u16".into(),
+                LocationType::Static, data.len(), 2));
+        data.extend_from_slice(&3u16.to_ne_bytes());
+
+        format.add_field(
+            EventField::new(
+                "unsigned short".into(), "unsigned short".into(),
+                LocationType::Static, data.len(), 2));
+        data.extend_from_slice(&3u16.to_ne_bytes());
+
+        format.add_field(
+            EventField::new(
+                "s16".into(), "s16".into(),
+                LocationType::Static, data.len(), 2));
+        data.extend_from_slice(&(-4i16).to_ne_bytes());
+
+        format.add_field(
+            EventField::new(
+                "short".into(), "short".into(),
+                LocationType::Static, data.len(), 2));
+        data.extend_from_slice(&(-4i16).to_ne_bytes());
+
+        format.add_field(
+            EventField::new(
+                "u32".into(), "u32".into(),
+                LocationType::Static, data.len(), 4));
+        data.extend_from_slice(&5u32.to_ne_bytes());
+
+        format.add_field(
+            EventField::new(
+                "unsigned int".into(), "unsigned int".into(),
+                LocationType::Static, data.len(), 4));
+        data.extend_from_slice(&5u32.to_ne_bytes());
+
+        format.add_field(
+            EventField::new(
+                "s32".into(), "s32".into(),
+                LocationType::Static, data.len(), 4));
+        data.extend_from_slice(&(-6i32).to_ne_bytes());
+
+        format.add_field(
+            EventField::new(
+                "int".into(), "int".into(),
+                LocationType::Static, data.len(), 4));
+        data.extend_from_slice(&(-6i32).to_ne_bytes());
+
+        format.add_field(
+            EventField::new(
+                "u64".into(), "u64".into(),
+                LocationType::Static, data.len(), 8));
+        data.extend_from_slice(&7u64.to_ne_bytes());
+
+        format.add_field(
+            EventField::new(
+                "unsigned long".into(), "unsigned long".into(),
+                LocationType::Static, data.len(), 8));
+        data.extend_from_slice(&7u64.to_ne_bytes());
+
+        format.add_field(
+            EventField::new(
+                "s64".into(), "s64".into(),
+                LocationType::Static, data.len(), 8));
+        data.extend_from_slice(&(-8i64).to_ne_bytes());
+
+        format.add_field(
+            EventField::new(
+                "long".into(), "long".into(),
+                LocationType::Static, data.len(), 8));
+        data.extend_from_slice(&(-8i64).to_ne_bytes());
+
+        macro_rules! test {
+            ($type:expr, $value:expr) => {
+                let value = &$value.to_string();
+                let minus_one = &($value - 1).to_string();
+                let plus_one = &($value + 1).to_string();
+
+                /* Correct cases */
+                let mut closure = format.try_get_field_filter_closure(
+                    $type,
+                    "==",
+                    value).unwrap();
+
+                assert!(closure(&data));
+
+                let mut closure = format.try_get_field_filter_closure(
+                    $type,
+                    ">=",
+                    value).unwrap();
+
+                assert!(closure(&data));
+
+                let mut closure = format.try_get_field_filter_closure(
+                    $type,
+                    "<=",
+                    value).unwrap();
+
+                assert!(closure(&data));
+
+                let mut closure = format.try_get_field_filter_closure(
+                    $type,
+                    "<",
+                    plus_one).unwrap();
+
+                assert!(closure(&data));
+
+                let mut closure = format.try_get_field_filter_closure(
+                    $type,
+                    ">",
+                    minus_one).unwrap();
+
+                assert!(closure(&data));
+
+                let mut closure = format.try_get_field_filter_closure(
+                    $type,
+                    "!=",
+                    minus_one).unwrap();
+
+                assert!(closure(&data));
+
+                /* Incorrect cases */
+                let mut closure = format.try_get_field_filter_closure(
+                    $type,
+                    "==",
+                    plus_one).unwrap();
+
+                assert!(!closure(&data));
+
+                let mut closure = format.try_get_field_filter_closure(
+                    $type,
+                    ">=",
+                    plus_one).unwrap();
+
+                assert!(!closure(&data));
+
+                let mut closure = format.try_get_field_filter_closure(
+                    $type,
+                    "<=",
+                    minus_one).unwrap();
+
+                assert!(!closure(&data));
+
+                let mut closure = format.try_get_field_filter_closure(
+                    $type,
+                    "<",
+                    value).unwrap();
+
+                assert!(!closure(&data));
+
+                let mut closure = format.try_get_field_filter_closure(
+                    $type,
+                    ">",
+                    value).unwrap();
+
+                assert!(!closure(&data));
+
+                let mut closure = format.try_get_field_filter_closure(
+                    $type,
+                    "!=",
+                    value).unwrap();
+
+                assert!(!closure(&data));
+            }
+        }
+
+        /* 1-byte */
+        test!("u8", 1u8);
+        test!("s8", -2i8);
+
+        /* 2-bytes */
+        test!("u16", 3u16);
+        test!("unsigned short", 3u16);
+        test!("s16", -4i16);
+        test!("short", -4i16);
+
+        /* 4-bytes */
+        test!("u32", 5u32);
+        test!("unsigned int", 5u32);
+        test!("s32", -6i32);
+        test!("int", -6i32);
+
+        /* 8-bytes */
+        test!("u64", 7u64);
+        test!("unsigned long", 7u64);
+        test!("s64", -8i64);
+        test!("long", -8i64);
+    }
+
+    #[test]
+    fn field_filter_closure_utf16_string() {
+        let mut e = Event::new(1, "test".into());
+        let format = e.format_mut();
+        let mut data = Vec::new();
+
+        format.add_field(
+            EventField::new(
+                "alphabet".into(), "wchar".into(),
+                LocationType::Static, 0, 54));
+
+        data.extend_from_slice(b"A\0B\0C\0D\0E\0F\0G\0H\0I\0J\0K\0L\0M\0N\0O\0P\0Q\0R\0S\0T\0U\0V\0W\0X\0Y\0Z\0\0\0");
+
+        /* Contains */
+        let mut closure = format.try_get_field_filter_closure(
+            "alphabet",
+            "contains",
+            "MNOP").unwrap();
+
+        assert!(closure(&data));
+
+        let mut closure = format.try_get_field_filter_closure(
+            "alphabet",
+            "contains",
+            "TEST").unwrap();
+
+        assert!(!closure(&data));
+
+        let mut closure = format.try_get_field_filter_closure(
+            "alphabet",
+            "contains",
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ").unwrap();
+
+        assert!(closure(&data));
+
+        let mut closure = format.try_get_field_filter_closure(
+            "alphabet",
+            "not_contains",
+            "a").unwrap();
+
+        assert!(closure(&data));
+
+        /* == */
+        let mut closure = format.try_get_field_filter_closure(
+            "alphabet",
+            "==",
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ").unwrap();
+
+        assert!(closure(&data));
+
+        let mut closure = format.try_get_field_filter_closure(
+            "alphabet",
+            "!=",
+            "ABCDEFGHIJKLMNOPQRSTUVWXY").unwrap();
+
+        assert!(closure(&data));
+
+        let mut closure = format.try_get_field_filter_closure(
+            "alphabet",
+            "==",
+            "ABCDEFGHIJKLMNOPQRSTUVWXY").unwrap();
+
+        assert!(!closure(&data));
+
+        /* starts_with */
+        let mut closure = format.try_get_field_filter_closure(
+            "alphabet",
+            "starts_with",
+            "ABC").unwrap();
+
+        assert!(closure(&data));
+
+        let mut closure = format.try_get_field_filter_closure(
+            "alphabet",
+            "starts_with",
+            "BCD").unwrap();
+
+        assert!(!closure(&data));
+
+        /* ends_with */
+        let mut closure = format.try_get_field_filter_closure(
+            "alphabet",
+            "ends_with",
+            "XYZ").unwrap();
+
+        assert!(closure(&data));
+
+        let mut closure = format.try_get_field_filter_closure(
+            "alphabet",
+            "ends_with",
+            "WXY").unwrap();
+
+        assert!(!closure(&data));
+
+        /* Invalid operations */
+        assert!(format.try_get_field_filter_closure(
+            "alphabet",
+            ">",
+            "0").is_none());
+
+        assert!(format.try_get_field_filter_closure(
+            "alphabet",
+            ">=",
+            "0").is_none());
+
+        assert!(format.try_get_field_filter_closure(
+            "alphabet",
+            "<",
+            "0").is_none());
+
+        assert!(format.try_get_field_filter_closure(
+            "alphabet",
+            "<=",
+            "0").is_none());
+    }
+
+    #[test]
+    fn field_filter_closure_utf8_string() {
+        let mut e = Event::new(1, "test".into());
+        let format = e.format_mut();
+        let mut data = Vec::new();
+
+        format.add_field(
+            EventField::new(
+                "alphabet".into(), "char".into(),
+                LocationType::Static, 0, 27));
+
+        data.extend_from_slice(b"ABCDEFGHIJKLMNOPQRSTUVWXYZ\0");
+
+        /* Contains */
+        let mut closure = format.try_get_field_filter_closure(
+            "alphabet",
+            "contains",
+            "MNOP").unwrap();
+
+        assert!(closure(&data));
+
+        let mut closure = format.try_get_field_filter_closure(
+            "alphabet",
+            "contains",
+            "TEST").unwrap();
+
+        assert!(!closure(&data));
+
+        let mut closure = format.try_get_field_filter_closure(
+            "alphabet",
+            "contains",
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ").unwrap();
+
+        assert!(closure(&data));
+
+        let mut closure = format.try_get_field_filter_closure(
+            "alphabet",
+            "not_contains",
+            "a").unwrap();
+
+        assert!(closure(&data));
+
+        /* == */
+        let mut closure = format.try_get_field_filter_closure(
+            "alphabet",
+            "==",
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ").unwrap();
+
+        assert!(closure(&data));
+
+        let mut closure = format.try_get_field_filter_closure(
+            "alphabet",
+            "==",
+            "ABCDEFGHIJKLMNOPQRSTUVWXY").unwrap();
+
+        assert!(!closure(&data));
+
+        let mut closure = format.try_get_field_filter_closure(
+            "alphabet",
+            "!=",
+            "ABCDEFGHIJKLMNOPQRSTUVWXY").unwrap();
+
+        assert!(closure(&data));
+
+        /* starts_with */
+        let mut closure = format.try_get_field_filter_closure(
+            "alphabet",
+            "starts_with",
+            "ABC").unwrap();
+
+        assert!(closure(&data));
+
+        let mut closure = format.try_get_field_filter_closure(
+            "alphabet",
+            "starts_with",
+            "BCD").unwrap();
+
+        assert!(!closure(&data));
+
+        /* ends_with */
+        let mut closure = format.try_get_field_filter_closure(
+            "alphabet",
+            "ends_with",
+            "XYZ").unwrap();
+
+        assert!(closure(&data));
+
+        let mut closure = format.try_get_field_filter_closure(
+            "alphabet",
+            "ends_with",
+            "WXY").unwrap();
+
+        assert!(!closure(&data));
+
+        /* Invalid operations */
+        assert!(format.try_get_field_filter_closure(
+            "alphabet",
+            ">",
+            "0").is_none());
+
+        assert!(format.try_get_field_filter_closure(
+            "alphabet",
+            ">=",
+            "0").is_none());
+
+        assert!(format.try_get_field_filter_closure(
+            "alphabet",
+            "<",
+            "0").is_none());
+
+        assert!(format.try_get_field_filter_closure(
+            "alphabet",
+            "<=",
+            "0").is_none());
+    }
 
     #[test]
     fn field_write_closure() {
