@@ -2,6 +2,7 @@
 // Licensed under the MIT license.
 
 use std::cell::Cell;
+use std::fmt::Write;
 use std::rc::Rc;
 
 pub mod os;
@@ -386,6 +387,21 @@ impl EventFormat {
         &self.fields
     }
 
+    /// Returns a reference to an `EventField` if it exists.
+    ///
+    /// # Returns
+    ///
+    /// An `EventField` if a field with the given name exists, None otherwise.
+    pub fn get_field(
+        &self,
+        name: &str) -> Option<&EventField> {
+        if let Some(field_ref) = self.get_field_ref(name) {
+            Some(self.get_field_unchecked(field_ref))
+        } else {
+            None
+        }
+    }
+
     /// Returns a reference to an `EventField` based on the reference.
     ///
     /// # Returns
@@ -497,6 +513,327 @@ impl EventFormat {
                 todo!("Need to support absolute location");
             },
         }
+    }
+
+    fn get_field_data_closure<'a>(
+        offset: usize,
+        size: usize,
+        loc_type: LocationType,
+        skips: &Vec<FieldSkip>,
+        data: &'a [u8]) -> &'a [u8] {
+        let mut skip_offset = 0;
+
+        for skip in skips {
+            match skip.loc_type {
+                LocationType::StaticString => {
+                    for b in &data[skip_offset+skip.offset..] {
+                        skip_offset += 1;
+
+                        if *b == 0 {
+                            break;
+                        }
+                    }
+                },
+
+                LocationType::StaticUTF16String => {
+                    let slice = &data[skip_offset+skip.offset..];
+                    let chunks = slice.chunks_exact(2);
+
+                    for chunk in chunks {
+                        skip_offset += 2;
+
+                        if chunk[0] == 0 && chunk[1] == 0 {
+                            break;
+                        }
+                    }
+                },
+
+                _ => {
+                    /* Unexpected */
+                    return EMPTY;
+                },
+            }
+        }
+
+        Self::get_data_with_offset_direct(
+            size,
+            loc_type,
+            offset + skip_offset,
+            data)
+    }
+
+    /// Returns a closure capable of writing all the field data
+    /// dynamically to a string.
+    pub fn get_write_closure(&self) -> Box<dyn FnMut(&mut String, &[u8])> {
+        struct Context {
+            name: String,
+            closure: Box<dyn FnMut(&mut String, &[u8])>,
+        }
+
+        let mut all = Vec::new();
+
+        for field in self.fields() {
+            if let Some(closure) = self.try_get_field_write_closure(&field.name) {
+                all.push(Context {
+                    name: field.name.clone(),
+                    closure,
+                });
+            }
+        }
+
+        Box::new(move |write, data| {
+            for context in &mut all {
+                let _ = write!(write, "{}=", context.name);
+                (context.closure)(write, data);
+            }
+        })
+    }
+
+    /// Tries to return a closure capable of writing the field data
+    /// dynamically to a string.
+    ///
+    /// # Arguments
+    ///
+    /// * `field_name` - The name of the field to get.
+    pub fn try_get_field_write_closure(
+        &self,
+        field_name: &str) -> Option<Box<dyn FnMut(&mut String, &[u8])>> {
+        if let Some(mut data_closure) = self.try_get_field_data_closure(field_name) {
+            if let Some(field) = self.get_field(field_name) {
+                match field.type_name.as_str() {
+                    "u16" | "unsigned short" => {
+                        return Some(Box::new(move |write, data| {
+                            let field_data = data_closure(data);
+                            let chunks = field_data.chunks_exact(2);
+
+                            for chunk in chunks {
+                                let _ = write!(
+                                    write,
+                                    "{} ",
+                                    u16::from_ne_bytes(
+                                        chunk.try_into().expect("Always 2")));
+                            }
+                        }));
+                    },
+                    "s16" | "short" => {
+                        return Some(Box::new(move |write, data| {
+                            let field_data = data_closure(data);
+                            let chunks = field_data.chunks_exact(2);
+
+                            for chunk in chunks {
+                                let _ = write!(
+                                    write,
+                                    "{} ",
+                                    i16::from_ne_bytes(
+                                        chunk.try_into().expect("Always 2")));
+                            }
+                        }));
+                    },
+                    "u32" | "unsigned int" => {
+                        return Some(Box::new(move |write, data| {
+                            let field_data = data_closure(data);
+                            let chunks = field_data.chunks_exact(4);
+
+                            for chunk in chunks {
+                                let _ = write!(
+                                    write,
+                                    "{} ",
+                                    u32::from_ne_bytes(
+                                        chunk.try_into().expect("Always 4")));
+                            }
+                        }));
+                    },
+                    "s32" | "int" => {
+                        return Some(Box::new(move |write, data| {
+                            let field_data = data_closure(data);
+                            let chunks = field_data.chunks_exact(4);
+
+                            for chunk in chunks {
+                                let _ = write!(
+                                    write,
+                                    "{} ",
+                                    i32::from_ne_bytes(
+                                        chunk.try_into().expect("Always 4")));
+                            }
+                        }));
+                    },
+                    "u64" | "unsigned long" => {
+                        return Some(Box::new(move |write, data| {
+                            let field_data = data_closure(data);
+                            let chunks = field_data.chunks_exact(8);
+
+                            for chunk in chunks {
+                                let _ = write!(
+                                    write,
+                                    "{} ",
+                                    u64::from_ne_bytes(
+                                        chunk.try_into().expect("Always 8")));
+                            }
+                        }));
+                    },
+                    "s64" | "long" => {
+                        return Some(Box::new(move |write, data| {
+                            let field_data = data_closure(data);
+                            let chunks = field_data.chunks_exact(8);
+
+                            for chunk in chunks {
+                                let _ = write!(
+                                    write,
+                                    "{} ",
+                                    i64::from_ne_bytes(
+                                        chunk.try_into().expect("Always 8")));
+                            }
+                        }));
+                    },
+                    "float" => {
+                        return Some(Box::new(move |write, data| {
+                            let field_data = data_closure(data);
+                            let chunks = field_data.chunks_exact(4);
+
+                            for chunk in chunks {
+                                let _ = write!(
+                                    write,
+                                    "{} ",
+                                    f32::from_ne_bytes(
+                                        chunk.try_into().expect("Always 4")));
+                            }
+                        }));
+                    },
+                    "double" => {
+                        return Some(Box::new(move |write, data| {
+                            let field_data = data_closure(data);
+                            let chunks = field_data.chunks_exact(8);
+
+                            for chunk in chunks {
+                                let _ = write!(
+                                    write,
+                                    "{} ",
+                                    f64::from_ne_bytes(
+                                        chunk.try_into().expect("Always 8")));
+                            }
+                        }));
+                    },
+                    "char" | "unsigned char" | "string" | "wstring" => {
+                        if field.location == LocationType::StaticUTF16String ||
+                            &field.type_name == "wstring" {
+                            return Some(Box::new(move |write, data| {
+                                let field_data = data_closure(data);
+                                let chunks = field_data.chunks_exact(2);
+
+                                for chunk in chunks {
+                                    let chunk = u16::from_ne_bytes(
+                                        chunk.try_into().expect("Always 2"));
+
+                                    if chunk == 0 { break; }
+
+                                    let _ = write!(
+                                        write,
+                                        "{}",
+                                        char::from_u32(chunk as u32).unwrap_or('?'));
+                                }
+
+                                let _ = write!(write, " ");
+                            }));
+                        } else {
+                            return Some(Box::new(move |write, data| {
+                                let field_data = data_closure(data);
+
+                                for b in field_data {
+                                    if *b == 0 { break; }
+
+                                    let _ = write!(
+                                        write,
+                                        "{}",
+                                        *b as char);
+                                }
+
+                                let _ = write!(write, " ");
+                            }));
+                        }
+                    },
+                    _ => {
+                        /* Default Hex Bytes */
+                        return Some(Box::new(move |write, data| {
+                            let field_data = data_closure(data);
+
+                            for b in field_data {
+                                let _ = write!(write, "0x{:02X} ", *b);
+                            }
+                        }));
+                    },
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Tries to return a closure capable of getting the field data
+    /// dynamically.
+    ///
+    /// # Arguments
+    ///
+    /// * `field_name` - The name of the field to get.
+    pub fn try_get_field_data_closure(
+        &self,
+        field_name: &str) -> Option<Box<dyn FnMut(&[u8]) -> &[u8]>> {
+        let mut offset = 0;
+
+        let mut skips = Vec::new();
+
+        for field in &self.fields {
+            if field.name == field_name {
+                let size = field.size;
+                let location = field.location;
+
+                if skips.is_empty() {
+                    /* Use direct field offset to allow for gaps */
+                    offset = field.offset;
+
+                    /* Direct access closure */
+                    return Some(Box::new(move |data| -> &[u8] {
+                        Self::get_data_with_offset_direct(
+                            size,
+                            location,
+                            offset,
+                            data)
+                    }));
+                } else {
+                    /* Complicated access closure */
+                    return Some(Box::new(move |data| -> &[u8] {
+                        Self::get_field_data_closure(
+                            offset,
+                            size,
+                            location,
+                            &skips,
+                            data)
+                    }));
+                }
+            }
+
+            /* Check for dynamic data */
+            if field.size == 0 {
+                match field.location {
+                    LocationType::StaticString |
+                    LocationType::StaticUTF16String => {
+                        /* Known skippable types */
+                        skips.push(FieldSkip {
+                            loc_type: field.location,
+                            offset
+                        });
+                    },
+
+                    _ => {
+                        /* Cannot read field data via closure */
+                        return None;
+                    },
+                }
+            }
+
+            offset += field.size;
+        }
+
+        None
     }
 
     /// Retrieves the data associated with a given `EventFieldRef` within the provided data slice
@@ -812,51 +1149,22 @@ impl Event {
         }
     }
 
-    fn get_field_data_closure<'a>(
-        offset: usize,
-        size: usize,
-        loc_type: LocationType,
-        skips: &Vec<FieldSkip>,
-        data: &'a [u8]) -> &'a [u8] {
-        let mut skip_offset = 0;
+    /// Returns a closure capable of writing all the field data
+    /// dynamically to a string.
+    pub fn get_write_closure(&self) -> Box<dyn FnMut(&mut String, &[u8])> {
+        self.format.get_write_closure()
+    }
 
-        for skip in skips {
-            match skip.loc_type {
-                LocationType::StaticString => {
-                    for b in &data[skip_offset+skip.offset..] {
-                        skip_offset += 1;
-
-                        if *b == 0 {
-                            break;
-                        }
-                    }
-                },
-
-                LocationType::StaticUTF16String => {
-                    let slice = &data[skip_offset+skip.offset..];
-                    let chunks = slice.chunks_exact(2);
-
-                    for chunk in chunks {
-                        skip_offset += 2;
-
-                        if chunk[0] == 0 && chunk[1] == 0 {
-                            break;
-                        }
-                    }
-                },
-
-                _ => {
-                    /* Unexpected */
-                    return EMPTY;
-                },
-            }
-        }
-
-        EventFormat::get_data_with_offset_direct(
-            size,
-            loc_type,
-            offset + skip_offset,
-            data)
+    /// Tries to return a closure capable of writing the field data
+    /// dynamically to a string.
+    ///
+    /// # Arguments
+    ///
+    /// * `field_name` - The name of the field to get.
+    pub fn try_get_field_write_closure(
+        &self,
+        field_name: &str) -> Option<Box<dyn FnMut(&mut String, &[u8])>> {
+        self.format.try_get_field_write_closure(field_name)
     }
 
     /// Tries to return a closure capable of getting the field data
@@ -868,63 +1176,7 @@ impl Event {
     pub fn try_get_field_data_closure(
         &self,
         field_name: &str) -> Option<Box<dyn FnMut(&[u8]) -> &[u8]>> {
-        let mut offset = 0;
-
-        let mut skips = Vec::new();
-
-        for field in &self.format().fields {
-            if field.name == field_name {
-                let size = field.size;
-                let location = field.location;
-
-                if skips.is_empty() {
-                    /* Use direct field offset to allow for gaps */
-                    offset = field.offset;
-
-                    /* Direct access closure */
-                    return Some(Box::new(move |data| -> &[u8] {
-                        EventFormat::get_data_with_offset_direct(
-                            size,
-                            location,
-                            offset,
-                            data)
-                    }));
-                } else {
-                    /* Complicated access closure */
-                    return Some(Box::new(move |data| -> &[u8] {
-                        Self::get_field_data_closure(
-                            offset,
-                            size,
-                            location,
-                            &skips,
-                            data)
-                    }));
-                }
-            }
-
-            /* Check for dynamic data */
-            if field.size == 0 {
-                match field.location {
-                    LocationType::StaticString |
-                    LocationType::StaticUTF16String => {
-                        /* Known skippable types */
-                        skips.push(FieldSkip {
-                            loc_type: field.location,
-                            offset
-                        });
-                    },
-
-                    _ => {
-                        /* Cannot read field data via closure */
-                        return None;
-                    },
-                }
-            }
-
-            offset += field.size;
-        }
-
-        None
+        self.format.try_get_field_data_closure(field_name)
     }
 
     /// Returns the ID of the event.
@@ -1175,6 +1427,98 @@ mod tests {
         /* Ensure simple read works */
         assert_eq!(123, reader.value());
     } 
+
+    #[test]
+    fn field_write_closure() {
+        /* Static */
+        let mut e = Event::new(1, "test".into());
+        let format = e.format_mut();
+        let mut offset = 0;
+        let mut data = Vec::new();
+
+        format.add_field(
+            EventField::new(
+                "unsigned char".into(), "unsigned char".into(),
+                LocationType::Static, offset, 1));
+        offset += 1;
+        data.push('a' as u8);
+
+        format.add_field(
+            EventField::new(
+                "char".into(), "char".into(),
+                LocationType::Static, offset, 1));
+        offset += 1;
+        data.push('b' as u8);
+
+        format.add_field(
+            EventField::new(
+                "u32".into(), "u32".into(),
+                LocationType::Static, offset, 4));
+        offset += 4;
+        data.extend_from_slice(&1u32.to_ne_bytes());
+
+        format.add_field(
+            EventField::new(
+                "s32".into(), "s32".into(),
+                LocationType::Static, offset, 4));
+        offset += 4;
+        data.extend_from_slice(&(-2i32).to_ne_bytes());
+
+        format.add_field(
+            EventField::new(
+                "u64".into(), "u64".into(),
+                LocationType::Static, offset, 8));
+        offset += 8;
+        data.extend_from_slice(&3u64.to_ne_bytes());
+
+        format.add_field(
+            EventField::new(
+                "s64".into(), "s64".into(),
+                LocationType::Static, offset, 8));
+        offset += 8;
+        data.extend_from_slice(&(-4i64).to_ne_bytes());
+
+        format.add_field(
+            EventField::new(
+                "string".into(), "char".into(),
+                LocationType::Static, offset, 8));
+        data.extend_from_slice("TestTest".as_bytes());
+
+        let mut closure = e.try_get_field_write_closure("unsigned char").unwrap();
+        let mut string = String::new();
+        closure(&mut string, &data);
+        assert_eq!("a ", string);
+
+        let mut closure = e.try_get_field_write_closure("char").unwrap();
+        let mut string = String::new();
+        closure(&mut string, &data);
+        assert_eq!("b ", string);
+
+        let mut closure = e.try_get_field_write_closure("u32").unwrap();
+        let mut string = String::new();
+        closure(&mut string, &data);
+        assert_eq!("1 ", string);
+
+        let mut closure = e.try_get_field_write_closure("s32").unwrap();
+        let mut string = String::new();
+        closure(&mut string, &data);
+        assert_eq!("-2 ", string);
+
+        let mut closure = e.try_get_field_write_closure("u64").unwrap();
+        let mut string = String::new();
+        closure(&mut string, &data);
+        assert_eq!("3 ", string);
+
+        let mut closure = e.try_get_field_write_closure("s64").unwrap();
+        let mut string = String::new();
+        closure(&mut string, &data);
+        assert_eq!("-4 ", string);
+
+        let mut closure = e.try_get_field_write_closure("string").unwrap();
+        let mut string = String::new();
+        closure(&mut string, &data);
+        assert_eq!("TestTest ", string);
+    }
 
     #[test]
     fn field_data_closure() {
