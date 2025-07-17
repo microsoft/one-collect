@@ -590,7 +590,7 @@ struct LinuxDotNetEvent {
     level: u8,
 }
 
-const DOTNET_HEADER_FIELDS: &str = "u8 version; u16 event_id; __rel_loc u8[] extension; __rel_loc u8[] payload; __rel_loc u8[] meta";
+const DOTNET_HEADER_FIELDS: &str = "u8 version; u16 event_id; __rel_loc u8[] extension; __rel_loc u8[] payload";
 
 struct DotNetEventDesc {
     name: String,
