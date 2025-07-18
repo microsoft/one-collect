@@ -411,7 +411,7 @@ checksum = "a4895175b425cb1f87721b59f0f286c2092bd4af812243672510e1ac53e2e0ad"
 
 [[package]]
 name = "one_collect"
-version = "0.1.0"
+version = "0.1.0-dev"
 dependencies = [
  "anyhow",
  "chrono",
@@ -562,7 +562,7 @@ dependencies = [
 
 [[package]]
 name = "record-trace"
-version = "0.1.0"
+version = "0.1.0-dev"
 dependencies = [
  "anyhow",
  "clap",
@@ -631,7 +631,7 @@ checksum = "8a0d197bd2c9dc6e53b84da9556a69ba4cdfab8619eb41a8bd1cc2027a0f6b1d"
 
 [[package]]
 name = "ruwind"
-version = "0.1.0"
+version = "0.1.0-dev"
 dependencies = [
  "cpp_demangle",
  "rustc-demangle",
