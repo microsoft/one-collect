@@ -9,8 +9,18 @@ use std::process;
 
 use crate::export::{Exporter, NetTraceExporter, PerfViewExporter};
 
+// Determine version based on CARGO_PKG_VERSION environment variable
+fn get_version() -> &'static str {
+    // If CARGO_PKG_VERSION is the default from Cargo.toml, use dev version
+    // If it's been overridden (in CI/release builds), use the overridden version
+    match env!("CARGO_PKG_VERSION") {
+        "0.1.0" => "0.1.0-dev",  // Default from Cargo.toml, use dev version
+        version => version,       // Custom version set externally
+    }
+}
+
 #[derive(Parser)]
-#[command(version, about, long_about = None)]
+#[command(version = get_version(), about, long_about = None)]
 struct Args {
     #[arg(long, help = "Output directory")]
     out: Option<String>,
