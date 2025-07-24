@@ -6,6 +6,7 @@ use std::io::{Seek, SeekFrom, Write, BufWriter};
 
 use chrono::{DateTime, Datelike, Timelike, Utc};
 
+use crate::Guid;
 use crate::event::{EventField, LocationType};
 use crate::helpers::exporting::*;
 use crate::helpers::exporting::graph::*;
@@ -246,6 +247,7 @@ struct NetTraceWriter {
     mapping_event_id: u32,
     symbol_event_id: u32,
     mapping_meta_event_id: u32,
+    original_meta_event_ids: HashSet<u32>,
     last_time: u64,
     sync_time: u64,
     flush_time: u64,
@@ -269,6 +271,7 @@ impl NetTraceWriter {
             mapping_event_id: 0,
             symbol_event_id: 0,
             mapping_meta_event_id: 0,
+            original_meta_event_ids: HashSet::new(),
             last_time: 0,
             sync_time: 0,
             flush_time: 0,
@@ -325,6 +328,23 @@ impl NetTraceWriter {
         event_id: u32,
         event_name: &str,
         fields: &[NetTraceField]) -> anyhow::Result<()> {
+        let (provider, guid) = match provider.split_once(':') {
+            Some((provider, guid)) => {
+                let guid = guid
+                    .replace("{", "")
+                    .replace("}", "")
+                    .replace("-", "");
+
+                let guid = match u128::from_str_radix(guid.trim(), 16) {
+                    Ok(guid) => { Some(Guid::from_u128(guid)) },
+                    Err(_) => { None },
+                };
+
+                (provider, guid)
+            },
+            None => { (provider, None) },
+        };
+
         /* Write payload */
         self.buffer.clear();
         self.buffer.write_varint(meta_id as u64)?;
@@ -342,7 +362,23 @@ impl NetTraceWriter {
         }
 
         /* OptionalMetadata */
-        self.buffer.write_u16(0)?;
+        if let Some(guid) = guid {
+            self.buffer.write_u16(17)?; /* GUID + kind */
+            self.buffer.write_u8(7)?; /* Provider Guid */
+            self.buffer.write_u32(guid.data1)?;
+            self.buffer.write_u16(guid.data2)?;
+            self.buffer.write_u16(guid.data3)?;
+            self.buffer.write_u8(guid.data4[0])?;
+            self.buffer.write_u8(guid.data4[1])?;
+            self.buffer.write_u8(guid.data4[2])?;
+            self.buffer.write_u8(guid.data4[3])?;
+            self.buffer.write_u8(guid.data4[4])?;
+            self.buffer.write_u8(guid.data4[5])?;
+            self.buffer.write_u8(guid.data4[6])?;
+            self.buffer.write_u8(guid.data4[7])?;
+        } else {
+            self.buffer.write_u16(0)?;
+        }
 
         let payload = self.buffer.as_slice();
 
@@ -561,9 +597,6 @@ impl NetTraceWriter {
             /* Get the record for the sample */
             let data = machine.sample_record_data(sample);
 
-            /* Write the extra data after the value */
-            self.buffer.write_all(data.record_data())?;
-
             /*
              * We use the record_type as the kind with an offset.
              * This is setup when originally writing out the metadata
@@ -573,6 +606,15 @@ impl NetTraceWriter {
              * the record_id_offset handles this for us.
              */
             event_id = self.record_id_offset + data.record_type_id() as u32;
+
+            /* Do not write sample value for original data */
+            if self.original_meta_event_ids.contains(&event_id) {
+                self.buffer.clear();
+            }
+
+            /* Write the extra data after the value */
+            self.buffer.write_all(data.record_data())?;
+
         }
 
         self.write_event_blob_from_buffer(
@@ -877,7 +919,13 @@ impl NetTraceWriter {
 
         for record_type in record_types {
             record_fields.clear();
-            record_fields.push(VALUE_FIELD);
+
+            /* Original data does not change it's format */
+            if record_type.is_original_data() {
+                self.original_meta_event_ids.insert(meta_id);
+            } else {
+                record_fields.push(VALUE_FIELD);
+            }
 
             /* Dynamic fields */
             for field in record_type.format().fields() {
@@ -898,12 +946,27 @@ impl NetTraceWriter {
                 }
             }
 
-            self.write_event_metadata(
-                meta_id,
-                "Universal.Events",
-                meta_id,
-                record_type.name(),
-                &record_fields)?;
+            if record_type.is_original_data() {
+                /* Determine provider/system from event name */
+                let (provider_name, event_name) = match record_type.name().split_once('/') {
+                    Some((provider_name, event_name)) => { (provider_name, event_name) },
+                    None => { ("Universal.Events", record_type.name()) },
+                };
+
+                self.write_event_metadata(
+                    meta_id,
+                    provider_name,
+                    record_type.id() as u32,
+                    event_name,
+                    &record_fields)?;
+            } else {
+                self.write_event_metadata(
+                    meta_id,
+                    "Universal.Events",
+                    meta_id,
+                    record_type.name(),
+                    &record_fields)?;
+            }
 
             meta_id += 1;
         }
