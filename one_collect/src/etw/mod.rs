@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-use std::hash::{BuildHasherDefault, Hash, Hasher};
+use std::hash::BuildHasherDefault;
 use std::collections::{HashMap, HashSet};
 use std::thread::{self};
 
@@ -10,6 +10,7 @@ use twox_hash::XxHash64;
 use crate::sharing::*;
 use crate::event::*;
 use crate::event::os::windows::WindowsEventExtension;
+use crate::Guid;
 
 #[allow(dead_code)]
 mod abi;
@@ -47,36 +48,6 @@ pub const ENABLE_PROVIDER: u32 = abi::EVENT_CONTROL_CODE_ENABLE_PROVIDER;
 pub const CAPTURE_STATE: u32 = abi::EVENT_CONTROL_CODE_CAPTURE_STATE;
 
 const EMPTY_PROVIDER: Guid = Guid::from_u128(0u128);
-
-#[repr(C)]
-#[derive(Default, Eq, PartialEq, Copy, Clone)]
-pub struct Guid {
-    pub data1: u32,
-    pub data2: u16,
-    pub data3: u16,
-    pub data4: [u8; 8],
-}
-
-impl Hash for Guid {
-    fn hash<H: Hasher>(
-        &self,
-        state: &mut H) {
-        state.write_u32(self.data1);
-        state.write_u16(self.data2);
-        state.write_u16(self.data3);
-    }
-}
-
-impl Guid {
-    pub const fn from_u128(uuid: u128) -> Self {
-        Self {
-            data1: (uuid >> 96) as u32,
-            data2: (uuid >> 80 & 0xffff) as u16,
-            data3: (uuid >> 64 & 0xffff) as u16,
-            data4: (uuid as u64).to_be_bytes()
-        }
-    }
-}
 
 #[derive(Default)]
 pub struct AncillaryData {

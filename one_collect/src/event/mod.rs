@@ -1392,6 +1392,7 @@ struct FieldSkip {
 /// `Event` represents a system event in the context of event collection and profiling.
 pub struct Event {
     id: usize,
+    proxy_id: usize,
     name: String,
     flags: u64,
     callbacks: Vec<BoxedCallback>,
@@ -1411,6 +1412,7 @@ impl Event {
         name: String) -> Self {
         Self {
             id,
+            proxy_id: 0,
             name,
             flags: 0,
             callbacks: Vec::new(),
@@ -1491,15 +1493,21 @@ impl Event {
         self.flags & EVENT_FLAG_NO_CALLSTACK != 0
     }
 
-    /// Sets the proxy flag for the event. Use this when events are used for proxy
+    /// Sets the proxy ID and flag for the event. Use this when events are used for proxy
     /// scenarios. The underlying session will not actually enable / add these events.
-    pub fn set_proxy_flag(&mut self) {
+    pub fn set_proxy_id(
+        &mut self,
+        id: usize) {
         self.flags |= EVENT_FLAG_PROXY;
+        self.proxy_id = id;
     }
 
-    /// Checks if the proxy flag is set for the event.
-    pub fn has_proxy_flag(&self) -> bool {
-        self.flags & EVENT_FLAG_PROXY != 0
+    /// Checks if the proxy flag is set for the event. If so, returns the set proxy ID.
+    pub fn get_proxy_id(&self) -> Option<usize> {
+        match self.flags & EVENT_FLAG_PROXY != 0 {
+            true => { Some(self.proxy_id) },
+            false => { None },
+        }
     }
 
     /// Returns a mutable reference to the event format.

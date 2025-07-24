@@ -27,6 +27,8 @@ use crate::Writable;
 use crate::procfs;
 use crate::event::*;
 
+use crate::helpers::dotnet::scripting::*;
+
 #[cfg(target_os = "linux")]
 use libc::PROT_EXEC;
 
@@ -667,12 +669,12 @@ fn register_dotnet_tracepoint(
 }
 
 pub(crate) struct OSDotNetEventFactory {
-    proxy: Box<dyn FnMut(String) -> Option<Event>>,
+    proxy: Box<dyn FnMut(String, usize) -> Option<Event>>,
     providers: Writable<HashMap<String, LinuxDotNetProvider>>,
 }
 
 impl OSDotNetEventFactory {
-    pub fn new(proxy: impl FnMut(String) -> Option<Event> + 'static) -> Self {
+    pub fn new(proxy: impl FnMut(String, usize) -> Option<Event> + 'static) -> Self {
         Self {
             proxy: Box::new(proxy),
             providers: Writable::new(HashMap::new()),
@@ -734,15 +736,13 @@ impl OSDotNetEventFactory {
 
                 /* Check proxy events */
                 settings.for_each_event(|event| {
-                    if !event.has_proxy_flag() {
-                        return;
-                    }
-
-                    if wanted_ids.contains(&event.id()) {
-                        if event.has_no_callstack_flag() {
-                            no_callstacks.insert(event.id());
-                        } else {
-                            callstacks.insert(event.id());
+                    if let Some(proxy_id) = event.get_proxy_id() {
+                        if wanted_ids.contains(&proxy_id) {
+                            if event.has_no_callstack_flag() {
+                                no_callstacks.insert(proxy_id);
+                            } else {
+                                callstacks.insert(proxy_id);
+                            }
                         }
                     }
                 });
@@ -897,14 +897,22 @@ impl OSDotNetEventFactory {
         keyword: u64,
         level: u8,
         id: usize,
-        name: String) -> anyhow::Result<Event> {
-        let event = match (self.proxy)(name) {
+        mut name: String) -> anyhow::Result<Event> {
+        let provider = guid_from_provider(provider_name)?;
+        name = event_full_name(provider_name, provider, &name);
+
+        let event = match (self.proxy)(name, id) {
             Some(event) => { event },
             None => { anyhow::bail!("Event couldn't be created with proxy"); },
         };
 
+        let proxy_id = match event.get_proxy_id() {
+            Some(proxy_id) => { proxy_id },
+            None => { anyhow::bail!("Proxy events must have a proxy ID set."); },
+        };
+
         let dotnet_event = LinuxDotNetEvent {
-            proxy_id: event.id(),
+            proxy_id,
             keyword,
             level,
         };

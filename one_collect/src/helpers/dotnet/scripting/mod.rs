@@ -10,10 +10,106 @@ use crate::helpers::dotnet::os::OSDotNetEventFactory;
 use crate::event::Event;
 use crate::scripting::ScriptEvent;
 use crate::Writable;
+use crate::Guid;
+
+use crypto::sha1::Sha1;
+use crypto::digest::Digest;
 
 use rhai::{CustomType, TypeBuilder, EvalAltResult};
 
 mod runtime;
+
+pub(crate) fn event_full_name(provider_name: &str, guid: Guid, event_name: &str) -> String {
+    use std::fmt::Write;
+
+    let mut full = String::new();
+
+    full.push_str(provider_name);
+    full.push_str(":{");
+
+    let _ = write!(
+        full,
+        "{:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
+        guid.data1, guid.data2, guid.data3,
+        guid.data4[0], guid.data4[1], guid.data4[2], guid.data4[3],
+        guid.data4[4], guid.data4[5], guid.data4[6], guid.data4[7]);
+
+    full.push_str("}/");
+    full.push_str(event_name);
+
+    full
+}
+
+pub(crate) fn guid_from_provider(provider_name: &str) -> anyhow::Result<Guid> {
+    match provider_name {
+        "Microsoft-Windows-DotNETRuntime" => {
+            Ok(Guid::from_u128(0xe13c0d23_ccbc_4e12_931b_d9cc2eee27e4))
+        },
+        "Microsoft-Windows-DotNETRuntimeRundown" => {
+            Ok(Guid::from_u128(0xA669021C_C450_4609_A035_5AF59AF4DF18))
+        },
+        "Microsoft-Windows-DotNETRuntimeStress" => {
+            Ok(Guid::from_u128(0xCC2BCBBA_16B6_4cf3_8990_D74C2E8AF500))
+        },
+        "Microsoft-Windows-DotNETRuntimePrivate" => {
+            Ok(Guid::from_u128(0x763FD754_7086_4dfe_95EB_C01A46FAF4CA))
+        },
+        "Microsoft-DotNETRuntimeMonoProfiler" => {
+            Ok(Guid::from_u128(0x7F442D82_0F1D_5155_4B8C_1529EB2E31C2))
+        },
+        _ => {
+            if provider_name.starts_with("{") {
+                /* Direct Guid */
+                let provider = provider_name
+                    .replace("-", "")
+                    .replace("{", "")
+                    .replace("}", "");
+
+                match u128::from_str_radix(provider.trim(), 16) {
+                    Ok(provider) => { Ok(Guid::from_u128(provider)) },
+                    Err(_) => { anyhow::bail!("Invalid provider format."); }
+                }
+            } else {
+                /* Event Source */
+                let namespace_bytes: [u8; 16] = [
+                    0x48, 0x2C, 0x2D, 0xB2,
+                    0xC3, 0x90, 0x47, 0xC8,
+                    0x87, 0xF8, 0x1A, 0x15,
+                    0xBF, 0xC1, 0x30, 0xFB];
+
+                let mut hasher = Sha1::new();
+
+                hasher.input(&namespace_bytes);
+
+                for c in provider_name.to_uppercase().chars() {
+                    let c = c as u16;
+                    hasher.input(&c.to_be_bytes());
+                }
+
+                let mut result: [u8; 20] = [0; 20];
+
+                hasher.result(&mut result);
+
+                let a = u32::from_ne_bytes(result[0..4].try_into()?);
+                let b = u16::from_ne_bytes(result[4..6].try_into()?);
+                let mut c = u16::from_ne_bytes(result[6..8].try_into()?);
+
+                /* High 4 bits of octet 7 to 5, as per RFC 4122 */
+                c = (c & 0x0FFF) | 0x5000;
+
+                Ok(Guid {
+                    data1: a,
+                    data2: b,
+                    data3: c,
+                    data4: [
+                        result[8], result[9], result[10], result[11],
+                        result[12], result[13], result[14], result[15]
+                    ]
+                })
+            }
+        }
+    }
+}
 
 pub (crate) struct DotNetSample {
     event: Event,
@@ -138,7 +234,7 @@ impl DotNetScripting for ScriptedUniversalExporter {
         /* Singleton factory for scripts */
         let factory = Writable::new(
             OSDotNetEventFactory::new(
-                move |name| { fn_exporter.borrow_mut().new_proxy_event(name) }));
+                move |name, id| { fn_exporter.borrow_mut().new_proxy_event(name, id) }));
 
         self.rhai_engine().register_fn(
             "new_dotnet_scenario",
@@ -226,5 +322,14 @@ mod tests {
             event.append_field(\"Test\", \"u32\", 4); \
             record_event(event);\
             ").unwrap();
+    }
+
+    #[test]
+    fn event_full_names() {
+        let provider_name = "Microsoft-Windows-DotNETRuntime";
+        let guid = guid_from_provider(provider_name).unwrap();
+        let full = event_full_name(provider_name, guid, "GCAllocTick");
+
+        assert_eq!("Microsoft-Windows-DotNETRuntime:{E13C0D23-CCBC-4E12-931B-D9CC2EEE27E4}/GCAllocTick", &full);
     }
 }

@@ -1,5 +1,36 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
+use std::hash::{Hash, Hasher};
+
+#[repr(C)]
+#[derive(Default, Eq, PartialEq, Copy, Clone)]
+pub struct Guid {
+    pub data1: u32,
+    pub data2: u16,
+    pub data3: u16,
+    pub data4: [u8; 8],
+}
+
+impl Hash for Guid {
+    fn hash<H: Hasher>(
+        &self,
+        state: &mut H) {
+        state.write_u32(self.data1);
+        state.write_u16(self.data2);
+        state.write_u16(self.data3);
+    }
+}
+
+impl Guid {
+    pub const fn from_u128(uuid: u128) -> Self {
+        Self {
+            data1: (uuid >> 96) as u32,
+            data2: (uuid >> 80 & 0xffff) as u16,
+            data3: (uuid >> 64 & 0xffff) as u16,
+            data4: (uuid as u64).to_be_bytes()
+        }
+    }
+}
 
 pub mod event;
 pub mod sharing;

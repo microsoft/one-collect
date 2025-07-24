@@ -20,10 +20,11 @@ impl UniversalExporterSwapper {
 
     pub fn new_proxy_event(
         &mut self,
-        name: String) -> Option<Event> {
+        name: String,
+        id: usize) -> Option<Event> {
         if let Some(exporter) = self.exporter.as_mut() {
             if let Some(settings) = exporter.settings_mut() {
-                return Some(settings.new_proxy_event(name));
+                return Some(settings.new_proxy_event(name, id));
             }
         }
 

@@ -768,7 +768,7 @@ impl OSExportMachine {
                             data))
                 });
 
-                if event.has_proxy_flag() {
+                if event.get_proxy_id().is_some() {
                     shared_proxy.borrow_mut().add_event(event);
                 } else {
                     /* Add event to session */

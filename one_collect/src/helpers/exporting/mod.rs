@@ -118,7 +118,9 @@ impl ExportProxy {
     fn add_event(
         &mut self,
         event: Event) {
-        self.events.insert(event.id(), event);
+        if let Some(proxy_id) = event.get_proxy_id() {
+            self.events.insert(proxy_id, event);
+        }
     }
 }
 
@@ -707,11 +709,12 @@ impl ExportSettings {
 
     pub fn new_proxy_event(
         &mut self,
-        name: String) -> Event {
+        name: String,
+        id: usize) -> Event {
         self.proxy_id += 1;
 
-        let mut event = Event::new(self.proxy_id, name);
-        event.set_proxy_flag();
+        let mut event = Event::new(id, name);
+        event.set_proxy_id(self.proxy_id);
 
         event
     }
@@ -1696,9 +1699,9 @@ mod tests {
         let mut settings = ExportSettings::default();
         let count = Writable::new(0usize);
 
-        let mut first = settings.new_proxy_event("1".into());
-        let mut second = settings.new_proxy_event("2".into());
-        let mut third = settings.new_proxy_event("3".into());
+        let mut first = settings.new_proxy_event("1".into(), 1);
+        let mut second = settings.new_proxy_event("2".into(), 2);
+        let mut third = settings.new_proxy_event("3".into(), 3);
 
         let e_count = count.clone();
         first.add_callback(move |data| {
