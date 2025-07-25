@@ -14,7 +14,7 @@ scripting = []
 anyhow = "1.0.75"
 twox-hash = "1.6.3"
 # 3.5.0 cannot build
-protobuf = "3.4.*"
+protobuf = "3.7.*"
 flate2 = "1.0.31"
 ruwind = { path = "../ruwind" }
 chrono = "0.4.39"
