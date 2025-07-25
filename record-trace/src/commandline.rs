@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-use clap::{Parser, ValueEnum};
+use clap::{crate_version, Parser, ValueEnum};
 use std::env;
 use std::fmt;
 use std::path::PathBuf;
@@ -10,7 +10,7 @@ use std::process;
 use crate::export::{Exporter, NetTraceExporter, PerfViewExporter};
 
 #[derive(Parser)]
-#[command(version, about, long_about = None)]
+#[command(version = crate_version!(), about, long_about = None)]
 struct Args {
     #[arg(long, help = "Output directory")]
     out: Option<String>,
