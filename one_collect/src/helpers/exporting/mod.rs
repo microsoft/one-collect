@@ -210,60 +210,6 @@ impl ExportSampler {
             record_data)
     }
 
-    fn add_sample(
-        &mut self,
-        data: &EventData,
-        value: MetricValue,
-        kind: u16) -> anyhow::Result<()> {
-        self.frames.clear();
-
-        /* OS Specific callstack hook */
-        self.os_event_callstack(data)?;
-
-        let time = self.os_event_time(data)?;
-        let pid = self.os_event_pid(data)?;
-        let tid = self.os_event_tid(data)?;
-        let cpu = self.os_event_cpu(data)?;
-
-        self.exporter.borrow_mut().add_sample(
-            time,
-            value,
-            pid,
-            tid,
-            cpu,
-            kind,
-            &self.frames)
-    }
-
-    fn add_sample_with_record(
-        &mut self,
-        data: &EventData,
-        value: MetricValue,
-        kind: u16,
-        record_type: u16,
-        record_data: &[u8]) -> anyhow::Result<()> {
-        self.frames.clear();
-
-        /* OS Specific callstack hook */
-        self.os_event_callstack(data)?;
-
-        let time = self.os_event_time(data)?;
-        let pid = self.os_event_pid(data)?;
-        let tid = self.os_event_tid(data)?;
-        let cpu = self.os_event_cpu(data)?;
-
-        self.exporter.borrow_mut().add_sample_with_record(
-            time,
-            value,
-            pid,
-            tid,
-            cpu,
-            kind,
-            record_type,
-            record_data,
-            &self.frames)
-    }
-
     fn add_span(
         &mut self,
         span: ExportSpan) -> anyhow::Result<MetricValue> {
@@ -345,6 +291,137 @@ impl<'a> ExportBuiltContext<'a> {
     }
 }
 
+pub struct ExportSampleBuilder<'a> {
+    context: &'a ExportTraceContext<'a>,
+    kind: u16,
+    tid: Option<u32>,
+    pid: Option<u32>,
+    record_type: u16,
+    record_data: Option<&'a [u8]>,
+    event_data: Option<std::ops::Range<usize>>,
+}
+
+impl<'a> ExportSampleBuilder<'a> {
+    pub fn with_tid(
+        &mut self,
+        tid: u32) -> &mut Self {
+        self.tid = Some(tid);
+        self
+    }
+
+    pub fn with_pid(
+        &mut self,
+        pid: u32) -> &mut Self {
+        self.pid = Some(pid);
+        self
+    }
+
+    pub fn with_kind(
+        &mut self,
+        kind: u16) -> &mut Self {
+        self.kind = kind;
+        self
+    }
+
+    pub fn with_record_type(
+        &mut self,
+        record_type: u16) -> &mut Self {
+        self.record_type = record_type;
+        self
+    }
+
+    pub fn with_record_data(
+        &mut self,
+        record_data: &'a [u8]) -> &mut Self {
+        self.record_data = Some(record_data);
+        self
+    }
+
+    pub fn with_record_event_data(
+        &mut self,
+        range: std::ops::Range<usize>) -> &mut Self {
+        self.event_data = Some(range);
+        self
+    }
+
+    pub fn with_record_all_event_data(
+        &mut self) -> &mut Self {
+        let event_data_len = self.context.data.event_data().len();
+
+        self.with_record_event_data(0..event_data_len)
+    }
+
+    pub fn record_data(&self) -> Option<(u16, &'a [u8])> {
+        match self.record_data {
+            Some(record_data) => {
+                Some((self.record_type, record_data))
+            },
+            None => {
+                match &self.event_data {
+                    Some(range) => {
+                        Some((
+                            self.record_type,
+                            &self.context.data.event_data()[range.start..range.end]))
+                    },
+                    None => None,
+                }
+            },
+        }
+    }
+
+    pub fn tid(&self) -> anyhow::Result<u32> {
+        match self.tid {
+            Some(tid) => Ok(tid),
+            None => self.context.tid(),
+        }
+    }
+
+    pub fn pid(&self) -> anyhow::Result<u32> {
+        match self.pid {
+            Some(pid) => Ok(pid),
+            None => self.context.pid(),
+        }
+    }
+
+    pub fn save_span(
+        &self,
+        span: ExportSpan) -> anyhow::Result<()> {
+        let span = self.context.sampler.borrow_mut().add_span(span)?;
+
+        self.save_value(span)
+    }
+
+    pub fn save_value(
+        &self,
+        value: MetricValue) -> anyhow::Result<()> {
+        let tid = self.tid()?;
+        let pid = self.pid()?;
+
+        let mut sampler = self.context.sampler.borrow_mut();
+
+        let sample = sampler.make_sample(
+            self.context.data,
+            value,
+            tid,
+            self.kind)?;
+
+        match self.record_data() {
+            Some((record_type, record_data)) => {
+                sampler.add_custom_sample_with_record(
+                    pid,
+                    sample,
+                    record_type,
+                    record_data)
+            },
+            None => {
+                sampler.add_custom_sample(
+                    pid,
+                    sample)
+            }
+        }
+    }
+}
+
 pub struct ExportTraceContext<'a> {
     sampler: Writable<ExportSampler>,
     proxy: Writable<ExportProxy>,
@@ -408,128 +485,16 @@ impl<'a> ExportTraceContext<'a> {
             &self.data.event_data()[range]);
     }
 
-    pub fn add_sample_with_kind(
-        &mut self,
-        value: MetricValue,
-        kind: u16) -> anyhow::Result<()> {
-        self.sampler.borrow_mut().add_sample(
-            self.data,
-            value,
-            kind)
-    }
-
-    pub fn make_sample_with_kind(
-        &mut self,
-        value: MetricValue,
-        tid: u32,
-        kind: u16) -> anyhow::Result<ExportProcessSample> {
-        self.sampler.borrow_mut().make_sample(
-            self.data,
-            value,
-            tid,
-            kind)
-    }
-
-    pub fn make_sample(
-        &mut self,
-        value: MetricValue,
-        tid: u32) -> anyhow::Result<ExportProcessSample> {
-        self.make_sample_with_kind(
-            value,
-            tid,
-            self.sample_kind)
-    }
-
-    pub fn add_custom_sample(
-        &mut self,
-        pid: u32,
-        sample: ExportProcessSample) -> anyhow::Result<()> {
-        self.sampler.borrow_mut().add_custom_sample(
-            pid,
-            sample)
-    }
-
-    pub fn add_custom_sample_with_record(
-        &mut self,
-        pid: u32,
-        sample: ExportProcessSample,
-        record_data: &[u8]) -> anyhow::Result<()> {
-        self.sampler.borrow_mut().add_custom_sample_with_record(
-            pid,
-            sample,
-            self.record_type,
-            record_data)
-    }
-
-    pub fn add_pid_sample(
-        &mut self,
-        pid: u32,
-        tid: u32,
-        value: MetricValue) -> anyhow::Result<()> {
-        let sample = self.make_sample_with_kind(
-            value,
-            tid,
-            self.sample_kind)?;
-
-        self.sampler.borrow_mut().add_custom_sample(
-            pid,
-            sample)
-    }
-
-    pub fn add_pid_sample_with_record(
-        &mut self,
-        pid: u32,
-        tid: u32,
-        value: MetricValue,
-        record_data: &[u8]) -> anyhow::Result<()> {
-        let sample = self.make_sample_with_kind(
-            value,
-            tid,
-            self.sample_kind)?;
-
-        self.sampler.borrow_mut().add_custom_sample_with_record(
-            pid,
-            sample,
-            self.record_type,
-            record_data)
-    }
-
-    pub fn add_sample(
-        &mut self,
-        value: MetricValue) -> anyhow::Result<()> {
-        self.add_sample_with_kind(
-            value,
-            self.sample_kind)
-    }
-
-    pub fn add_sample_with_event_data(
-        &mut self,
-        value: MetricValue,
-        range: std::ops::Range<usize>) -> anyhow::Result<()> {
-        self.sampler.borrow_mut().add_sample_with_record(
-            self.data,
-            value,
-            self.sample_kind,
-            self.record_type,
-            &self.data.event_data()[range])
-    }
-
-    pub fn add_sample_with_record(
-        &mut self,
-        value: MetricValue,
-        record_data: &[u8]) -> anyhow::Result<()> {
-        self.sampler.borrow_mut().add_sample_with_record(
-            self.data,
-            value,
-            self.sample_kind,
-            self.record_type,
-            record_data)
-    }
-
-    pub fn add_span(
-        &mut self,
-        span: ExportSpan) -> anyhow::Result<MetricValue> {
-        self.sampler.borrow_mut().add_span(span)
+    pub fn sample_builder(&mut self) -> ExportSampleBuilder {
+        ExportSampleBuilder {
+            context: self,
+            tid: None,
+            pid: None,
+            kind: self.sample_kind,
+            record_type: self.record_type,
+            record_data: None,
+            event_data: None,
+        }
     }
 }
 

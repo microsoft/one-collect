@@ -423,22 +423,16 @@ macro_rules! apply_timeline {
                                         record_closure(trace, &mut values.record);
                                     }
 
-                                    /* Only add span after filtering */
-                                    let value = trace.add_span(values.span)?;
-
-                                    trace.add_pid_sample_with_record(
-                                        values.pid,
-                                        values.tid,
-                                        value,
-                                        &values.record)?;
+                                    trace.sample_builder()
+                                        .with_pid(values.pid)
+                                        .with_tid(values.tid)
+                                        .with_record_data(&values.record)
+                                        .save_span(values.span)?;
                                 } else {
-                                    /* Only add span after filtering */
-                                    let value = trace.add_span(values.span)?;
-
-                                    trace.add_pid_sample(
-                                        values.pid,
-                                        values.tid,
-                                        value)?;
+                                    trace.sample_builder()
+                                        .with_pid(values.pid)
+                                        .with_tid(values.tid)
+                                        .save_span(values.span)?;
                                 }
                             }
                         }
@@ -897,11 +891,9 @@ impl ScriptedUniversalExporter {
                         Ok(())
                     },
                     move |trace| {
-                        let event_data = trace.data().event_data();
-
-                        trace.add_sample_with_event_data(
-                            MetricValue::Count(1),
-                            0..event_data.len())
+                        trace.sample_builder()
+                            .with_record_all_event_data()
+                            .save_value(MetricValue::Count(1))
                     });
             } else {
                 return Err("Event has already been used.".into());
@@ -957,13 +949,13 @@ impl ScriptedUniversalExporter {
                             let sample_data = get_data(event_data);
                             let sample_value = get_metric(sample_data)?;
 
+                            let mut sample = trace.sample_builder();
+
                             if record_data {
-                                trace.add_sample_with_event_data(
-                                    sample_value,
-                                    0..event_data.len())
-                            } else {
-                                trace.add_sample(sample_value)
+                                sample.with_record_all_event_data();
                             }
+
+                            sample.save_value(sample_value)
                         });
                 } else {
                     return Err("Event has already been used.".into());

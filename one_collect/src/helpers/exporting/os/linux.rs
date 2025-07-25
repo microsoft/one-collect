@@ -1519,7 +1519,7 @@ mod tests {
             },
             move |tracer| {
                 /* Create default sample */
-                tracer.add_sample(MetricValue::Count(1))
+                tracer.sample_builder().save_value(MetricValue::Count(1))
             });
 
         settings = settings.with_event(
@@ -1531,7 +1531,7 @@ mod tests {
             },
             move |tracer| {
                 /* Create default sample */
-                tracer.add_sample(MetricValue::Count(1))
+                tracer.sample_builder().save_value(MetricValue::Count(1))
             });
 
         let mut builder = RingBufSessionBuilder::new()

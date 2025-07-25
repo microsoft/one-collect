@@ -199,11 +199,13 @@ impl DotNetScenario {
 
                     let value = closure(record_data)?;
 
+                    let mut sample = trace.sample_builder();
+
                     if record {
-                        trace.add_sample_with_event_data(value, 0..record_data.len())
-                    } else {
-                        trace.add_sample(value)
+                        sample.with_record_all_event_data();
                     }
+
+                    sample.save_value(value)
                 });
         };
 
