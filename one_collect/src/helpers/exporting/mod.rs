@@ -31,6 +31,10 @@ use record::ExportRecordType;
 use record::ExportRecordData;
 use record::ExportRecord;
 
+pub mod attributes;
+use attributes::ExportAttributes;
+use attributes::ExportAttributePair;
+
 pub mod span;
 use span::ExportSpan;
 
@@ -814,6 +818,7 @@ pub struct ExportMachine {
     pub(crate) os: OSExportMachine,
     procs: HashMap<u32, ExportProcess>,
     records: Vec<ExportRecord>,
+    attributes: Vec<ExportAttributes>,
     spans: Vec<ExportSpan>,
     record_data: Vec<u8>,
     module_metadata: ModuleMetadataLookup,
@@ -876,6 +881,7 @@ impl ExportMachine {
         let callstacks = InternedCallstacks::new(settings.callstack_buckets);
         let sample_hooks = settings.sample_hooks.take().unwrap_or_default();
         let mut records = Vec::new();
+        let mut attributes = Vec::new();
         let mut record_types = Vec::new();
 
         /* Ensure string ID 0 is always empty */
@@ -885,6 +891,9 @@ impl ExportMachine {
         records.push(ExportRecord::default());
         record_types.push(ExportRecordType::default());
 
+        /* Ensure attribute ID 0 is always empty/default */
+        attributes.push(ExportAttributes::default());
+
         Self {
             settings,
             strings,
@@ -892,6 +901,7 @@ impl ExportMachine {
             os: OSExportMachine::new(),
             procs: HashMap::new(),
             records,
+            attributes,
             spans: Vec::new(),
             record_data: Vec::new(),
             module_metadata: ModuleMetadataLookup::new(),
@@ -1061,6 +1071,12 @@ impl ExportMachine {
 
     pub fn processes(&self) -> Values<u32, ExportProcess> { self.procs.values() }
 
+    pub fn sample_attributes(
+        &self,
+        sample: &ExportProcessSample) -> &ExportAttributes {
+        &self.attributes[sample.attributes_id()]
+    }
+
     pub fn sample_record_data(
         &self,
         sample: &ExportProcessSample) -> ExportRecordData {
@@ -1136,6 +1152,16 @@ impl ExportMachine {
 
     pub fn processes_mut(&mut self) -> ValuesMut<u32, ExportProcess> {
         self.procs.values_mut()
+    }
+
+    pub fn push_unique_attributes(
+        &mut self,
+        attributes: ExportAttributes) -> usize {
+        let id = self.attributes.len();
+
+        self.attributes.push(attributes);
+
+        id
     }
 
     pub fn record_type(
