@@ -2,6 +2,7 @@
 // Licensed under the MIT license.
 
 use std::cell::RefCell;
+use std::str::FromStr;
 
 use crate::event::*;
 
@@ -89,16 +90,21 @@ impl Clone for ScriptEvent {
 pub struct ScriptEnvironment {
     os_major: u16,
     os_minor: u16,
+    engine_major: u16,
+    engine_minor: u16,
+    engine_patch: u16,
 }
 
 impl Default for ScriptEnvironment {
     fn default() -> Self {
         let (os_major, os_minor) = os::version();
 
-        Self {
+        Self::new(
             os_major,
             os_minor,
-        }
+            env!("CARGO_PKG_VERSION_MAJOR"),
+            env!("CARGO_PKG_VERSION_MINOR"),
+            env!("CARGO_PKG_VERSION_PATCH"))
     }
 }
 
@@ -107,6 +113,7 @@ impl CustomType for ScriptEnvironment {
         builder
             .with_fn("engine_major", Self::engine_major)
             .with_fn("engine_minor", Self::engine_minor)
+            .with_fn("engine_patch", Self::engine_patch)
             .with_fn("os_major", Self::os_major)
             .with_fn("os_minor", Self::os_minor)
             .with_fn("is_os", Self::is_os);
@@ -114,6 +121,32 @@ impl CustomType for ScriptEnvironment {
 }
 
 impl ScriptEnvironment {
+    fn new(
+        os_major: u16,
+        os_minor: u16,
+        engine_major: &'static str,
+        engine_minor: &'static str,
+        engine_patch: &'static str) -> Self {
+        let engine_major = u16::from_str(engine_major).unwrap_or(0);
+        let engine_minor = u16::from_str(engine_minor).unwrap_or(0);
+
+        /* Parse up until '-' or end of string */
+        let engine_patch = match engine_patch.split_once('-') {
+            Some((found, _)) => found,
+            None => engine_patch,
+        };
+
+        let engine_patch = u16::from_str(engine_patch).unwrap_or(0);
+
+        Self {
+            os_major,
+            os_minor,
+            engine_major,
+            engine_minor,
+            engine_patch,
+        }
+    }
+
     pub fn is_os(
         &mut self,
         os: String) -> bool {
@@ -138,9 +171,11 @@ impl ScriptEnvironment {
         }
     }
 
-    pub fn engine_major(&mut self) -> u16 { 1 }
+    pub fn engine_major(&mut self) -> u16 { self.engine_major }
 
-    pub fn engine_minor(&mut self) -> u16 { 0 }
+    pub fn engine_minor(&mut self) -> u16 { self.engine_minor }
+
+    pub fn engine_patch(&mut self) -> u16 { self.engine_patch }
 
     pub fn os_major(&mut self) -> u16 { self.os_major }
 
@@ -223,6 +258,33 @@ mod tests {
 
         #[cfg(target_os = "linux")]
         assert_eq!(true, result);
+    }
+
+    #[test]
+    fn version_scripting() {
+        /* Normal values should pass through */
+        let mut env = ScriptEnvironment::new(6, 0, "1", "2", "3");
+        assert_eq!(6, env.os_major());
+        assert_eq!(0, env.os_minor());
+        assert_eq!(1, env.engine_major());
+        assert_eq!(2, env.engine_minor());
+        assert_eq!(3, env.engine_patch());
+
+        /* Patch with dash/label should truncate */
+        let mut env = ScriptEnvironment::new(6, 0, "1", "2", "3-Beta.1");
+        assert_eq!(3, env.engine_patch());
+
+        /* Empty should resolve to 0 */
+        let mut env = ScriptEnvironment::new(6, 0, "", "", "");
+        assert_eq!(0, env.engine_major());
+        assert_eq!(0, env.engine_minor());
+        assert_eq!(0, env.engine_patch());
+
+        /* Non-Numeric should resolve to 0 */
+        let mut env = ScriptEnvironment::new(6, 0, "One", "Two", "Three");
+        assert_eq!(0, env.engine_major());
+        assert_eq!(0, env.engine_minor());
+        assert_eq!(0, env.engine_patch());
     }
 
     #[test]
