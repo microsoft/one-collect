@@ -7,6 +7,25 @@ use crate::Writable;
 
 use rhai::{Engine, EvalAltResult};
 
+pub(crate) fn version() -> (u16, u16) {
+    let mut major = 0;
+    let mut minor = 0;
+
+    if let Ok(release) = std::fs::read_to_string("/proc/sys/kernel/osrelease") {
+        let mut numbers = release.split('.');
+
+        if let Some(first) = numbers.next() {
+            major = first.parse::<u16>().unwrap_or_default();
+
+            if let Some(second) = numbers.next() {
+                minor = second.parse::<u16>().unwrap_or_default();
+            }
+        }
+    }
+
+    (major, minor)
+}
+
 #[derive(Default)]
 pub struct OSScriptEngine {
 }

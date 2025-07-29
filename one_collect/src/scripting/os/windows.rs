@@ -8,6 +8,47 @@ use crate::scripting::ScriptEvent;
 
 use rhai::{Engine, EvalAltResult};
 
+#[repr(C)]
+struct NtOsVersionInfo {
+    size: u32,
+    major: u32,
+    minor: u32,
+    build: u32,
+    platform: u32,
+    csd: [u16; 128],
+}
+
+impl Default for NtOsVersionInfo {
+    fn default() -> Self {
+        NtOsVersionInfo {
+            size: 276,
+            major: 0,
+            minor: 0,
+            build: 0,
+            platform: 0,
+            csd: [0; 128],
+        }
+    }
+}
+
+#[link(name = "ntdll")]
+extern "system" {
+    fn RtlGetVersion(version: &mut NtOsVersionInfo) -> u32;
+}
+
+pub(crate) fn version() -> (u16, u16) {
+    let mut version = NtOsVersionInfo::default();
+
+    let status = unsafe { RtlGetVersion(&mut version) };
+
+    if status != 0 {
+        /* Revert to default if any errors */
+        version = NtOsVersionInfo::default();
+    }
+
+    (version.major as u16, version.minor as u16)
+}
+
 #[derive(Default)]
 pub struct OSScriptEngine {
 }
