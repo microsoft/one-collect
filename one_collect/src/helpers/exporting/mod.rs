@@ -133,6 +133,8 @@ struct ExportSampler {
     exporter: Writable<ExportMachine>,
     frames: Vec<u64>,
     os: OSExportSampler,
+    version_override: Option<u16>,
+    op_code_override: Option<u16>,
 }
 
 pub trait ExportSamplerOSHooks {
@@ -155,6 +157,14 @@ pub trait ExportSamplerOSHooks {
     fn os_event_cpu(
         &self,
         data: &EventData) -> anyhow::Result<u16>;
+
+    fn os_event_version(
+        &self,
+        data: &EventData) -> anyhow::Result<Option<u16>>;
+
+    fn os_event_op_code(
+        &self,
+        data: &EventData) -> anyhow::Result<Option<u16>>;
 }
 
 impl ExportSampler {
@@ -165,6 +175,38 @@ impl ExportSampler {
             exporter: exporter.clone(),
             os,
             frames: Vec::new(),
+            version_override: None,
+            op_code_override: None,
+        }
+    }
+
+    fn override_version(
+        &mut self,
+        version: Option<u16>) {
+        self.version_override = version;
+    }
+
+    fn override_op_code(
+        &mut self,
+        op_code: Option<u16>) {
+        self.op_code_override = op_code;
+    }
+
+    fn version(
+        &self,
+        data: &EventData) -> anyhow::Result<Option<u16>> {
+        match self.version_override {
+            Some(version) => Ok(Some(version)),
+            None => self.os_event_version(data),
+        }
+    }
+
+    fn op_code(
+        &self,
+        data: &EventData) -> anyhow::Result<Option<u16>> {
+        match self.op_code_override {
+            Some(op_code) => Ok(Some(op_code)),
+            None => self.os_event_op_code(data),
         }
     }
 
@@ -376,7 +418,10 @@ impl<'a> ExportSampleBuilder<'a> {
     pub fn with_attributes(
         &mut self,
         attributes_id: usize) -> &mut Self {
-        self.attributes_id = Some(attributes_id);
+        if attributes_id != 0 {
+            self.attributes_id = Some(attributes_id);
+        }
+
         self
     }
 
@@ -497,6 +542,14 @@ impl<'a> ExportTraceContext<'a> {
         self.sampler.borrow().os_event_tid(self.data)
     }
 
+    pub fn op_code(&self) -> anyhow::Result<Option<u16>> {
+        self.sampler.borrow().op_code(self.data)
+    }
+
+    pub fn version(&self) -> anyhow::Result<Option<u16>> {
+        self.sampler.borrow().version(self.data)
+    }
+
     pub fn proxy_data(
         &mut self,
         event_id: usize,
@@ -516,6 +569,18 @@ impl<'a> ExportTraceContext<'a> {
             event_id,
             self.data.full_data(),
             &self.data.event_data()[range]);
+    }
+
+    pub fn override_version(
+        &mut self,
+        version: Option<u16>) {
+        self.sampler.borrow_mut().override_version(version);
+    }
+
+    pub fn override_op_code(
+        &mut self,
+        op_code: Option<u16>) {
+        self.sampler.borrow_mut().override_op_code(op_code);
     }
 
     pub fn sample_builder(&mut self) -> ExportSampleBuilder {

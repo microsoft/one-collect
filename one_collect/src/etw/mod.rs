@@ -109,6 +109,15 @@ impl AncillaryData {
         }
     }
 
+    pub fn op_code(&self) -> u8 {
+        match self.event {
+            Some(event) => {
+                unsafe { (*event).EventHeader.EventDescriptor.Opcode }
+            },
+            None => { 0 },
+        }
+    }
+
     pub fn version(&self) -> u8 {
         match self.event {
             Some(event) => {

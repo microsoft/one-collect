@@ -646,6 +646,18 @@ impl ExportSamplerOSHooks for ExportSampler {
         Ok(self.os.ancillary.borrow().cpu() as u16)
     }
 
+    fn os_event_version(
+        &self,
+        _data: &EventData) -> anyhow::Result<Option<u16>> {
+        Ok(None)
+    }
+
+    fn os_event_op_code(
+        &self,
+        _data: &EventData) -> anyhow::Result<Option<u16>> {
+        Ok(None)
+    }
+
     fn os_event_callstack(
         &mut self,
         data: &EventData) -> anyhow::Result<()> {
