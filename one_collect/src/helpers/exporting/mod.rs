@@ -34,6 +34,7 @@ use record::ExportRecord;
 pub mod attributes;
 use attributes::ExportAttributes;
 use attributes::ExportAttributePair;
+use attributes::ExportAttributeWalker;
 
 pub mod span;
 use span::ExportSpan;
@@ -215,6 +216,26 @@ impl ExportSampler {
         span: ExportSpan) -> anyhow::Result<MetricValue> {
         Ok(self.exporter.borrow_mut().span_to_value(span))
     }
+
+    pub fn label_attribute(
+        &mut self,
+        name: &str,
+        label: &str) -> ExportAttributePair {
+        self.exporter.borrow_mut().label_attribute(name, label)
+    }
+
+    pub fn value_attribute(
+        &mut self,
+        name: &str,
+        value: u64) -> ExportAttributePair {
+        self.exporter.borrow_mut().value_attribute(name, value)
+    }
+
+    fn push_unique_attributes(
+        &mut self,
+        attributes: ExportAttributes) -> usize {
+        self.exporter.borrow_mut().push_unique_attributes(attributes)
+    }
 }
 
 pub struct ExportBuiltContext<'a> {
@@ -298,6 +319,7 @@ pub struct ExportSampleBuilder<'a> {
     pid: Option<u32>,
     record_type: u16,
     record_data: Option<&'a [u8]>,
+    attributes_id: Option<usize>,
     event_data: Option<std::ops::Range<usize>>,
 }
 
@@ -351,6 +373,13 @@ impl<'a> ExportSampleBuilder<'a> {
         self.with_record_event_data(0..event_data_len)
     }
 
+    pub fn with_attributes(
+        &mut self,
+        attributes_id: usize) -> &mut Self {
+        self.attributes_id = Some(attributes_id);
+        self
+    }
+
     pub fn record_data(&self) -> Option<(u16, &'a [u8])> {
         match self.record_data {
             Some(record_data) => {
@@ -399,11 +428,15 @@ impl<'a> ExportSampleBuilder<'a> {
 
         let mut sampler = self.context.sampler.borrow_mut();
 
-        let sample = sampler.make_sample(
+        let mut sample = sampler.make_sample(
             self.context.data,
             value,
             tid,
             self.kind)?;
+
+        if let Some(attributes_id) = self.attributes_id {
+            sample.attach_attributes(attributes_id);
+        }
 
         match self.record_data() {
             Some((record_type, record_data)) => {
@@ -493,8 +526,29 @@ impl<'a> ExportTraceContext<'a> {
             kind: self.sample_kind,
             record_type: self.record_type,
             record_data: None,
+            attributes_id: None,
             event_data: None,
         }
+    }
+
+    pub fn label_attribute(
+        &mut self,
+        name: &str,
+        label: &str) -> ExportAttributePair {
+        self.sampler.borrow_mut().label_attribute(name, label)
+    }
+
+    pub fn value_attribute(
+        &mut self,
+        name: &str,
+        value: u64) -> ExportAttributePair {
+        self.sampler.borrow_mut().value_attribute(name, value)
+    }
+
+    pub fn push_unique_attributes(
+        &mut self,
+        attributes: ExportAttributes) -> usize {
+        self.sampler.borrow_mut().push_unique_attributes(attributes)
     }
 }
 
@@ -1038,8 +1092,23 @@ impl ExportMachine {
 
     pub fn sample_attributes(
         &self,
-        sample: &ExportProcessSample) -> &ExportAttributes {
-        &self.attributes[sample.attributes_id()]
+        sample: &ExportProcessSample,
+        walker: &mut ExportAttributeWalker) {
+        walker.start();
+
+        walker.push_id(sample.attributes_id());
+
+        while let Some(id) = walker.pop_id() {
+            if id <= self.attributes.len() {
+                let attributes = &self.attributes[id];
+
+                walker.push_attributes(attributes.attributes());
+
+                for associated_id in attributes.associated_ids() {
+                    walker.push_id(*associated_id);
+                }
+            }
+        }
     }
 
     pub fn sample_record_data(
@@ -1121,12 +1190,34 @@ impl ExportMachine {
 
     pub fn push_unique_attributes(
         &mut self,
-        attributes: ExportAttributes) -> usize {
+        mut attributes: ExportAttributes) -> usize {
         let id = self.attributes.len();
+
+        attributes.shrink();
 
         self.attributes.push(attributes);
 
         id
+    }
+
+    pub fn label_attribute(
+        &mut self,
+        name: &str,
+        label: &str) -> ExportAttributePair {
+        ExportAttributePair::new_label(
+            name,
+            label,
+            &mut self.strings)
+    }
+
+    pub fn value_attribute(
+        &mut self,
+        name: &str,
+        value: u64) -> ExportAttributePair {
+        ExportAttributePair::new_value(
+            name,
+            value,
+            &mut self.strings)
     }
 
     pub fn record_type(
@@ -1761,5 +1852,67 @@ mod tests {
         context.proxy_event_data(3, 2..3);
 
         assert_eq!(3, *count.borrow());
+    }
+
+    #[test]
+    fn attributes() {
+        let settings = ExportSettings::default();
+        let mut machine = ExportMachine::new(settings);
+
+        let mut frames = Vec::new();
+
+        let mut sample = machine.make_sample(
+            0,
+            MetricValue::Count(1),
+            0,
+            0,
+            0,
+            &mut frames);
+
+        let mut walker = ExportAttributeWalker::default();
+
+        /* Ensure no attached attributes gives back nothing */
+        machine.sample_attributes(&sample, &mut walker);
+        assert!(walker.attributes().is_empty());
+
+        /* Ensure attached attributes gives back values */
+        let mut sample_attributes = ExportAttributes::default();
+        sample_attributes.push(machine.label_attribute("Parent", "true"));
+
+        let attribute_id = machine.push_unique_attributes(sample_attributes);
+        sample.attach_attributes(attribute_id);
+
+        machine.sample_attributes(&sample, &mut walker);
+        assert_eq!(1, walker.attributes().len());
+
+        /* Ensure associated attributes gives back values */
+        let mut sample_attributes = ExportAttributes::default();
+        sample_attributes.push(machine.label_attribute("Child", "true"));
+        sample_attributes.push_association(attribute_id);
+
+        let mut sample = machine.make_sample(
+            0,
+            MetricValue::Count(1),
+            0,
+            0,
+            0,
+            &mut frames);
+
+        let attribute_id = machine.push_unique_attributes(sample_attributes);
+        sample.attach_attributes(attribute_id);
+
+        machine.sample_attributes(&sample, &mut walker);
+        let attributes = walker.attributes();
+        assert_eq!(2, attributes.len());
+
+        let parent_str_id = machine.intern("Parent");
+        let child_str_id = machine.intern("Child");
+        let true_str_id = machine.intern("true");
+
+        assert_eq!(child_str_id, attributes[0].name());
+        assert_eq!(true_str_id, attributes[0].label().expect("Should be label attribute"));
+
+        assert_eq!(parent_str_id, attributes[1].name());
+        assert_eq!(true_str_id, attributes[1].label().expect("Should be label attribute"));
     }
 }
