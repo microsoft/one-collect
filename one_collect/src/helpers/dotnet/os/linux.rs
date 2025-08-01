@@ -28,6 +28,7 @@ use crate::procfs;
 use crate::event::*;
 
 use crate::helpers::dotnet::scripting::*;
+use crate::helpers::dotnet::nettrace;
 
 #[cfg(target_os = "linux")]
 use libc::PROT_EXEC;
@@ -623,6 +624,7 @@ fn register_dotnet_tracepoint(
     name: &str,
     user_events: &UserEventsFactory,
     callstacks: bool) -> anyhow::Result<ExportSettings> {
+
     let events = provider.events.clone();
 
     let _ = user_events.create(&DotNetEventDesc::new(name))?;
@@ -635,7 +637,11 @@ fn register_dotnet_tracepoint(
 
     let fmt = event.format();
     let id = fmt.get_field_ref_unchecked("event_id");
+    let version = fmt.get_field_ref_unchecked("version");
     let payload = fmt.get_field_ref_unchecked("payload");
+    let extension = fmt.get_field_ref_unchecked("extension");
+
+    let mut version_lookup = HashMap::new();
 
     let settings = settings.with_event(
         event,
@@ -646,6 +652,9 @@ fn register_dotnet_tracepoint(
             let fmt = trace.data().format();
             let data = trace.data().event_data();
 
+            /* Read DotNet ABI Version */
+            let version = fmt.get_u8(version, data)?;
+
             /* Read DotNet ID */
             let id = fmt.get_u16(id, data)? as usize;
 
@@ -654,12 +663,46 @@ fn register_dotnet_tracepoint(
 
             /* Lookup DotNet Event from ID */
             if let Some(events) = events.borrow().get(&id) {
+                /* Lookups within a provider is PID and Event ID */
+                let pid = trace.pid()?;
+                let key = (pid as u64) << 32 | id as u64;
+
+                match version {
+                    1 => {
+                        /* Decode extension */
+                        let extension_range = fmt.get_rel_loc(extension, data)?;
+                        let extension = &data[extension_range];
+
+                        nettrace::parse_event_extension_v1(
+                            extension,
+                            |label, data| {
+                                if label == nettrace::LABEL_META {
+                                    let meta = nettrace::MetaParserV5::parse(data);
+
+                                    /* Save version, if any by PID + Event */
+                                    if let Some(version) = meta.version() {
+                                        version_lookup.insert(key, version);
+                                    }
+                                }
+                            });
+                    },
+                    _ => {},
+                }
+
+                /* Provide a version if we have one */
+                if let Some(version) = version_lookup.get(&key) {
+                    trace.override_version(Some(*version as u16));
+                }
+
                 /* Proxy DotNet data to all proxy events */
                 for event in events {
                     trace.proxy_event_data(
                         event.proxy_id,
                         payload_range.clone());
                 }
+
+                /* Always clear version override */
+                trace.override_version(None);
             }
 
             Ok(())

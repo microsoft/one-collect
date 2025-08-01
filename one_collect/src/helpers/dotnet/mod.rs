@@ -10,6 +10,8 @@ pub mod scripting;
 #[cfg(feature = "scripting")]
 pub use scripting::DotNetScripting;
 
+pub(crate) mod nettrace;
+
 use crate::Writable;
 use crate::helpers::exporting::DynamicSymbol;
 
