@@ -201,6 +201,42 @@ impl DataFieldRef {
         }
     }
 
+    /// Tries to retrieve the data that the `DataFieldRef` points to as a u8.
+    ///
+    /// # Parameters
+    /// - `data`: The data from which to retrieve the slice.
+    ///
+    /// # Returns
+    /// - A `Result` that contains the u8 value if successful, or an error if not.
+    pub fn get_u8(
+        &self,
+        data: &[u8]) -> Result<u8, anyhow::Error> {
+        let slice = self.get_data(data);
+
+        if slice.is_empty() {
+            anyhow::bail!("No data");
+        }
+
+        Ok(slice[0])
+    }
+
+    /// Tries to retrieve the data that the `DataFieldRef` points to as a u8.
+    ///
+    /// # Parameters
+    /// - `data`: The data from which to retrieve the slice.
+    ///
+    /// # Returns
+    /// - An `Option` that contains the u8 value if successful, or `None` if not.
+    pub fn try_get_u8(
+        &self,
+        data: &[u8]) -> Option<u8> {
+        let slice = self.get_data(data);
+
+        if slice.is_empty() { return None }
+
+        Some(slice[0])
+    }
+
     /// Resets the `DataField`'s start and end to 0.
     pub fn reset(&self) {
         self.update(0, 0);
@@ -1330,6 +1366,52 @@ impl EventFormat {
             Ok(slice) => Some(u16::from_ne_bytes(slice)),
             Err(_) => None,
         }
+    }
+
+    /// Retrieves the value of a specified field from the event data as a 8-bit unsigned integer.
+    ///
+    /// # Parameters
+    ///
+    /// - `field_ref`: A reference to the `EventField` for which to retrieve the data.
+    /// - `data`: The event data from which to retrieve the field value.
+    ///
+    /// # Returns
+    ///
+    /// - A `Result` which is:
+    ///     - `Ok` variant containing the value of the field if it exists and can be read as a 8-bit unsigned integer;
+    ///     - `Err` variant containing an error if the field does not exist or cannot be read as a 8-bit unsigned integer.
+    pub fn get_u8(
+        &self,
+        field_ref: EventFieldRef,
+        data: &[u8]) -> Result<u8, anyhow::Error> {
+        let slice = self.get_data(field_ref, data);
+
+        if slice.is_empty() { anyhow::bail!("No data"); }
+
+        Ok(slice[0])
+    }
+
+    /// Tries to retrieve the value of a specified field from the event data as a 8-bit unsigned integer.
+    ///
+    /// # Parameters
+    ///
+    /// - `field_ref`: A reference to the `EventField` for which to retrieve the data.
+    /// - `data`: The event data from which to retrieve the field value.
+    ///
+    /// # Returns
+    ///
+    /// - An `Option` which is:
+    ///     - `Some` variant containing the value of the field if it exists and can be read as a 8-bit unsigned integer;
+    ///     - `None` if the field does not exist or cannot be read as a 16-bit unsigned integer.
+    pub fn try_get_u8(
+        &self,
+        field_ref: EventFieldRef,
+        data: &[u8]) -> Option<u8> {
+        let slice = self.get_data(field_ref, data);
+
+        if slice.is_empty() { return None; }
+
+        Some(slice[0])
     }
 
     /// Retrieves the value of a specified field from the event data as a string.
