@@ -199,13 +199,19 @@ impl DotNetScenario {
 
                     let value = closure(record_data)?;
 
-                    let mut sample = trace.sample_builder();
-
                     if record {
-                        sample.with_record_all_event_data();
-                    }
+                        let attributes = trace.default_os_attributes()?;
 
-                    sample.save_value(value)
+                        trace
+                            .sample_builder()
+                            .with_attributes(attributes)
+                            .with_record_all_event_data()
+                            .save_value(value)
+                    } else {
+                        trace
+                            .sample_builder()
+                            .save_value(value)
+                    }
                 });
         };
 

@@ -84,6 +84,15 @@ pub struct ExportAttributePair {
 }
 
 impl ExportAttributePair {
+    pub fn new(
+        name: usize,
+        value: ExportAttributeValue) -> Self {
+        Self {
+            name,
+            value,
+        }
+    }
+
     pub fn new_label(
         name: &str,
         label: &str,
@@ -142,6 +151,8 @@ impl ExportAttributePair {
             _ => { None },
         }
     }
+
+    pub fn attribute_value(&self) -> ExportAttributeValue { self.value }
 }
 
 #[cfg(test)]

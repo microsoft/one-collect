@@ -2,7 +2,6 @@
 // Licensed under the MIT license.
 
 use super::*;
-use std::collections::hash_map::Entry::{Vacant, Occupied};
 use crate::scripting::{ScriptEngine, ScriptEvent};
 use crate::event::*;
 
@@ -878,18 +877,12 @@ impl ScriptedUniversalExporter {
             timeline.apply(&mut fn_exporter.borrow_mut())
         });
 
-        let attributes_cache: HashMap<u32, usize> = HashMap::new();
-        let attributes_cache = Writable::new(attributes_cache);
-
         let fn_exporter = self.export_swapper();
-        let fn_attributes_cache = attributes_cache.clone();
 
         self.rhai_engine().register_fn(
             "record_event",
             move |event: ScriptEvent| -> Result<(), Box<EvalAltResult>> {
             if let Some(event) = event.to_event() {
-                let attributes_cache = fn_attributes_cache.clone();
-
                 fn_exporter.borrow_mut().add_event(
                     event,
                     move |built| {
@@ -898,45 +891,12 @@ impl ScriptedUniversalExporter {
                         Ok(())
                     },
                     move |trace| {
-                        let version = trace.version()?.unwrap_or(0);
-                        let op_code = trace.op_code()?.unwrap_or(0);
-                        let lookup_id = (version as u32) << 16 | op_code as u32;
+                        let attributes = trace.default_os_attributes()?;
 
-                        /* Lookup attributes by version + op_code pair */
-                        let attributes_id = if lookup_id != 0 {
-                            let mut cache = attributes_cache.borrow_mut();
-
-                            match cache.entry(lookup_id) {
-                                Vacant(entry) => {
-                                    /* New pair, get new attribute ID for this */
-                                    let mut attributes = ExportAttributes::default();
-
-                                    attributes.push(
-                                        trace.value_attribute(
-                                            "Version", version as u64));
-
-                                    attributes.push(
-                                        trace.value_attribute(
-                                            "OpCode", op_code as u64));
-
-                                    let id = trace.push_unique_attributes(attributes);
-
-                                    entry.insert(id);
-
-                                    id
-                                },
-                                Occupied(entry) => {
-                                    /* Existing pair, use existing ID */
-                                    *entry.get()
-                                },
-                            }
-                        } else {
-                            0
-                        };
-
-                        trace.sample_builder()
+                        trace
+                            .sample_builder()
+                            .with_attributes(attributes)
                             .with_record_all_event_data()
-                            .with_attributes(attributes_id)
                             .save_value(MetricValue::Count(1))
                     });
             } else {
@@ -993,13 +953,19 @@ impl ScriptedUniversalExporter {
                             let sample_data = get_data(event_data);
                             let sample_value = get_metric(sample_data)?;
 
-                            let mut sample = trace.sample_builder();
-
                             if record_data {
-                                sample.with_record_all_event_data();
-                            }
+                                let attributes = trace.default_os_attributes()?;
 
-                            sample.save_value(sample_value)
+                                trace
+                                    .sample_builder()
+                                    .with_attributes(attributes)
+                                    .with_record_all_event_data()
+                                    .save_value(sample_value)
+                            } else {
+                                trace
+                                    .sample_builder()
+                                    .save_value(sample_value)
+                            }
                         });
                 } else {
                     return Err("Event has already been used.".into());

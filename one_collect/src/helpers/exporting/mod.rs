@@ -2,6 +2,7 @@
 // Licensed under the MIT license.
 
 use std::collections::{HashMap, HashSet};
+use std::collections::hash_map::Entry::{Vacant, Occupied};
 use std::collections::hash_map::{Values, ValuesMut};
 use std::time::Duration;
 use std::path::Path;
@@ -35,6 +36,7 @@ pub mod attributes;
 use attributes::ExportAttributes;
 use attributes::ExportAttributePair;
 use attributes::ExportAttributeWalker;
+use attributes::ExportAttributeValue;
 
 pub mod span;
 use span::ExportSpan;
@@ -131,6 +133,9 @@ impl ExportProxy {
 
 struct ExportSampler {
     exporter: Writable<ExportMachine>,
+    os_attributes_cache: HashMap<u32, usize>,
+    version_str_id: usize,
+    op_code_str_id: usize,
     frames: Vec<u64>,
     os: OSExportSampler,
     version_override: Option<u16>,
@@ -171,13 +176,61 @@ impl ExportSampler {
     fn new(
         exporter: &Writable<ExportMachine>,
         os: OSExportSampler) -> Self {
+        let version_str_id = exporter.borrow_mut().intern("Version");
+        let op_code_str_id = exporter.borrow_mut().intern("OpCode");
+
         Self {
             exporter: exporter.clone(),
             os,
             frames: Vec::new(),
             version_override: None,
             op_code_override: None,
+            os_attributes_cache: HashMap::new(),
+            version_str_id,
+            op_code_str_id,
         }
+    }
+
+    fn default_os_attributes(
+        &mut self,
+        data: &EventData) -> anyhow::Result<usize> {
+        let version = self.version(data)?.unwrap_or(0);
+        let op_code = self.op_code(data)?.unwrap_or(0);
+        let lookup_id = (version as u32) << 16 | op_code as u32;
+
+        /* Lookup attributes by version + op_code pair */
+        let attributes_id = if lookup_id != 0 {
+            match self.os_attributes_cache.entry(lookup_id) {
+                Vacant(entry) => {
+                    /* New pair, get new attribute ID for this */
+                    let mut attributes = ExportAttributes::default();
+
+                    attributes.push(
+                        ExportAttributePair::new(
+                            self.version_str_id,
+                            ExportAttributeValue::Value(version as u64)));
+
+                    attributes.push(
+                        ExportAttributePair::new(
+                            self.op_code_str_id,
+                            ExportAttributeValue::Value(op_code as u64)));
+
+                    let id = self.exporter.borrow_mut().push_unique_attributes(attributes);
+
+                    entry.insert(id);
+
+                    id
+                },
+                Occupied(entry) => {
+                    /* Existing pair, use existing ID */
+                    *entry.get()
+                },
+            }
+        } else {
+            0
+        };
+
+        Ok(attributes_id)
     }
 
     fn override_version(
@@ -581,6 +634,10 @@ impl<'a> ExportTraceContext<'a> {
         &mut self,
         op_code: Option<u16>) {
         self.sampler.borrow_mut().override_op_code(op_code);
+    }
+
+    pub fn default_os_attributes(&mut self) -> anyhow::Result<usize> {
+        self.sampler.borrow_mut().default_os_attributes(self.data)
     }
 
     pub fn sample_builder(&mut self) -> ExportSampleBuilder {
@@ -1155,13 +1212,13 @@ impl ExportMachine {
 
     pub fn processes(&self) -> Values<u32, ExportProcess> { self.procs.values() }
 
-    pub fn sample_attributes(
+    pub fn attributes(
         &self,
-        sample: &ExportProcessSample,
+        attributes_id: usize,
         walker: &mut ExportAttributeWalker) {
         walker.start();
 
-        walker.push_id(sample.attributes_id());
+        walker.push_id(attributes_id);
 
         while let Some(id) = walker.pop_id() {
             if id <= self.attributes.len() {
@@ -1174,6 +1231,15 @@ impl ExportMachine {
                 }
             }
         }
+    }
+
+    pub fn sample_attributes(
+        &self,
+        sample: &ExportProcessSample,
+        walker: &mut ExportAttributeWalker) {
+        self.attributes(
+            sample.attributes_id(),
+            walker);
     }
 
     pub fn sample_record_data(
