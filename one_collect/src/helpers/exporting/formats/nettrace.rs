@@ -10,6 +10,7 @@ use crate::Guid;
 use crate::event::{EventField, LocationType};
 use crate::helpers::exporting::*;
 use crate::helpers::exporting::graph::*;
+use crate::helpers::exporting::attributes::*;
 
 pub trait NetTraceFormat {
     fn to_net_trace(
@@ -29,6 +30,12 @@ struct SavedCallstackKey {
 struct SavedPidTidKey {
     pid: u32,
     tid: u32,
+}
+
+#[derive(Eq, Hash, PartialEq)]
+struct SavedLabelKey {
+    attributes_id: usize,
+    write_id: u32,
 }
 
 struct NetTraceField<'a> {
@@ -253,6 +260,7 @@ struct NetTraceWriter {
     flush_time: u64,
     str_buffer: String,
     sym_id: u32,
+    saved_labels: HashMap<SavedLabelKey, u32>,
     saved_callstacks: HashMap<SavedCallstackKey, u32>,
     saved_pid_tids: HashMap<SavedPidTidKey, u32>,
     saved_meta_ids: HashMap<ExportDevNode, u32>,
@@ -277,6 +285,7 @@ impl NetTraceWriter {
             flush_time: 0,
             str_buffer: String::new(),
             sym_id: 0,
+            saved_labels: HashMap::new(),
             saved_callstacks: HashMap::new(),
             saved_pid_tids: HashMap::new(),
             saved_meta_ids: HashMap::new(),
@@ -428,10 +437,11 @@ impl NetTraceWriter {
         meta_id: u32,
         cpu: u32,
         stack_id: Option<u32>,
+        label_id: Option<u32>,
         replay: &ExportProcessReplay) -> anyhow::Result<()> {
         let thread_id = self.get_pid_tid_id(replay);
 
-        self.event_block.write_u8(207)?; /* Flags: 1 | 2 | 4 | 8 | 64 | 128 */
+        self.event_block.write_u8(223)?; /* Flags: 1 | 2 | 4 | 8 | 16 | 64 | 128 */
         self.event_block.write_varint(meta_id as u64)?; /* MetaID */
         self.event_block.write_varint(0u64)?; /* SeqID inc */
         self.event_block.write_varint(0u64)?; /* Capture Thread ID */
@@ -446,6 +456,13 @@ impl NetTraceWriter {
         self.event_block.write_varint(stack_id as u64)?; /* Stack ID */
 
         self.write_event_timestamp(replay.time())?;
+
+        let label_id = match label_id {
+            Some(label_id) => { label_id + 1 },
+            None => { 0 },
+        };
+
+        self.event_block.write_varint(label_id as u64)?; /* Label ID */
 
         let payload = self.buffer.as_slice();
 
@@ -476,6 +493,9 @@ impl NetTraceWriter {
 
         /* Write threads to output */
         self.write_threads()?;
+
+        /* Write labels to output */
+        self.write_labels(machine)?;
 
         /* Write events to output */
         let block_start = self.write_eventblock_start(
@@ -544,6 +564,7 @@ impl NetTraceWriter {
             id,
             0,
             None,
+            None,
             replay)
     }
 
@@ -581,7 +602,17 @@ impl NetTraceWriter {
             write_id: 0,
         };
 
-        let id = *self.saved_callstacks.entry(key).or_insert(len);
+        let callstack_id = *self.saved_callstacks.entry(key).or_insert(len);
+
+        /* Save label for later writing */
+        let len = self.saved_labels.len() as u32;
+
+        let key = SavedLabelKey {
+            attributes_id: sample.attributes_id(),
+            write_id: 0,
+        };
+
+        let label_id = *self.saved_labels.entry(key).or_insert(len);
 
         /* Write out event */
         let value = converter.convert(machine, sample.value());
@@ -614,14 +645,14 @@ impl NetTraceWriter {
 
             /* Write the extra data after the value */
             self.buffer.write_all(data.record_data())?;
-
         }
 
         self.write_event_blob_from_buffer(
             machine,
             event_id,
             sample.cpu() as u32,
-            Some(id),
+            Some(callstack_id),
+            Some(label_id),
             replay)
     }
 
@@ -635,6 +666,7 @@ impl NetTraceWriter {
             machine,
             self.exit_event_id,
             0,
+            None,
             None,
             replay)
     }
@@ -692,6 +724,7 @@ impl NetTraceWriter {
                 self.mapping_meta_event_id,
                 0,
                 None,
+                None,
                 replay)?;
         }
 
@@ -743,6 +776,7 @@ impl NetTraceWriter {
             self.mapping_event_id,
             0,
             None,
+            None,
             replay)
     }
 
@@ -770,6 +804,7 @@ impl NetTraceWriter {
             machine,
             self.symbol_event_id,
             0,
+            None,
             None,
             replay)
     }
@@ -1123,6 +1158,22 @@ impl NetTraceWriter {
         ids
     }
 
+    fn take_saved_labels(&mut self) -> Vec<SavedLabelKey> {
+        let mut ids = Vec::new();
+
+        /* Drain the labels into a vec, saving the value in the process */
+        for (mut k,v) in self.saved_labels.drain() {
+            k.write_id = v;
+
+            ids.push(k);
+        }
+
+        /* Sort by write_id */
+        ids.sort_by(|a,b| a.write_id.cmp(&b.write_id));
+
+        ids
+    }
+
     fn write_callstacks(
         &mut self,
         machine: &ExportMachine) -> anyhow::Result<()> {
@@ -1188,6 +1239,66 @@ impl NetTraceWriter {
 
         /* Done writing threads */
         self.write_end_block(block_start, 6)
+    }
+
+    fn write_labels(
+        &mut self,
+        machine: &ExportMachine) -> anyhow::Result<()> {
+        let block_start = self.write_start_block()?;
+        let mut walker = ExportAttributeWalker::default();
+
+        let labels = self.take_saved_labels();
+        let strings = machine.strings();
+
+        self.output.write_u32(1)?;
+        self.output.write_u32(labels.len() as u32)?;
+
+        for key in &labels {
+            machine.attributes(
+                key.attributes_id,
+                &mut walker);
+
+            let attributes = walker.attributes();
+
+            /* We do not expect empty attributes */
+            if attributes.is_empty() {
+                self.output.write_u8(128 | 5)?;
+                self.output.write_utf8("Error")?;
+                self.output.write_utf8("Expected actual values")?;
+                continue;
+            }
+
+            let last = attributes.len() - 1;
+
+            for (i,attribute) in attributes.into_iter().enumerate() {
+                let name = attribute.name_str(strings).unwrap_or("???");
+
+                /* If last need high bit set */
+                let add_flag = if i == last {
+                    128u8
+                } else {
+                    0u8
+                };
+
+                match attribute.attribute_value() {
+                    ExportAttributeValue::Label(id) => {
+                        let value = strings.from_id(id).unwrap_or("???");
+
+                        self.output.write_u8(add_flag | 5)?;
+                        self.output.write_utf8(name)?;
+                        self.output.write_utf8(value)?;
+                    },
+                    ExportAttributeValue::Value(value) => {
+                        self.output.write_u8(add_flag | 6)?;
+                        self.output.write_utf8(name)?;
+                        self.output.write_varint(value)?;
+                    }
+                }
+            }
+        }
+
+        /* Done writing labels */
+        self.write_end_block(block_start, 8)
     }
 
     fn finish(
