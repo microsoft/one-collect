@@ -1,9 +1,10 @@
 [package]
 name = "ruwind"
+description = "Unwind support crate for one_collect."
 version = "0.0.0-dev"
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+license = "MIT"
+repository = "https://github.com/microsoft/one-collect"
 
 [dependencies]
 cpp_demangle = "0.4.3"
