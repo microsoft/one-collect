@@ -330,6 +330,7 @@ pub struct ExportProcessSample {
      */
     callstack_id: u32,
     record_id: u32,
+    attributes_id: u32,
 }
 
 impl ExportProcessSample {
@@ -352,6 +353,7 @@ impl ExportProcessSample {
             ip,
             callstack_id,
             record_id: 0,
+            attributes_id: 0,
         }
     }
 
@@ -381,6 +383,16 @@ impl ExportProcessSample {
         &mut self,
         record_id: usize) {
         self.record_id = record_id as u32;
+    }
+
+    pub fn attributes_id(&self) -> usize { self.attributes_id as usize }
+
+    pub fn has_attributes(&self) -> bool { self.attributes_id != 0 }
+
+    pub fn attach_attributes(
+        &mut self,
+        attributes_id: usize) {
+        self.attributes_id = attributes_id as u32;
     }
 }
 

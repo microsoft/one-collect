@@ -201,6 +201,42 @@ impl DataFieldRef {
         }
     }
 
+    /// Tries to retrieve the data that the `DataFieldRef` points to as a u8.
+    ///
+    /// # Parameters
+    /// - `data`: The data from which to retrieve the slice.
+    ///
+    /// # Returns
+    /// - A `Result` that contains the u8 value if successful, or an error if not.
+    pub fn get_u8(
+        &self,
+        data: &[u8]) -> Result<u8, anyhow::Error> {
+        let slice = self.get_data(data);
+
+        if slice.is_empty() {
+            anyhow::bail!("No data");
+        }
+
+        Ok(slice[0])
+    }
+
+    /// Tries to retrieve the data that the `DataFieldRef` points to as a u8.
+    ///
+    /// # Parameters
+    /// - `data`: The data from which to retrieve the slice.
+    ///
+    /// # Returns
+    /// - An `Option` that contains the u8 value if successful, or `None` if not.
+    pub fn try_get_u8(
+        &self,
+        data: &[u8]) -> Option<u8> {
+        let slice = self.get_data(data);
+
+        if slice.is_empty() { return None }
+
+        Some(slice[0])
+    }
+
     /// Resets the `DataField`'s start and end to 0.
     pub fn reset(&self) {
         self.update(0, 0);
@@ -1332,6 +1368,52 @@ impl EventFormat {
         }
     }
 
+    /// Retrieves the value of a specified field from the event data as a 8-bit unsigned integer.
+    ///
+    /// # Parameters
+    ///
+    /// - `field_ref`: A reference to the `EventField` for which to retrieve the data.
+    /// - `data`: The event data from which to retrieve the field value.
+    ///
+    /// # Returns
+    ///
+    /// - A `Result` which is:
+    ///     - `Ok` variant containing the value of the field if it exists and can be read as a 8-bit unsigned integer;
+    ///     - `Err` variant containing an error if the field does not exist or cannot be read as a 8-bit unsigned integer.
+    pub fn get_u8(
+        &self,
+        field_ref: EventFieldRef,
+        data: &[u8]) -> Result<u8, anyhow::Error> {
+        let slice = self.get_data(field_ref, data);
+
+        if slice.is_empty() { anyhow::bail!("No data"); }
+
+        Ok(slice[0])
+    }
+
+    /// Tries to retrieve the value of a specified field from the event data as a 8-bit unsigned integer.
+    ///
+    /// # Parameters
+    ///
+    /// - `field_ref`: A reference to the `EventField` for which to retrieve the data.
+    /// - `data`: The event data from which to retrieve the field value.
+    ///
+    /// # Returns
+    ///
+    /// - An `Option` which is:
+    ///     - `Some` variant containing the value of the field if it exists and can be read as a 8-bit unsigned integer;
+    ///     - `None` if the field does not exist or cannot be read as a 16-bit unsigned integer.
+    pub fn try_get_u8(
+        &self,
+        field_ref: EventFieldRef,
+        data: &[u8]) -> Option<u8> {
+        let slice = self.get_data(field_ref, data);
+
+        if slice.is_empty() { return None; }
+
+        Some(slice[0])
+    }
+
     /// Retrieves the value of a specified field from the event data as a string.
     ///
     /// # Parameters
@@ -1392,6 +1474,7 @@ struct FieldSkip {
 /// `Event` represents a system event in the context of event collection and profiling.
 pub struct Event {
     id: usize,
+    proxy_id: usize,
     name: String,
     flags: u64,
     callbacks: Vec<BoxedCallback>,
@@ -1411,6 +1494,7 @@ impl Event {
         name: String) -> Self {
         Self {
             id,
+            proxy_id: 0,
             name,
             flags: 0,
             callbacks: Vec::new(),
@@ -1491,15 +1575,21 @@ impl Event {
         self.flags & EVENT_FLAG_NO_CALLSTACK != 0
     }
 
-    /// Sets the proxy flag for the event. Use this when events are used for proxy
+    /// Sets the proxy ID and flag for the event. Use this when events are used for proxy
     /// scenarios. The underlying session will not actually enable / add these events.
-    pub fn set_proxy_flag(&mut self) {
+    pub fn set_proxy_id(
+        &mut self,
+        id: usize) {
         self.flags |= EVENT_FLAG_PROXY;
+        self.proxy_id = id;
     }
 
-    /// Checks if the proxy flag is set for the event.
-    pub fn has_proxy_flag(&self) -> bool {
-        self.flags & EVENT_FLAG_PROXY != 0
+    /// Checks if the proxy flag is set for the event. If so, returns the set proxy ID.
+    pub fn get_proxy_id(&self) -> Option<usize> {
+        match self.flags & EVENT_FLAG_PROXY != 0 {
+            true => { Some(self.proxy_id) },
+            false => { None },
+        }
     }
 
     /// Returns a mutable reference to the event format.

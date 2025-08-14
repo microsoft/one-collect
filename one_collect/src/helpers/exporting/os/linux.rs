@@ -646,6 +646,18 @@ impl ExportSamplerOSHooks for ExportSampler {
         Ok(self.os.ancillary.borrow().cpu() as u16)
     }
 
+    fn os_event_version(
+        &self,
+        _data: &EventData) -> anyhow::Result<Option<u16>> {
+        Ok(None)
+    }
+
+    fn os_event_op_code(
+        &self,
+        _data: &EventData) -> anyhow::Result<Option<u16>> {
+        Ok(None)
+    }
+
     fn os_event_callstack(
         &mut self,
         data: &EventData) -> anyhow::Result<()> {
@@ -768,7 +780,7 @@ impl OSExportMachine {
                             data))
                 });
 
-                if event.has_proxy_flag() {
+                if event.get_proxy_id().is_some() {
                     shared_proxy.borrow_mut().add_event(event);
                 } else {
                     /* Add event to session */
@@ -1519,7 +1531,7 @@ mod tests {
             },
             move |tracer| {
                 /* Create default sample */
-                tracer.add_sample(MetricValue::Count(1))
+                tracer.sample_builder().save_value(MetricValue::Count(1))
             });
 
         settings = settings.with_event(
@@ -1531,7 +1543,7 @@ mod tests {
             },
             move |tracer| {
                 /* Create default sample */
-                tracer.add_sample(MetricValue::Count(1))
+                tracer.sample_builder().save_value(MetricValue::Count(1))
             });
 
         let mut builder = RingBufSessionBuilder::new()

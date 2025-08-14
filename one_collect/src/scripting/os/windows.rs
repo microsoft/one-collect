@@ -2,7 +2,7 @@
 // Licensed under the MIT license.
 
 use crate::event::*;
-use crate::etw::Guid;
+use crate::Guid;
 
 use crate::scripting::ScriptEvent;
 

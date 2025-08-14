@@ -2,7 +2,7 @@
 // Licensed under the MIT license.
 
 use crate::event::{Event, EventData};
-use crate::etw::Guid;
+use crate::Guid;
 
 type PidCallback = Box<dyn Fn(&EventData) -> anyhow::Result<i32>>;
 

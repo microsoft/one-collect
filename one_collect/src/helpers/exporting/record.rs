@@ -28,12 +28,15 @@ impl<'a> ExportRecordData<'a> {
     pub fn record_data(&self) -> &'a [u8] { self.record_data }
 }
 
+const EXPORT_RECORD_FLAG_ORIG_DATA: u8 = 1;
+
 #[derive(PartialEq, Default)]
 pub struct ExportRecordType {
     kind: u16,
     id: usize,
     name: String,
     format: EventFormat,
+    flags: u8,
 }
 
 impl ExportRecordType {
@@ -47,7 +50,12 @@ impl ExportRecordType {
             id,
             name,
             format,
+            flags: 0,
         }
+    }
+
+    pub fn is_original_data(&self) -> bool {
+        self.flags & EXPORT_RECORD_FLAG_ORIG_DATA != 0
     }
 
     pub fn from_event(
@@ -58,6 +66,9 @@ impl ExportRecordType {
             id: event.id(),
             name: event.name().to_owned(),
             format: event.format().to_owned(),
+
+            /* Recorded data is from original event data */
+            flags: EXPORT_RECORD_FLAG_ORIG_DATA,
         }
     }
 

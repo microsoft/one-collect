@@ -27,6 +27,9 @@ use crate::Writable;
 use crate::procfs;
 use crate::event::*;
 
+use crate::helpers::dotnet::scripting::*;
+use crate::helpers::dotnet::nettrace;
+
 #[cfg(target_os = "linux")]
 use libc::PROT_EXEC;
 
@@ -621,6 +624,7 @@ fn register_dotnet_tracepoint(
     name: &str,
     user_events: &UserEventsFactory,
     callstacks: bool) -> anyhow::Result<ExportSettings> {
+
     let events = provider.events.clone();
 
     let _ = user_events.create(&DotNetEventDesc::new(name))?;
@@ -633,7 +637,11 @@ fn register_dotnet_tracepoint(
 
     let fmt = event.format();
     let id = fmt.get_field_ref_unchecked("event_id");
+    let version = fmt.get_field_ref_unchecked("version");
     let payload = fmt.get_field_ref_unchecked("payload");
+    let extension = fmt.get_field_ref_unchecked("extension");
+
+    let mut version_lookup = HashMap::new();
 
     let settings = settings.with_event(
         event,
@@ -644,6 +652,9 @@ fn register_dotnet_tracepoint(
             let fmt = trace.data().format();
             let data = trace.data().event_data();
 
+            /* Read DotNet ABI Version */
+            let version = fmt.get_u8(version, data)?;
+
             /* Read DotNet ID */
             let id = fmt.get_u16(id, data)? as usize;
 
@@ -652,12 +663,46 @@ fn register_dotnet_tracepoint(
 
             /* Lookup DotNet Event from ID */
             if let Some(events) = events.borrow().get(&id) {
+                /* Lookups within a provider is PID and Event ID */
+                let pid = trace.pid()?;
+                let key = (pid as u64) << 32 | id as u64;
+
+                match version {
+                    1 => {
+                        /* Decode extension */
+                        let extension_range = fmt.get_rel_loc(extension, data)?;
+                        let extension = &data[extension_range];
+
+                        nettrace::parse_event_extension_v1(
+                            extension,
+                            |label, data| {
+                                if label == nettrace::LABEL_META {
+                                    let meta = nettrace::MetaParserV5::parse(data);
+
+                                    /* Save version, if any by PID + Event */
+                                    if let Some(version) = meta.version() {
+                                        version_lookup.insert(key, version);
+                                    }
+                                }
+                            });
+                    },
+                    _ => {},
+                }
+
+                /* Provide a version if we have one */
+                if let Some(version) = version_lookup.get(&key) {
+                    trace.override_version(Some(*version as u16));
+                }
+
                 /* Proxy DotNet data to all proxy events */
                 for event in events {
                     trace.proxy_event_data(
                         event.proxy_id,
                         payload_range.clone());
                 }
+
+                /* Always clear version override */
+                trace.override_version(None);
             }
 
             Ok(())
@@ -667,12 +712,12 @@ fn register_dotnet_tracepoint(
 }
 
 pub(crate) struct OSDotNetEventFactory {
-    proxy: Box<dyn FnMut(String) -> Option<Event>>,
+    proxy: Box<dyn FnMut(String, usize) -> Option<Event>>,
     providers: Writable<HashMap<String, LinuxDotNetProvider>>,
 }
 
 impl OSDotNetEventFactory {
-    pub fn new(proxy: impl FnMut(String) -> Option<Event> + 'static) -> Self {
+    pub fn new(proxy: impl FnMut(String, usize) -> Option<Event> + 'static) -> Self {
         Self {
             proxy: Box::new(proxy),
             providers: Writable::new(HashMap::new()),
@@ -734,15 +779,13 @@ impl OSDotNetEventFactory {
 
                 /* Check proxy events */
                 settings.for_each_event(|event| {
-                    if !event.has_proxy_flag() {
-                        return;
-                    }
-
-                    if wanted_ids.contains(&event.id()) {
-                        if event.has_no_callstack_flag() {
-                            no_callstacks.insert(event.id());
-                        } else {
-                            callstacks.insert(event.id());
+                    if let Some(proxy_id) = event.get_proxy_id() {
+                        if wanted_ids.contains(&proxy_id) {
+                            if event.has_no_callstack_flag() {
+                                no_callstacks.insert(proxy_id);
+                            } else {
+                                callstacks.insert(proxy_id);
+                            }
                         }
                     }
                 });
@@ -869,7 +912,7 @@ impl OSDotNetEventFactory {
                         let filename = fmt.get_str(filename, data)?;
 
                         /* Check if dotnet process */
-                        if filename == "/memfd:doublemapper" {
+                        if filename.starts_with("/memfd:doublemapper") {
                             /* Attempt to track, will check diag sock, etc */
                             tracker.borrow_mut().track(pid)?;
                         }
@@ -897,14 +940,22 @@ impl OSDotNetEventFactory {
         keyword: u64,
         level: u8,
         id: usize,
-        name: String) -> anyhow::Result<Event> {
-        let event = match (self.proxy)(name) {
+        mut name: String) -> anyhow::Result<Event> {
+        let provider = guid_from_provider(provider_name)?;
+        name = event_full_name(provider_name, provider, &name);
+
+        let event = match (self.proxy)(name, id) {
             Some(event) => { event },
             None => { anyhow::bail!("Event couldn't be created with proxy"); },
         };
 
+        let proxy_id = match event.get_proxy_id() {
+            Some(proxy_id) => { proxy_id },
+            None => { anyhow::bail!("Proxy events must have a proxy ID set."); },
+        };
+
         let dotnet_event = LinuxDotNetEvent {
-            proxy_id: event.id(),
+            proxy_id,
             keyword,
             level,
         };
@@ -974,7 +1025,7 @@ impl DotNetHelp for RingBufSessionBuilder {
                         let filename = fmt.get_str(filename, data)?;
 
                         /* Check if dotnet process */
-                        if filename == "/memfd:doublemapper" {
+                        if filename.starts_with("/memfd:doublemapper") {
                             /* Attempt to track, will check diag sock, etc */
                             perfmap.borrow_mut().track(pid)?;
                         }

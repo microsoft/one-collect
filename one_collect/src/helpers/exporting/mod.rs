@@ -2,6 +2,7 @@
 // Licensed under the MIT license.
 
 use std::collections::{HashMap, HashSet};
+use std::collections::hash_map::Entry::{Vacant, Occupied};
 use std::collections::hash_map::{Values, ValuesMut};
 use std::time::Duration;
 use std::path::Path;
@@ -30,6 +31,12 @@ pub mod record;
 use record::ExportRecordType;
 use record::ExportRecordData;
 use record::ExportRecord;
+
+pub mod attributes;
+use attributes::ExportAttributes;
+use attributes::ExportAttributePair;
+use attributes::ExportAttributeWalker;
+use attributes::ExportAttributeValue;
 
 pub mod span;
 use span::ExportSpan;
@@ -118,14 +125,21 @@ impl ExportProxy {
     fn add_event(
         &mut self,
         event: Event) {
-        self.events.insert(event.id(), event);
+        if let Some(proxy_id) = event.get_proxy_id() {
+            self.events.insert(proxy_id, event);
+        }
     }
 }
 
 struct ExportSampler {
     exporter: Writable<ExportMachine>,
+    os_attributes_cache: HashMap<u32, usize>,
+    version_str_id: usize,
+    op_code_str_id: usize,
     frames: Vec<u64>,
     os: OSExportSampler,
+    version_override: Option<u16>,
+    op_code_override: Option<u16>,
 }
 
 pub trait ExportSamplerOSHooks {
@@ -148,16 +162,104 @@ pub trait ExportSamplerOSHooks {
     fn os_event_cpu(
         &self,
         data: &EventData) -> anyhow::Result<u16>;
+
+    fn os_event_version(
+        &self,
+        data: &EventData) -> anyhow::Result<Option<u16>>;
+
+    fn os_event_op_code(
+        &self,
+        data: &EventData) -> anyhow::Result<Option<u16>>;
 }
 
 impl ExportSampler {
     fn new(
         exporter: &Writable<ExportMachine>,
         os: OSExportSampler) -> Self {
+        let version_str_id = exporter.borrow_mut().intern("Version");
+        let op_code_str_id = exporter.borrow_mut().intern("OpCode");
+
         Self {
             exporter: exporter.clone(),
             os,
             frames: Vec::new(),
+            version_override: None,
+            op_code_override: None,
+            os_attributes_cache: HashMap::new(),
+            version_str_id,
+            op_code_str_id,
+        }
+    }
+
+    fn default_os_attributes(
+        &mut self,
+        data: &EventData) -> anyhow::Result<usize> {
+        let version = self.version(data)?.unwrap_or(0);
+        let op_code = self.op_code(data)?.unwrap_or(0);
+        let lookup_id = (version as u32) << 16 | op_code as u32;
+
+        /* Lookup attributes by version + op_code pair */
+        let attributes_id = if lookup_id != 0 {
+            match self.os_attributes_cache.entry(lookup_id) {
+                Vacant(entry) => {
+                    /* New pair, get new attribute ID for this */
+                    let mut attributes = ExportAttributes::default();
+
+                    attributes.push(
+                        ExportAttributePair::new(
+                            self.version_str_id,
+                            ExportAttributeValue::Value(version as u64)));
+
+                    attributes.push(
+                        ExportAttributePair::new(
+                            self.op_code_str_id,
+                            ExportAttributeValue::Value(op_code as u64)));
+
+                    let id = self.exporter.borrow_mut().push_unique_attributes(attributes);
+
+                    entry.insert(id);
+
+                    id
+                },
+                Occupied(entry) => {
+                    /* Existing pair, use existing ID */
+                    *entry.get()
+                },
+            }
+        } else {
+            0
+        };
+
+        Ok(attributes_id)
+    }
+
+    fn override_version(
+        &mut self,
+        version: Option<u16>) {
+        self.version_override = version;
+    }
+
+    fn override_op_code(
+        &mut self,
+        op_code: Option<u16>) {
+        self.op_code_override = op_code;
+    }
+
+    fn version(
+        &self,
+        data: &EventData) -> anyhow::Result<Option<u16>> {
+        match self.version_override {
+            Some(version) => Ok(Some(version)),
+            None => self.os_event_version(data),
+        }
+    }
+
+    fn op_code(
+        &self,
+        data: &EventData) -> anyhow::Result<Option<u16>> {
+        match self.op_code_override {
+            Some(op_code) => Ok(Some(op_code)),
+            None => self.os_event_op_code(data),
         }
     }
 
@@ -204,64 +306,30 @@ impl ExportSampler {
             record_data)
     }
 
-    fn add_sample(
-        &mut self,
-        data: &EventData,
-        value: MetricValue,
-        kind: u16) -> anyhow::Result<()> {
-        self.frames.clear();
-
-        /* OS Specific callstack hook */
-        self.os_event_callstack(data)?;
-
-        let time = self.os_event_time(data)?;
-        let pid = self.os_event_pid(data)?;
-        let tid = self.os_event_tid(data)?;
-        let cpu = self.os_event_cpu(data)?;
-
-        self.exporter.borrow_mut().add_sample(
-            time,
-            value,
-            pid,
-            tid,
-            cpu,
-            kind,
-            &self.frames)
-    }
-
-    fn add_sample_with_record(
-        &mut self,
-        data: &EventData,
-        value: MetricValue,
-        kind: u16,
-        record_type: u16,
-        record_data: &[u8]) -> anyhow::Result<()> {
-        self.frames.clear();
-
-        /* OS Specific callstack hook */
-        self.os_event_callstack(data)?;
-
-        let time = self.os_event_time(data)?;
-        let pid = self.os_event_pid(data)?;
-        let tid = self.os_event_tid(data)?;
-        let cpu = self.os_event_cpu(data)?;
-
-        self.exporter.borrow_mut().add_sample_with_record(
-            time,
-            value,
-            pid,
-            tid,
-            cpu,
-            kind,
-            record_type,
-            record_data,
-            &self.frames)
-    }
-
     fn add_span(
         &mut self,
         span: ExportSpan) -> anyhow::Result<MetricValue> {
         Ok(self.exporter.borrow_mut().span_to_value(span))
+    }
+
+    pub fn label_attribute(
+        &mut self,
+        name: &str,
+        label: &str) -> ExportAttributePair {
+        self.exporter.borrow_mut().label_attribute(name, label)
+    }
+
+    pub fn value_attribute(
+        &mut self,
+        name: &str,
+        value: u64) -> ExportAttributePair {
+        self.exporter.borrow_mut().value_attribute(name, value)
+    }
+
+    fn push_unique_attributes(
+        &mut self,
+        attributes: ExportAttributes) -> usize {
+        self.exporter.borrow_mut().push_unique_attributes(attributes)
     }
 }
 
@@ -339,6 +407,152 @@ impl<'a> ExportBuiltContext<'a> {
     }
 }
 
+pub struct ExportSampleBuilder<'a> {
+    context: &'a ExportTraceContext<'a>,
+    kind: u16,
+    tid: Option<u32>,
+    pid: Option<u32>,
+    record_type: u16,
+    record_data: Option<&'a [u8]>,
+    attributes_id: Option<usize>,
+    event_data: Option<std::ops::Range<usize>>,
+}
+
+impl<'a> ExportSampleBuilder<'a> {
+    pub fn with_tid(
+        &mut self,
+        tid: u32) -> &mut Self {
+        self.tid = Some(tid);
+        self
+    }
+
+    pub fn with_pid(
+        &mut self,
+        pid: u32) -> &mut Self {
+        self.pid = Some(pid);
+        self
+    }
+
+    pub fn with_kind(
+        &mut self,
+        kind: u16) -> &mut Self {
+        self.kind = kind;
+        self
+    }
+
+    pub fn with_record_type(
+        &mut self,
+        record_type: u16) -> &mut Self {
+        self.record_type = record_type;
+        self
+    }
+
+    pub fn with_record_data(
+        &mut self,
+        record_data: &'a [u8]) -> &mut Self {
+        self.record_data = Some(record_data);
+        self
+    }
+
+    pub fn with_record_event_data(
+        &mut self,
+        range: std::ops::Range<usize>) -> &mut Self {
+        self.event_data = Some(range);
+        self
+    }
+
+    pub fn with_record_all_event_data(
+        &mut self) -> &mut Self {
+        let event_data_len = self.context.data.event_data().len();
+
+        self.with_record_event_data(0..event_data_len)
+    }
+
+    pub fn with_attributes(
+        &mut self,
+        attributes_id: usize) -> &mut Self {
+        if attributes_id != 0 {
+            self.attributes_id = Some(attributes_id);
+        }
+
+        self
+    }
+
+    pub fn record_data(&self) -> Option<(u16, &'a [u8])> {
+        match self.record_data {
+            Some(record_data) => {
+                Some((self.record_type, record_data))
+            },
+            None => {
+                match &self.event_data {
+                    Some(range) => {
+                        Some((
+                            self.record_type,
+                            &self.context.data.event_data()[range.start..range.end]))
+                    },
+                    None => None,
+                }
+            },
+        }
+    }
+
+    pub fn tid(&self) -> anyhow::Result<u32> {
+        match self.tid {
+            Some(tid) => Ok(tid),
+            None => self.context.tid(),
+        }
+    }
+
+    pub fn pid(&self) -> anyhow::Result<u32> {
+        match self.pid {
+            Some(pid) => Ok(pid),
+            None => self.context.pid(),
+        }
+    }
+
+    pub fn save_span(
+        &self,
+        span: ExportSpan) -> anyhow::Result<()> {
+        let span = self.context.sampler.borrow_mut().add_span(span)?;
+
+        self.save_value(span)
+    }
+
+    pub fn save_value(
+        &self,
+        value: MetricValue) -> anyhow::Result<()> {
+        let tid = self.tid()?;
+        let pid = self.pid()?;
+
+        let mut sampler = self.context.sampler.borrow_mut();
+
+        let mut sample = sampler.make_sample(
+            self.context.data,
+            value,
+            tid,
+            self.kind)?;
+
+        if let Some(attributes_id) = self.attributes_id {
+            sample.attach_attributes(attributes_id);
+        }
+
+        match self.record_data() {
+            Some((record_type, record_data)) => {
+                sampler.add_custom_sample_with_record(
+                    pid,
+                    sample,
+                    record_type,
+                    record_data)
+            },
+            None => {
+                sampler.add_custom_sample(
+                    pid,
+                    sample)
+            }
+        }
+    }
+}
+
 pub struct ExportTraceContext<'a> {
     sampler: Writable<ExportSampler>,
     proxy: Writable<ExportProxy>,
@@ -381,6 +595,14 @@ impl<'a> ExportTraceContext<'a> {
         self.sampler.borrow().os_event_tid(self.data)
     }
 
+    pub fn op_code(&self) -> anyhow::Result<Option<u16>> {
+        self.sampler.borrow().op_code(self.data)
+    }
+
+    pub fn version(&self) -> anyhow::Result<Option<u16>> {
+        self.sampler.borrow().version(self.data)
+    }
+
     pub fn proxy_data(
         &mut self,
         event_id: usize,
@@ -402,128 +624,53 @@ impl<'a> ExportTraceContext<'a> {
             &self.data.event_data()[range]);
     }
 
-    pub fn add_sample_with_kind(
+    pub fn override_version(
         &mut self,
-        value: MetricValue,
-        kind: u16) -> anyhow::Result<()> {
-        self.sampler.borrow_mut().add_sample(
-            self.data,
-            value,
-            kind)
+        version: Option<u16>) {
+        self.sampler.borrow_mut().override_version(version);
     }
 
-    pub fn make_sample_with_kind(
+    pub fn override_op_code(
         &mut self,
-        value: MetricValue,
-        tid: u32,
-        kind: u16) -> anyhow::Result<ExportProcessSample> {
-        self.sampler.borrow_mut().make_sample(
-            self.data,
-            value,
-            tid,
-            kind)
+        op_code: Option<u16>) {
+        self.sampler.borrow_mut().override_op_code(op_code);
     }
 
-    pub fn make_sample(
-        &mut self,
-        value: MetricValue,
-        tid: u32) -> anyhow::Result<ExportProcessSample> {
-        self.make_sample_with_kind(
-            value,
-            tid,
-            self.sample_kind)
+    pub fn default_os_attributes(&mut self) -> anyhow::Result<usize> {
+        self.sampler.borrow_mut().default_os_attributes(self.data)
     }
 
-    pub fn add_custom_sample(
-        &mut self,
-        pid: u32,
-        sample: ExportProcessSample) -> anyhow::Result<()> {
-        self.sampler.borrow_mut().add_custom_sample(
-            pid,
-            sample)
+    pub fn sample_builder(&mut self) -> ExportSampleBuilder {
+        ExportSampleBuilder {
+            context: self,
+            tid: None,
+            pid: None,
+            kind: self.sample_kind,
+            record_type: self.record_type,
+            record_data: None,
+            attributes_id: None,
+            event_data: None,
+        }
     }
 
-    pub fn add_custom_sample_with_record(
+    pub fn label_attribute(
         &mut self,
-        pid: u32,
-        sample: ExportProcessSample,
-        record_data: &[u8]) -> anyhow::Result<()> {
-        self.sampler.borrow_mut().add_custom_sample_with_record(
-            pid,
-            sample,
-            self.record_type,
-            record_data)
+        name: &str,
+        label: &str) -> ExportAttributePair {
+        self.sampler.borrow_mut().label_attribute(name, label)
     }
 
-    pub fn add_pid_sample(
+    pub fn value_attribute(
         &mut self,
-        pid: u32,
-        tid: u32,
-        value: MetricValue) -> anyhow::Result<()> {
-        let sample = self.make_sample_with_kind(
-            value,
-            tid,
-            self.sample_kind)?;
-
-        self.sampler.borrow_mut().add_custom_sample(
-            pid,
-            sample)
+        name: &str,
+        value: u64) -> ExportAttributePair {
+        self.sampler.borrow_mut().value_attribute(name, value)
     }
 
-    pub fn add_pid_sample_with_record(
+    pub fn push_unique_attributes(
         &mut self,
-        pid: u32,
-        tid: u32,
-        value: MetricValue,
-        record_data: &[u8]) -> anyhow::Result<()> {
-        let sample = self.make_sample_with_kind(
-            value,
-            tid,
-            self.sample_kind)?;
-
-        self.sampler.borrow_mut().add_custom_sample_with_record(
-            pid,
-            sample,
-            self.record_type,
-            record_data)
-    }
-
-    pub fn add_sample(
-        &mut self,
-        value: MetricValue) -> anyhow::Result<()> {
-        self.add_sample_with_kind(
-            value,
-            self.sample_kind)
-    }
-
-    pub fn add_sample_with_event_data(
-        &mut self,
-        value: MetricValue,
-        range: std::ops::Range<usize>) -> anyhow::Result<()> {
-        self.sampler.borrow_mut().add_sample_with_record(
-            self.data,
-            value,
-            self.sample_kind,
-            self.record_type,
-            &self.data.event_data()[range])
-    }
-
-    pub fn add_sample_with_record(
-        &mut self,
-        value: MetricValue,
-        record_data: &[u8]) -> anyhow::Result<()> {
-        self.sampler.borrow_mut().add_sample_with_record(
-            self.data,
-            value,
-            self.sample_kind,
-            self.record_type,
-            record_data)
-    }
-
-    pub fn add_span(
-        &mut self,
-        span: ExportSpan) -> anyhow::Result<MetricValue> {
-        self.sampler.borrow_mut().add_span(span)
+        attributes: ExportAttributes) -> usize {
+        self.sampler.borrow_mut().push_unique_attributes(attributes)
     }
 }
 
@@ -707,11 +854,12 @@ impl ExportSettings {
 
     pub fn new_proxy_event(
         &mut self,
-        name: String) -> Event {
+        name: String,
+        id: usize) -> Event {
         self.proxy_id += 1;
 
-        let mut event = Event::new(self.proxy_id, name);
-        event.set_proxy_flag();
+        let mut event = Event::new(id, name);
+        event.set_proxy_id(self.proxy_id);
 
         event
     }
@@ -811,6 +959,7 @@ pub struct ExportMachine {
     pub(crate) os: OSExportMachine,
     procs: HashMap<u32, ExportProcess>,
     records: Vec<ExportRecord>,
+    attributes: Vec<ExportAttributes>,
     spans: Vec<ExportSpan>,
     record_data: Vec<u8>,
     module_metadata: ModuleMetadataLookup,
@@ -873,6 +1022,7 @@ impl ExportMachine {
         let callstacks = InternedCallstacks::new(settings.callstack_buckets);
         let sample_hooks = settings.sample_hooks.take().unwrap_or_default();
         let mut records = Vec::new();
+        let mut attributes = Vec::new();
         let mut record_types = Vec::new();
 
         /* Ensure string ID 0 is always empty */
@@ -882,6 +1032,9 @@ impl ExportMachine {
         records.push(ExportRecord::default());
         record_types.push(ExportRecordType::default());
 
+        /* Ensure attribute ID 0 is always empty/default */
+        attributes.push(ExportAttributes::default());
+
         Self {
             settings,
             strings,
@@ -889,6 +1042,7 @@ impl ExportMachine {
             os: OSExportMachine::new(),
             procs: HashMap::new(),
             records,
+            attributes,
             spans: Vec::new(),
             record_data: Vec::new(),
             module_metadata: ModuleMetadataLookup::new(),
@@ -1058,6 +1212,36 @@ impl ExportMachine {
 
     pub fn processes(&self) -> Values<u32, ExportProcess> { self.procs.values() }
 
+    pub fn attributes(
+        &self,
+        attributes_id: usize,
+        walker: &mut ExportAttributeWalker) {
+        walker.start();
+
+        walker.push_id(attributes_id);
+
+        while let Some(id) = walker.pop_id() {
+            if id <= self.attributes.len() {
+                let attributes = &self.attributes[id];
+
+                walker.push_attributes(attributes.attributes());
+
+                for associated_id in attributes.associated_ids() {
+                    walker.push_id(*associated_id);
+                }
+            }
+        }
+    }
+
+    pub fn sample_attributes(
+        &self,
+        sample: &ExportProcessSample,
+        walker: &mut ExportAttributeWalker) {
+        self.attributes(
+            sample.attributes_id(),
+            walker);
+    }
+
     pub fn sample_record_data(
         &self,
         sample: &ExportProcessSample) -> ExportRecordData {
@@ -1133,6 +1317,38 @@ impl ExportMachine {
 
     pub fn processes_mut(&mut self) -> ValuesMut<u32, ExportProcess> {
         self.procs.values_mut()
+    }
+
+    pub fn push_unique_attributes(
+        &mut self,
+        mut attributes: ExportAttributes) -> usize {
+        let id = self.attributes.len();
+
+        attributes.shrink();
+
+        self.attributes.push(attributes);
+
+        id
+    }
+
+    pub fn label_attribute(
+        &mut self,
+        name: &str,
+        label: &str) -> ExportAttributePair {
+        ExportAttributePair::new_label(
+            name,
+            label,
+            &mut self.strings)
+    }
+
+    pub fn value_attribute(
+        &mut self,
+        name: &str,
+        value: u64) -> ExportAttributePair {
+        ExportAttributePair::new_value(
+            name,
+            value,
+            &mut self.strings)
     }
 
     pub fn record_type(
@@ -1696,9 +1912,9 @@ mod tests {
         let mut settings = ExportSettings::default();
         let count = Writable::new(0usize);
 
-        let mut first = settings.new_proxy_event("1".into());
-        let mut second = settings.new_proxy_event("2".into());
-        let mut third = settings.new_proxy_event("3".into());
+        let mut first = settings.new_proxy_event("1".into(), 1);
+        let mut second = settings.new_proxy_event("2".into(), 2);
+        let mut third = settings.new_proxy_event("3".into(), 3);
 
         let e_count = count.clone();
         first.add_callback(move |data| {
@@ -1767,5 +1983,67 @@ mod tests {
         context.proxy_event_data(3, 2..3);
 
         assert_eq!(3, *count.borrow());
+    }
+
+    #[test]
+    fn attributes() {
+        let settings = ExportSettings::default();
+        let mut machine = ExportMachine::new(settings);
+
+        let mut frames = Vec::new();
+
+        let mut sample = machine.make_sample(
+            0,
+            MetricValue::Count(1),
+            0,
+            0,
+            0,
+            &mut frames);
+
+        let mut walker = ExportAttributeWalker::default();
+
+        /* Ensure no attached attributes gives back nothing */
+        machine.sample_attributes(&sample, &mut walker);
+        assert!(walker.attributes().is_empty());
+
+        /* Ensure attached attributes gives back values */
+        let mut sample_attributes = ExportAttributes::default();
+        sample_attributes.push(machine.label_attribute("Parent", "true"));
+
+        let attribute_id = machine.push_unique_attributes(sample_attributes);
+        sample.attach_attributes(attribute_id);
+
+        machine.sample_attributes(&sample, &mut walker);
+        assert_eq!(1, walker.attributes().len());
+
+        /* Ensure associated attributes gives back values */
+        let mut sample_attributes = ExportAttributes::default();
+        sample_attributes.push(machine.label_attribute("Child", "true"));
+        sample_attributes.push_association(attribute_id);
+
+        let mut sample = machine.make_sample(
+            0,
+            MetricValue::Count(1),
+            0,
+            0,
+            0,
+            &mut frames);
+
+        let attribute_id = machine.push_unique_attributes(sample_attributes);
+        sample.attach_attributes(attribute_id);
+
+        machine.sample_attributes(&sample, &mut walker);
+        let attributes = walker.attributes();
+        assert_eq!(2, attributes.len());
+
+        let parent_str_id = machine.intern("Parent");
+        let child_str_id = machine.intern("Child");
+        let true_str_id = machine.intern("true");
+
+        assert_eq!(child_str_id, attributes[0].name());
+        assert_eq!(true_str_id, attributes[0].label().expect("Should be label attribute"));
+
+        assert_eq!(parent_str_id, attributes[1].name());
+        assert_eq!(true_str_id, attributes[1].label().expect("Should be label attribute"));
     }
 }

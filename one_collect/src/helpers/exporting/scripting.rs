@@ -20,10 +20,11 @@ impl UniversalExporterSwapper {
 
     pub fn new_proxy_event(
         &mut self,
-        name: String) -> Option<Event> {
+        name: String,
+        id: usize) -> Option<Event> {
         if let Some(exporter) = self.exporter.as_mut() {
             if let Some(settings) = exporter.settings_mut() {
-                return Some(settings.new_proxy_event(name));
+                return Some(settings.new_proxy_event(name, id));
             }
         }
 
@@ -422,22 +423,16 @@ macro_rules! apply_timeline {
                                         record_closure(trace, &mut values.record);
                                     }
 
-                                    /* Only add span after filtering */
-                                    let value = trace.add_span(values.span)?;
-
-                                    trace.add_pid_sample_with_record(
-                                        values.pid,
-                                        values.tid,
-                                        value,
-                                        &values.record)?;
+                                    trace.sample_builder()
+                                        .with_pid(values.pid)
+                                        .with_tid(values.tid)
+                                        .with_record_data(&values.record)
+                                        .save_span(values.span)?;
                                 } else {
-                                    /* Only add span after filtering */
-                                    let value = trace.add_span(values.span)?;
-
-                                    trace.add_pid_sample(
-                                        values.pid,
-                                        values.tid,
-                                        value)?;
+                                    trace.sample_builder()
+                                        .with_pid(values.pid)
+                                        .with_tid(values.tid)
+                                        .save_span(values.span)?;
                                 }
                             }
                         }
@@ -896,11 +891,13 @@ impl ScriptedUniversalExporter {
                         Ok(())
                     },
                     move |trace| {
-                        let event_data = trace.data().event_data();
+                        let attributes = trace.default_os_attributes()?;
 
-                        trace.add_sample_with_event_data(
-                            MetricValue::Count(1),
-                            0..event_data.len())
+                        trace
+                            .sample_builder()
+                            .with_attributes(attributes)
+                            .with_record_all_event_data()
+                            .save_value(MetricValue::Count(1))
                     });
             } else {
                 return Err("Event has already been used.".into());
@@ -957,11 +954,17 @@ impl ScriptedUniversalExporter {
                             let sample_value = get_metric(sample_data)?;
 
                             if record_data {
-                                trace.add_sample_with_event_data(
-                                    sample_value,
-                                    0..event_data.len())
+                                let attributes = trace.default_os_attributes()?;
+
+                                trace
+                                    .sample_builder()
+                                    .with_attributes(attributes)
+                                    .with_record_all_event_data()
+                                    .save_value(sample_value)
                             } else {
-                                trace.add_sample(sample_value)
+                                trace
+                                    .sample_builder()
+                                    .save_value(sample_value)
                             }
                         });
                 } else {
