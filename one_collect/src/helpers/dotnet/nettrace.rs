@@ -10,12 +10,23 @@ pub const LABEL_META: u8 = 1;
 pub const LABEL_ACTIVITY: u8 = 2;
 pub const LABEL_RELATED_ACTIVITY: u8 = 3;
 
+const U32_LEN: usize = 4;
+const U64_LEN: usize = 8;
+const GUID_LEN: usize = 16;
+
 pub fn parse_event_extension_v1(
     data: &[u8],
     mut output: impl FnMut(u8, &[u8])) {
     let mut extension = data;
     let mut count = 0;
 
+    /*
+     * We only support 3 label types right now. This data comes
+     * from untrusted sources. Ensure data won't panic (getting
+     * a slice by invalid/out-of-range index will panic) and
+     * also ensure we don't get more labels than we support.
+     * This ensures we cannot be DOS'd, etc. by rogue processes
+     */
     while extension.len() > 1 && count < 3 {
         let label = extension[0];
         extension = &extension[1..];
@@ -23,36 +34,50 @@ pub fn parse_event_extension_v1(
         match label {
             LABEL_META => {
                 /* Event Metadata */
-                if extension.len() < 4 { break; }
+
+                /* Enough space for u32 */
+                if extension.len() < U32_LEN { break; }
 
                 let len = u32::from_le_bytes(
-                    extension[0..4].try_into().unwrap()) as usize;
+                    extension[0..U32_LEN].try_into().unwrap()) as usize;
 
-                extension = &extension[4..];
+                /* Advance past u32 */
+                extension = &extension[U32_LEN..];
 
+                /* Ensure read length is valid */
                 if extension.len() < len { break; }
 
-                output(1, &extension[0..len]);
+                /* Output */
+                output(LABEL_META, &extension[0..len]);
 
+                /* Advance past metadata */
                 extension = &extension[len..];
             },
 
             LABEL_ACTIVITY => {
                 /* Activity Id */
-                if extension.len() < 16 { break; }
 
-                output(2, &extension[0..16]);
+                /* Enough space for Guid */
+                if extension.len() < GUID_LEN { break; }
 
-                extension = &extension[16..];
+                /* Output */
+                output(LABEL_ACTIVITY, &extension[0..GUID_LEN]);
+
+                /* Advance past Guid */
+                extension = &extension[GUID_LEN..];
             },
 
             LABEL_RELATED_ACTIVITY => {
                 /* Related Activity Id */
-                if extension.len() < 16 { break; }
 
-                output(3, &extension[0..16]);
+                /* Enough space for Guid */
+                if extension.len() < GUID_LEN { break; }
 
-                extension = &extension[16..];
+                /* Output */
+                output(LABEL_RELATED_ACTIVITY, &extension[0..GUID_LEN]);
+
+                /* Advance past Guid */
+                extension = &extension[GUID_LEN..];
             },
 
             _ => {
@@ -130,22 +155,22 @@ impl<'a> MetaParserV5<'a> {
     }
 
     fn read_int(data: &[u8]) -> Option<u32> {
-        if data.len() < 4 {
+        if data.len() < U32_LEN {
             None
         } else {
-            Some(u32::from_le_bytes(data[0..4].try_into().unwrap()))
+            Some(u32::from_le_bytes(data[0..U32_LEN].try_into().unwrap()))
         }
     }
 
     fn read_long(data: &[u8]) -> Option<u64> {
-        if data.len() < 8 {
+        if data.len() < U64_LEN {
             None
         } else {
-            Some(u64::from_le_bytes(data[0..8].try_into().unwrap()))
+            Some(u64::from_le_bytes(data[0..U64_LEN].try_into().unwrap()))
         }
     }
 
-    fn read_string(data: &[u8]) -> usize {
+    fn read_string_len(data: &[u8]) -> usize {
         let mut len = 0;
         let chunks = data.chunks_exact(2);
 
@@ -172,24 +197,24 @@ impl<'a> MetaParserV5<'a> {
         let mut buffer = data;
 
         /* ProviderName */
-        let len = Self::read_string(buffer);
+        let len = Self::read_string_len(buffer);
         let (provider_name, buffer) = Self::advance(buffer, len);
 
         /* EventId */
-        let (event_id, buffer) = Self::advance(buffer, 4);
+        let (event_id, buffer) = Self::advance(buffer, U32_LEN);
 
         /* EventName */
-        let len = Self::read_string(buffer);
+        let len = Self::read_string_len(buffer);
         let (event_name, buffer) = Self::advance(buffer, len);
 
         /* Keywords */
-        let (keywords, buffer) = Self::advance(buffer, 8);
+        let (keywords, buffer) = Self::advance(buffer, U64_LEN);
 
         /* Version */
-        let (version, buffer) = Self::advance(buffer, 4);
+        let (version, buffer) = Self::advance(buffer, U32_LEN);
 
         /* Level */
-        let (level, fields) = Self::advance(buffer, 4);
+        let (level, fields) = Self::advance(buffer, U32_LEN);
 
         Self {
             provider_name,
