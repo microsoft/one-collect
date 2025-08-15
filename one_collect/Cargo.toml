@@ -1,10 +1,10 @@
 [package]
 name = "one_collect"
-description = "Collect a system-wide performance trace."
+description = "Cross-platform library for capturing machine-level traces."
 version = "0.0.0-dev"
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+license = "MIT"
+repository = "https://github.com/microsoft/one-collect"
 
 [features]
 default = ["scripting"]
