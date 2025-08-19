@@ -95,10 +95,13 @@ use one_collect::event::*;
 // Create a perf event for CPU cycles
 let mut event = Event::new(0, "cpu-cycles".to_string());
 
+// Get field references outside the closure for high performance
+let cpu_field_ref = event.format().get_field_ref("cpu").unwrap();
+
 // Register a closure to handle each event
-event.add_callback(|event_data: &EventData| -> anyhow::Result<()> {
+event.add_callback(move |event_data: &EventData| -> anyhow::Result<()> {
     let cpu_id = event_data.format().get_u32(
-        event_data.format().get_field_ref("cpu").unwrap(), 
+        cpu_field_ref, 
         event_data.event_data()
     )?;
     
@@ -137,15 +140,19 @@ event.extension_mut().provider_mut().clone_from(&provider_guid);
 *event.extension_mut().level_mut() = LEVEL_INFORMATION;
 *event.extension_mut().keyword_mut() = 0x10; // Process keyword
 
+// Get field references outside the closure for high performance
+let process_id_field_ref = event.format().get_field_ref("ProcessId").unwrap();
+let image_name_field_ref = event.format().get_field_ref("ImageFileName").unwrap();
+
 // Register event handler
-event.add_callback(|event_data: &EventData| -> anyhow::Result<()> {
+event.add_callback(move |event_data: &EventData| -> anyhow::Result<()> {
     let process_id = event_data.format().get_u32(
-        event_data.format().get_field_ref("ProcessId").unwrap(),
+        process_id_field_ref,
         event_data.event_data()
     )?;
     
     let image_name = event_data.format().get_str(
-        event_data.format().get_field_ref("ImageFileName").unwrap(),
+        image_name_field_ref,
         event_data.event_data()
     )?;
     
