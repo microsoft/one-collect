@@ -22,6 +22,10 @@ Custom unwinders, if required, can be built and utilized using the same pipeline
 Our goal is to support others to consume, build, and contribute the latest file formats and technologies in a scalable
 and composable way.
 
+## Pre-Release Software
+
+This project is currently in a pre-release mode.  It is expected that there may be breaking API and behavioral changes.  We expect this to stabilize before a version 1.0 release.
+
 ## Getting started
 
 If you are simply interested in a common way to consume events and profiling via several different formats without major
