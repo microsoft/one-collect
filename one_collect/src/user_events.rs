@@ -96,7 +96,7 @@ impl UserEvent {
 
     fn register(&mut self) -> Result<()> {
         let name_args = CString::new(self.descr.as_str())?;
-        let reg = UserReg {
+        let mut reg = UserReg {
             size: mem::size_of::<UserReg>() as u32,
             enable_bit: 0,
             enable_size: 4,
@@ -107,7 +107,7 @@ impl UserEvent {
         };
 
         let ret = unsafe {
-            libc::ioctl(self.user_event_data.as_raw_fd(), DIAG_IOCSREG, &reg)
+            libc::ioctl(self.user_event_data.as_raw_fd(), DIAG_IOCSREG, &mut reg)
         };
 
         if ret < 0 {
@@ -386,9 +386,13 @@ mod tests {
         let tracefs = TraceFS::open().unwrap();
         let factory = tracefs.user_events_factory().unwrap();
         let mut events: Vec<Box<UserEvent>> = vec![];
-        for i in 0..u32::MAX - 2 {
+        /*
+         * In theory you can have up to 2^16 events on the system.
+         * However, we only need to test a reasonable amount.
+         */
+        for i in 0..1024 {
             let event_descr = RawEventDesc::new(
-                format!("test_user_event{}", i).as_str(),
+                format!("test_max_user_event{}", i).as_str(),
                 "u32 num");
             let event = factory.create(&event_descr).unwrap();
             events.push(event);
