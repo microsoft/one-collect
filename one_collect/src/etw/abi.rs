@@ -757,6 +757,8 @@ impl TraceSession {
 
     pub fn handle(&self) -> u64 { self.handle }
 
+    pub fn id(&self) -> u64 { self.properties.Wnode.HistoricalContext }
+
     pub fn start(
         &mut self) -> anyhow::Result<()> {
         let trace_name = wide_string(&self.name);

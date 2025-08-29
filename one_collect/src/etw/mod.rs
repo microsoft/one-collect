@@ -237,14 +237,20 @@ impl ProviderEvents {
 
 pub struct SessionCallbackContext {
     handle: u64,
+    id: u64,
 }
 
 impl SessionCallbackContext {
-    fn new(handle: u64) -> Self {
+    fn new(
+        handle: u64,
+        id: u64) -> Self {
         SessionCallbackContext {
             handle,
+            id,
         }
     }
+
+    pub fn id(&self) -> u64 { self.id }
 
     pub fn flush_trace(&self) {
         abi::flush_trace(self.handle);
@@ -907,6 +913,7 @@ impl EtwSession {
         session.start()?;
 
         let handle = session.handle();
+        let id = session.id();
 
         if !self.kernel_callstacks.is_empty() {
             session.enable_kernel_callstacks(&self.kernel_callstacks)?;
@@ -930,7 +937,7 @@ impl EtwSession {
         }
 
         let thread = thread::spawn(move || -> anyhow::Result<()> {
-            let context = SessionCallbackContext::new(handle);
+            let context = SessionCallbackContext::new(handle, id);
 
             /* Enable capture environments first */
             for enable in enabled.values() {
@@ -1074,7 +1081,7 @@ impl EtwSession {
             }
         }));
 
-        let context = SessionCallbackContext::new(0);
+        let context = SessionCallbackContext::new(0, 0);
 
         /* Run stopped hooks */
         if let Some(callbacks) = &self.stopped_callbacks {
