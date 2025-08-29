@@ -3,6 +3,8 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::collections::HashMap;
+use std::collections::hash_map::Entry::{Vacant, Occupied};
 
 use crate::helpers::dotnet::*;
 use crate::helpers::dotnet::universal::UniversalDotNetHelperOSHooks;
@@ -46,19 +48,40 @@ impl DotNetHelperWindowsExt for DotNetHelper {
 }
 
 pub(crate) struct OSDotNetEventFactory {
+    filter_args: HashMap<Guid, String>,
 }
 
 impl OSDotNetEventFactory {
     pub fn new(_proxy: impl FnMut(String, usize) -> Option<Event> + 'static) -> Self {
         Self {
+            filter_args: HashMap::new(),
         }
     }
 
     pub fn hook_to_exporter(
         &mut self,
         exporter: UniversalExporter) -> UniversalExporter {
+        /* TODO: Hookup filter args */
+
         /* No hooks for ETW */
         exporter
+    }
+
+    pub fn set_filter_args(
+        &mut self,
+        provider_name: &str,
+        filter_args: String) -> anyhow::Result<()> {
+        let provider = guid_from_provider(provider_name)?;
+
+        match self.filter_args.entry(provider) {
+            Vacant(entry) => {
+                entry.insert(filter_args);
+                Ok(())
+            },
+            Occupied(_) => {
+                anyhow::bail!("Filter arguments are already specified for this provider.");
+            },
+        }
     }
 
     pub fn new_event(

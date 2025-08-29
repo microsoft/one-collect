@@ -284,6 +284,20 @@ impl DotNetScripting for ScriptedUniversalExporter {
                 Err(e) => { Err(format!("{}", e).into()) }
             }
         });
+
+        let fn_factory = factory.clone();
+
+        self.rhai_engine().register_fn(
+            "set_dotnet_filter_args",
+            move |provider_name: String,
+            filter_args: String| -> Result<(), Box<EvalAltResult>> {
+            match fn_factory.borrow_mut().set_filter_args(
+                &provider_name,
+                filter_args) {
+                Ok(_) => { Ok(()) },
+                Err(e) => { Err(format!("{}", e).into()) }
+            }
+        });
     }
 }
 

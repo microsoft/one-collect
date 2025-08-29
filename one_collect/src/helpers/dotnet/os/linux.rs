@@ -162,6 +162,7 @@ struct UserEventProviderEvents {
     events: Vec<UserEventTracepointEvents>,
     keyword: u64,
     level: u8,
+    filter_args: String,
 }
 
 impl UserEventProviderEvents {
@@ -274,7 +275,7 @@ impl UserEventTracker {
             buffer.extend_from_slice(&provider.keyword.to_le_bytes()); /* keywords */
             buffer.extend_from_slice(&level.to_le_bytes()); /* logLevel */
             Self::write_string(buffer, &name); /* provider_name */
-            Self::write_string(buffer, ""); /* filter_data */
+            Self::write_string(buffer, &provider.filter_args); /* filter_data */
 
             /* event_filter */
             let count = provider.event_count() as u32;
@@ -547,17 +548,31 @@ impl DotNetHelperLinuxExt for DotNetHelper {
 
 struct LinuxDotNetProvider {
     events: Writable<HashMap<usize, Vec<LinuxDotNetEvent>>>,
+    filter_args: Option<String>,
 }
 
 impl Default for LinuxDotNetProvider {
     fn default() -> Self {
         Self {
             events: Writable::new(HashMap::new()),
+            filter_args: None,
         }
     }
 }
 
 impl LinuxDotNetProvider {
+    pub fn set_filter_args(
+        &mut self,
+        filter_args: String) -> anyhow::Result<()> {
+        if self.filter_args.is_some() {
+            anyhow::bail!("Filter arguments are already specified for this provider.");
+        }
+
+        self.filter_args = Some(filter_args);
+
+        Ok(())
+    }
+
     pub fn add_event(
         &mut self,
         dotnet_id: usize,
@@ -800,6 +815,10 @@ impl OSDotNetEventFactory {
                 let mut provider_events = UserEventProviderEvents::default();
                 let mut dotnet_ids = HashSet::new();
 
+                if let Some(filter_args) = &provider.filter_args {
+                    provider_events.filter_args = filter_args.clone();
+                }
+
                 /* Create event for each group, if any */
                 if !no_callstacks.is_empty() {
                     let tracepoint = format!(
@@ -932,6 +951,17 @@ impl OSDotNetEventFactory {
             /* Drop factory: This ensures we keep user_events FD until drop */
             let _ = user_events.borrow_mut().take();
         })
+    }
+
+    pub fn set_filter_args(
+        &mut self,
+        provider_name: &str,
+        filter_args: String) -> anyhow::Result<()> {
+        self.providers
+            .borrow_mut()
+            .entry(provider_name.into())
+            .or_default()
+            .set_filter_args(filter_args)
     }
 
     pub fn new_event(
