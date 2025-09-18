@@ -42,8 +42,11 @@ pub fn enum_uprobes(
     elf::get_section_metadata(&mut file, None, SHT_SYMTAB, &mut sections)?;
     elf::get_section_metadata(&mut file, None, SHT_DYNSYM, &mut sections)?;
 
+    /* Get the load header */
+    let load_header = elf::get_load_header(&mut file)?;
+
     /* Get symbols from those sections and pass to caller */
-    elf::get_symbols(&mut file, &sections, move |symbol| {
+    elf::get_symbols(&mut file, &load_header, &sections, move |symbol| {
         let probe = UProbe::new(
             "Func",
             symbol.name(),

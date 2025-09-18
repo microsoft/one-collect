@@ -22,6 +22,8 @@ pub const SHT_DYNSYM: ElfWord = 11;
 pub const SYMBOL_TYPE_ELF_SYMTAB: u32 = 1;
 pub const SYMBOL_TYPE_ELF_DYNSYM: u32 = 2;
 
+const PAGE_MASK: u64 = 0xFFFFFFFFFFFFF000;
+
 pub struct ElfSymbol {
     start: u64,
     end: u64,
@@ -89,30 +91,30 @@ impl SectionMetadata {
 }
 
 pub struct ElfLoadHeader {
-    file_offset: u64,
-    align: u64
+    p_offset: u64,
+    p_vaddr: u64,
 }
 
 impl ElfLoadHeader {
     pub fn new (
-        file_offset: u64,
-        align: u64) -> Self {
+        p_offset: u64,
+        p_vaddr: u64) -> Self {
         Self {
-            file_offset,
-            align
+            p_offset,
+            p_vaddr,
         }
     }
 
     pub fn default() -> Self {
-        Self::new(0,0)
+        Self::new(0, 0)
     }
 
-    pub fn file_offset(&self) -> u64 {
-        self.file_offset
+    pub fn p_offset(&self) -> u64 {
+        self.p_offset
     }
 
-    pub fn align(&self) -> u64 {
-        self.align
+    pub fn p_vaddr(&self) -> u64 {
+        self.p_vaddr
     }
 
 }
@@ -121,7 +123,6 @@ pub struct ElfSymbolIterator<'a> {
     phantom: PhantomData<&'a ()>,
     reader: BufReader<File>,
     
-    all_sections: Vec<SectionMetadata>,
     sections: Vec<SectionMetadata>,
     section_index: usize,
     section_offsets: Vec<u64>,
@@ -136,16 +137,16 @@ pub struct ElfSymbolIterator<'a> {
 }
 
 impl<'a> ElfSymbolIterator<'a> {
-    pub fn new(file: File) -> Self {
+    pub fn new(file: File, load_header: ElfLoadHeader) -> Self {
+
         Self {
             phantom: std::marker::PhantomData,
             reader: BufReader::new(file),
-            all_sections: Vec::new(),
             sections: Vec::new(),
             section_index: 0,
             section_offsets: Vec::new(),
             section_str_offset: 0,
-            load_header: ElfLoadHeader::default(),
+            load_header: load_header,
             entry_count: 0,
             entry_index: 0,
             reset: true,
@@ -176,11 +177,7 @@ impl<'a> ElfSymbolIterator<'a> {
         // Seek to the beginning of the file in-case this is not the first call to initialize.
         self.reader.seek(SeekFrom::Start(0))?;
 
-        // Get the load offset.
-        self.load_header = get_load_header(&mut self.reader)?;
-
         // Read the section metadata and store it.
-        enum_section_metadata(&mut self.reader, None, None, &mut self.all_sections)?;
         get_section_metadata(&mut self.reader, None, SHT_SYMTAB, &mut self.sections)?;
         get_section_metadata(&mut self.reader, None, SHT_DYNSYM, &mut self.sections)?;
         get_section_offsets(&mut self.reader, None, &mut self.section_offsets)?;
@@ -234,7 +231,6 @@ impl<'a> ElfSymbolIterator<'a> {
             let result = get_symbol(
                 &mut self.reader,
                 section,
-                &self.all_sections,
                 self.entry_index,
                 self.section_str_offset,
                 &self.load_header,
@@ -277,23 +273,20 @@ pub fn get_str(
 
 fn get_symbols32(
     reader: &mut (impl Read + Seek),
+    load_header: &ElfLoadHeader,
     metadata: &SectionMetadata,
-    sections: &Vec<SectionMetadata>,
     count: u64,
     str_offset: u64,
     mut callback: impl FnMut(&ElfSymbol)) -> Result<(), Error> {
     let mut symbol = ElfSymbol::new();
-    
-    let load_header = get_load_header(reader)?;
 
     for i in 0..count {
         if get_symbol32(
             reader,
             metadata,
-            sections,
             i,
             str_offset,
-            &load_header,
+            load_header,
             &mut symbol).is_err() {
                 continue;
         }
@@ -306,40 +299,17 @@ fn get_symbols32(
 
 fn symbol_rva(
     value: u64,
-    sec_index: usize,
-    sections: &Vec<SectionMetadata>,
     load_header: &ElfLoadHeader) -> u64 {
-    if sec_index >= sections.len() {
-        return value;
-    }
 
-    let section = &sections[sec_index];
-
-    if section.sec_type == SHT_NOBITS {
-        if load_header.file_offset() % load_header.align() != 0 {
-            // Work around invalid file_offset due to a bug in LLVM.
-            // https://reviews.llvm.org/D60131
-            let offset = align_up(load_header.file_offset, load_header.align);
-            return value - offset;
-        }
-        else {
-            return value;   
-        }
-    }
-
-    (value - section.address) + section.offset
-}
-
-fn align_up(
-    value: u64,
-    align: u64) -> u64 {
-    (value + align - 1) & !(align - 1)
+    // The load header values must be page aligned.
+    assert!(load_header.p_vaddr() & PAGE_MASK == load_header.p_vaddr());
+    assert!(load_header.p_offset() & PAGE_MASK == load_header.p_offset());
+    (value - load_header.p_vaddr()) + load_header.p_offset()
 }
 
 fn get_symbol32(
     reader: &mut (impl Read + Seek),
     metadata: &SectionMetadata,
-    sections: &Vec<SectionMetadata>,
     sym_index: u64,
     str_offset: u64,
     load_header: &ElfLoadHeader,
@@ -353,7 +323,7 @@ fn get_symbol32(
         return Err(Error::new(std::io::ErrorKind::InvalidData, "Invalid symbol"));
     }
 
-    symbol.start = symbol_rva(sym.st_value as u64, sym.st_shndx as usize, sections, load_header);
+    symbol.start = symbol_rva(sym.st_value as u64, load_header);
     symbol.end = symbol.start + (sym.st_size as u64 - 1);
     let str_pos = sym.st_name as u64 + str_offset;
 
@@ -365,23 +335,20 @@ fn get_symbol32(
 
 fn get_symbols64(
     reader: &mut (impl Read + Seek),
+    load_header: &ElfLoadHeader,
     metadata: &SectionMetadata,
-    sections: &Vec<SectionMetadata>,
     count: u64,
     str_offset: u64,
     mut callback: impl FnMut(&ElfSymbol)) -> Result<(), Error> {
     let mut symbol = ElfSymbol::new();
 
-    let load_header = get_load_header(reader)?;
-
     for i in 0..count {
         if get_symbol64(
             reader,
             metadata,
-            sections,
             i,
             str_offset,
-            &load_header,
+            load_header,
             &mut symbol).is_err() {
                 continue;
         }
@@ -395,7 +362,6 @@ fn get_symbols64(
 fn get_symbol64(
     reader: &mut (impl Read + Seek),
     metadata: &SectionMetadata,
-    sections: &Vec<SectionMetadata>,
     sym_index: u64,
     str_offset: u64,
     load_header: &ElfLoadHeader,
@@ -409,7 +375,7 @@ fn get_symbol64(
         return Err(Error::new(std::io::ErrorKind::InvalidData, "Invalid symbol"));
     }
 
-    symbol.start = symbol_rva(sym.st_value as u64, sym.st_shndx as usize, sections, load_header);
+    symbol.start = symbol_rva(sym.st_value as u64, load_header);
     symbol.end = symbol.start + (sym.st_size - 1);
     let str_pos = sym.st_name as u64 + str_offset;
 
@@ -451,6 +417,7 @@ fn demangle_symbol(
 
 pub fn get_symbols(
     reader: &mut (impl Read + Seek),
+    load_header: &ElfLoadHeader,
     metadata: &Vec<SectionMetadata>,
     mut callback: impl FnMut(&ElfSymbol)) -> Result<(), Error> {
     let mut offsets: Vec<u64> = Vec::new();
@@ -471,10 +438,10 @@ pub fn get_symbols(
 
         match m.class {
             ELFCLASS32 => {
-                get_symbols32(reader, m, &sections, count, str_offset, &mut callback)?;
+                get_symbols32(reader, load_header, m, count, str_offset, &mut callback)?;
             },
             ELFCLASS64 => {
-                get_symbols64(reader, m, &sections, count, str_offset, &mut callback)?;
+                get_symbols64(reader, load_header, m, count, str_offset, &mut callback)?;
             },
             _ => {
                 /* Unknown, no symbols */
@@ -488,17 +455,16 @@ pub fn get_symbols(
 pub fn get_symbol(
     reader: &mut (impl Read + Seek),
     metadata: &SectionMetadata,
-    sections: &Vec<SectionMetadata>,
     sym_index: u64,
     str_offset: u64,
     load_header: &ElfLoadHeader,
     symbol: &mut ElfSymbol) -> Result<(), Error> {
     match metadata.class {
         ELFCLASS32 => {
-            return get_symbol32(reader, metadata, sections, sym_index, str_offset, load_header, symbol);
+            return get_symbol32(reader, metadata, sym_index, str_offset, load_header, symbol);
         },
         ELFCLASS64 => {
-            return get_symbol64(reader, metadata, sections, sym_index, str_offset, load_header, symbol);
+            return get_symbol64(reader, metadata, sym_index, str_offset, load_header, symbol);
         }
         _ => {
             /* Unknown, no symbols */
@@ -1214,7 +1180,7 @@ fn get_load_header32(
             (pheader.p_flags & PF_X) == PF_X {
             return Ok(ElfLoadHeader::new(
                 pheader.p_offset as u64,
-                pheader.p_align as u64));
+                pheader.p_vaddr as u64));
         }
         sec_offset += header.e_phentsize as u64;
     }
@@ -1241,7 +1207,7 @@ fn get_load_header64(
             (pheader.p_flags & PF_X) == PF_X {
                 return Ok(ElfLoadHeader::new(
                     pheader.p_offset,
-                    pheader.p_align));
+                    pheader.p_vaddr));
         }
         sec_offset += header.e_phentsize as u64;
     }
@@ -1283,13 +1249,16 @@ mod tests {
         let mut file = File::open(path).unwrap();
         let mut sections = Vec::new();
 
+        /* Get load header */
+        let load_header = elf::get_load_header(&mut file).unwrap();
+
         /* Get Dyn and Function Symbols */
         get_section_metadata(&mut file, None, SHT_SYMTAB, &mut sections).unwrap();
         get_section_metadata(&mut file, None, SHT_DYNSYM, &mut sections).unwrap();
 
         let mut found = false;
 
-        get_symbols(&mut file, &sections, |symbol| {
+        get_symbols(&mut file, &load_header, &sections, |symbol| {
             if symbol.name() == "malloc" {
                 println!("{} - {}: {}", symbol.start, symbol.end, symbol.name());
                 found = true;
