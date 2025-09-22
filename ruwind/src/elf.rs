@@ -6,6 +6,7 @@ use std::io::{BufReader, Error, Read, Seek, SeekFrom};
 use std::marker::PhantomData;
 use std::mem::{zeroed, size_of};
 use std::slice;
+use std::sync::OnceLock;
 use cpp_demangle::{DemangleOptions, Symbol};
 use rustc_demangle::try_demangle;
 
@@ -22,7 +23,27 @@ pub const SHT_DYNSYM: ElfWord = 11;
 pub const SYMBOL_TYPE_ELF_SYMTAB: u32 = 1;
 pub const SYMBOL_TYPE_ELF_DYNSYM: u32 = 2;
 
-const PAGE_MASK: u64 = 0xFFFFFFFFFFFFF000;
+static PAGE_MASK_CACHE: OnceLock<u64> = OnceLock::new();
+
+/// Gets the system page size in bytes
+fn system_page_size() -> u64 {
+    unsafe {
+        let page_size = libc::sysconf(libc::_SC_PAGESIZE);
+        if page_size > 0 {
+            page_size as u64
+        } else {
+            panic!("Failed to get system page size via sysconf(_SC_PAGESIZE)");
+        }
+    }
+}
+
+/// Gets the system page mask, caching the result for the life of the process
+pub fn system_page_mask() -> u64 {
+    *PAGE_MASK_CACHE.get_or_init(|| {
+        let page_size = system_page_size();
+        !((page_size - 1) as u64)
+    })
+}
 
 pub struct ElfSymbol {
     start: u64,
@@ -302,8 +323,8 @@ fn symbol_rva(
     load_header: &ElfLoadHeader) -> u64 {
 
     // The load header values must be page aligned.
-    assert!(load_header.p_vaddr() & PAGE_MASK == load_header.p_vaddr());
-    assert!(load_header.p_offset() & PAGE_MASK == load_header.p_offset());
+    assert!(load_header.p_vaddr() & system_page_mask() == load_header.p_vaddr());
+    assert!(load_header.p_offset() & system_page_mask() == load_header.p_offset());
     (value - load_header.p_vaddr()) + load_header.p_offset()
 }
 
@@ -1335,5 +1356,21 @@ mod tests {
 
         assert!(elf::build_id_equals(&build_id_1, &build_id_2));
         assert!(!elf::build_id_equals(&build_id_1, &build_id_3));
+    }
+
+    #[test]
+    fn page_size_functions() {
+        // Test that system_page_size returns a reasonable value
+        let page_size = system_page_size();
+        assert!(page_size > 0);
+        assert!(page_size <= 65536); // Common range: 4KB to 64KB
+
+        // Test that system_page_mask is consistent with page_size
+        let page_mask = system_page_mask();
+        let expected_mask = !((page_size - 1) as u64);
+        assert_eq!(page_mask, expected_mask);
+
+        // Test that page size is a power of 2
+        assert_eq!(page_size & (page_size - 1), 0);
     }
 }

@@ -34,8 +34,6 @@ pub type Session = PerfSession;
 /* OS Specific Session Builder Type */
 pub type SessionBuilder = RingBufSessionBuilder;
 
-const PAGE_MASK: u64 = 0xFFFFFFFFFFFFF000;
-
 #[derive(Clone)]
 pub(crate) struct OSExportProcess {
     root_fs: Option<OpenAt>,
@@ -120,6 +118,8 @@ impl ExportProcessLinuxExt for ExportProcess {
             return;
         }
 
+        let page_mask = system_page_mask();
+
         for map_index in 0..self.mappings().len() {
             let map = self.mappings().get(map_index).unwrap();
             if map.anon() {
@@ -169,8 +169,8 @@ impl ExportProcessLinuxExt for ExportProcess {
                 for sym_file in sym_files {
 
                     // Page align the values from the load header.
-                    let p_offset = metadata.p_offset() & PAGE_MASK;
-                    let p_vaddr = metadata.p_vaddr() & PAGE_MASK;
+                    let p_offset = metadata.p_offset() & page_mask;
+                    let p_vaddr = metadata.p_vaddr() & page_mask;
 
                     let load_header = ElfLoadHeader::new(p_offset, p_vaddr);
                     let mut sym_reader = ElfSymbolReader::new(sym_file, load_header);

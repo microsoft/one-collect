@@ -9,3 +9,4 @@ repository = "https://github.com/microsoft/one-collect"
 [dependencies]
 cpp_demangle = "0.4.3"
 rustc-demangle = "0.1"
+libc = "0.2"
