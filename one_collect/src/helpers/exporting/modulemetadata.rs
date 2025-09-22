@@ -85,6 +85,9 @@ impl ElfModuleMetadata {
             out.push_str("\",");
         }
 
+        out.push_str(&format!("\"p_vaddr\": \"0x{:x}\",", self.p_vaddr));
+        out.push_str(&format!("\"p_offset\": \"0x{:x}\",", self.p_offset));
+
         /* Remove trailing comma if it exists */
         if out.ends_with(',') {
             out.pop();
