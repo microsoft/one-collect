@@ -58,6 +58,84 @@ impl UniversalExporterSwapper {
     }
 }
 
+type ExtendDataClosure = dyn FnMut(&ExportTraceContext, &mut [u8]) -> usize;
+
+#[derive(Default, Clone)]
+struct VirtualEventFields {
+    flags: u8,
+}
+
+impl VirtualEventFields {
+    const VIRTUAL_EVENT_FLAG_NONE: u8 = 0x0;
+    const VIRTUAL_EVENT_FLAG_PID: u8 = 0x1;
+    const VIRTUAL_EVENT_FLAG_TID: u8 = 0x2;
+
+    fn include_pid(&mut self) -> usize {
+        self.flags |= Self::VIRTUAL_EVENT_FLAG_PID;
+        4
+    }
+
+    fn include_tid(&mut self) -> usize {
+        self.flags |= Self::VIRTUAL_EVENT_FLAG_TID;
+        4
+    }
+
+    fn try_include_field(
+        &mut self,
+        name: &str) -> Option<usize> {
+        match name {
+            "os:pid" => { Some(self.include_pid()) },
+            "os:tid" => { Some(self.include_tid()) },
+            _ => { None },
+        }
+    }
+
+    fn try_get_copy_closure<'a>(&self) -> Option<Box<ExtendDataClosure>> {
+        /* Macro to aid in copying a u32 returned from TraceContext */
+        macro_rules! copy_u32 {
+            ($context:expr, $slice:expr, $field:tt) => {
+                match $context.$field() {
+                    Ok(value) => {
+                        $slice[0..4].copy_from_slice(&value.to_ne_bytes());
+                        4
+                    },
+                    Err(_) => {
+                        $slice[0..4].fill(0);
+                        4
+                    }
+                }
+            }
+        }
+
+        match self.flags {
+            /* Single Flags */
+            Self::VIRTUAL_EVENT_FLAG_NONE => { None },
+            Self::VIRTUAL_EVENT_FLAG_PID => {
+                Some(Box::new(|context, slice| copy_u32!(context, slice, pid)))
+            },
+            Self::VIRTUAL_EVENT_FLAG_TID => {
+                Some(Box::new(|context, slice| copy_u32!(context, slice, tid)))
+            },
+            /* Multiple Flags */
+            flags => {
+                Some(Box::new(move |context, slice| {
+                    let mut len = 0;
+
+                    if flags & Self::VIRTUAL_EVENT_FLAG_PID != 0 {
+                        len += copy_u32!(context, slice[len..], pid);
+                    }
+
+                    if flags & Self::VIRTUAL_EVENT_FLAG_TID != 0 {
+                        len += copy_u32!(context, slice[len..], tid);
+                    }
+
+                    len
+                }))
+            },
+        }
+    }
+}
+
 type TimelineEventIdFn = Box<dyn FnMut(&ExportTraceContext, &mut [u8])>;
 type TimelineEventRecFn = Box<dyn FnMut(&ExportTraceContext, &mut Vec<u8>)>;
 type TimelineEventFilterFn = Box<dyn FnMut(&ExportTraceContext) -> bool>;
@@ -580,8 +658,16 @@ impl ExporterTimeline {
         }
 
         let mut total_id_size = 0;
+        let mut virt_fields = VirtualEventFields::default();
 
         for name in id_fields {
+            /* Try to parse virtual fields first */
+            if let Some(len) = virt_fields.try_include_field(name) {
+                total_id_size += len;
+                continue;
+            }
+
+            /* Parse normal field */
             match event.try_get_field_data_closure(name) {
                 Some(closure) => { id_closures.push(closure); },
                 None => {
@@ -619,8 +705,15 @@ impl ExporterTimeline {
                 total_id_size);
         }
 
+        let mut virt_id_closure = virt_fields.try_get_copy_closure();
+
         let id_closure = Box::new(move |trace: &ExportTraceContext, mut slice: &mut [u8]| {
             let event_data = trace.data.event_data();
+
+            if let Some(closure) = &mut virt_id_closure {
+                let len = closure(trace, slice);
+                slice = &mut slice[len..];
+            }
 
             for closure in &mut id_closures {
                 let data = closure(event_data);
@@ -1086,5 +1179,25 @@ mod tests {
         let scripted = ScriptedUniversalExporter::new(ExportSettings::default());
         let swapper = scripted.export_swapper();
         assert!(timeline.apply(&mut swapper.borrow_mut()).is_err());
+
+        /* Known os:* fields should work */
+        let mut timeline = ExporterTimeline::new("Test".into());
+        flags.clear();
+        flags.should_start();
+        timeline.track_event(create_event(1), &vec!("os:pid", "os:tid"), flags.clone()).unwrap();
+
+        flags.clear();
+        flags.should_end();
+        timeline.track_event(create_event(2), &vec!("os:pid", "os:tid"), flags.clone()).unwrap();
+
+        let scripted = ScriptedUniversalExporter::new(ExportSettings::default());
+        let swapper = scripted.export_swapper();
+        timeline.apply(&mut swapper.borrow_mut()).unwrap();
+
+        /* Unknown os:* fields should fail */
+        let mut timeline = ExporterTimeline::new("Test".into());
+        flags.clear();
+        flags.should_start();
+        assert!(timeline.track_event(create_event(1), &vec!("os:unknown"), flags.clone()).is_err());
     }
 }
