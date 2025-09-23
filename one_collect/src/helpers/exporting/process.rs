@@ -555,6 +555,10 @@ pub trait ExportProcessOSHooks {
     fn os_open_file(
         &self,
         path: &Path) -> anyhow::Result<File>;
+
+    fn system_page_mask(&self) -> u64;
+
+    fn system_page_size(&self) -> u64;
 }
 
 impl Unwindable for ExportProcess {
@@ -674,10 +678,10 @@ impl ExportProcess {
             b.symbol().start().cmp(&a.symbol().start())
         });
 
-        /* We will add dynamic mappings at a page boundary of 4KB */
+        /* We will add dynamic mappings at a page boundary */
         let mut dyn_mappings: Vec<ExportMapping> = Vec::new();
-        let page_mask: u64 = 0xFFFFFFFFFFFFF000;
-        let page_size: u64 = 4096;
+        let page_mask = self.system_page_mask();
+        let page_size = self.system_page_size();
 
         /* Mutably drain without references */
         while !self.dyn_symbols.is_empty() {

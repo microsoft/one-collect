@@ -26,7 +26,7 @@ pub const SYMBOL_TYPE_ELF_DYNSYM: u32 = 2;
 static PAGE_MASK_CACHE: OnceLock<u64> = OnceLock::new();
 
 /// Gets the system page size in bytes
-fn system_page_size() -> u64 {
+pub fn system_page_size() -> u64 {
     unsafe {
         let page_size = libc::sysconf(libc::_SC_PAGESIZE);
         if page_size > 0 {

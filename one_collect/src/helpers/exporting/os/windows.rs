@@ -2,7 +2,7 @@
 // Licensed under the MIT license.
 
 use std::collections::hash_map::Entry::Occupied;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use std::fs::File;
 
@@ -64,6 +64,44 @@ impl OSExportProcess {
     }
 }
 
+static PAGE_MASK_CACHE: OnceLock<u64> = OnceLock::new();
+
+/// Gets the system page size in bytes on Windows
+fn system_page_size() -> u64 {
+    extern "system" {
+        fn GetSystemInfo(lpSystemInfo: *mut SystemInfo);
+    }
+
+    #[repr(C)]
+    struct SystemInfo {
+        processor_architecture: u16,
+        reserved: u16,
+        page_size: u32,
+        minimum_application_address: *mut std::ffi::c_void,
+        maximum_application_address: *mut std::ffi::c_void,
+        active_processor_mask: *mut std::ffi::c_void,
+        number_of_processors: u32,
+        processor_type: u32,
+        allocation_granularity: u32,
+        processor_level: u16,
+        processor_revision: u16,
+    }
+
+    unsafe {
+        let mut system_info: SystemInfo = std::mem::zeroed();
+        GetSystemInfo(&mut system_info);
+        system_info.page_size as u64
+    }
+}
+
+/// Gets the system page mask, caching the result for the life of the process
+fn system_page_mask() -> u64 {
+    *PAGE_MASK_CACHE.get_or_init(|| {
+        let page_size = system_page_size();
+        !((page_size - 1) as u64)
+    })
+}
+
 #[cfg(target_os = "windows")]
 impl ExportProcessOSHooks for ExportProcess {
     fn os_open_file(
@@ -71,6 +109,14 @@ impl ExportProcessOSHooks for ExportProcess {
         path: &Path) -> anyhow::Result<File> {
         let file = File::open(path)?;
         Ok(file)
+    }
+
+    fn system_page_mask(&self) -> u64 {
+        system_page_mask()
+    }
+
+    fn system_page_size(&self) -> u64 {
+        system_page_size()
     }
 }
 

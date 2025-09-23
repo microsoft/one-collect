@@ -561,6 +561,14 @@ impl ExportProcessOSHooks for ExportProcess {
             }
         }
     }
+
+    fn system_page_mask(&self) -> u64 {
+        system_page_mask()
+    }
+
+    fn system_page_size(&self) -> u64 {
+        system_page_size()
+    }
 }
 
 pub(crate) fn default_export_settings() -> ExportSettings {
