@@ -1101,7 +1101,8 @@ impl NetTraceWriter {
         sync_time_qpc: u64,
         qpc_freq: u64,
         num_of_cpus: u32,
-        sample_freq: u32) -> anyhow::Result<()> {
+        sample_freq: u32,
+        system_page_size: u64) -> anyhow::Result<()> {
         /* Conversions to match trace format */
         let nanos_between_samples = 1000000000 / sample_freq;
         let milli_secs = sync_time.nanosecond() / 1000000;
@@ -1124,11 +1125,13 @@ impl NetTraceWriter {
         self.output.write_u32(ptr_size)?;
 
         /* Key values */
-        self.output.write_u32(2)?;
+        self.output.write_u32(3)?;
         self.output.write_utf8("HardwareThreadCount")?;
         self.output.write_utf8(&format!("{}", num_of_cpus))?;
         self.output.write_utf8("ExpectedCPUSamplingRate")?;
         self.output.write_utf8(&format!("{}", nanos_between_samples))?;
+        self.output.write_utf8("SystemPageSize")?;
+        self.output.write_utf8(&format!("{}", system_page_size))?;
 
         self.write_end_block(block_start, 1)
     }
@@ -1346,6 +1349,7 @@ impl NetTraceFormat for ExportMachine {
         let qpc_freq = Self::qpc_freq();
         let cpu_count = Self::cpu_count();
         let sample_freq = self.settings().cpu_freq() as u32;
+        let system_page_size = Self::system_page_size();
 
         let mut writer = NetTraceWriter::new(path)?;
 
@@ -1354,7 +1358,8 @@ impl NetTraceFormat for ExportMachine {
             sync_time_qpc,
             qpc_freq,
             cpu_count,
-            sample_freq)?;
+            sample_freq,
+            system_page_size)?;
 
         writer.write_metadata_object(
             self.sample_kinds(),

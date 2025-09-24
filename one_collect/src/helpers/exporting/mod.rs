@@ -1010,6 +1010,8 @@ pub trait ExportMachineOSHooks {
     fn os_qpc_freq() -> u64;
 
     fn os_cpu_count() -> u32;
+
+    fn os_system_page_size() -> u64;
 }
 
 pub type CommMap = HashMap<Option<usize>, Vec<u32>>;
@@ -1071,6 +1073,8 @@ impl ExportMachine {
     pub fn qpc_time() -> u64 { Self::os_qpc_time() }
 
     pub fn qpc_freq() -> u64 { Self::os_qpc_freq() }
+
+    pub fn system_page_size() -> u64 { Self::os_system_page_size() }
 
     pub fn qpc_to_ns(
         freq: u64,

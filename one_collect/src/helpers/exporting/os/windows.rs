@@ -925,6 +925,10 @@ impl ExportMachineOSHooks for ExportMachine {
             GetActiveProcessorCount(0xFFFF)
         }
     }
+
+    fn os_system_page_size() -> u64 {
+        system_page_size()
+    }
 }
 
 impl ExportSessionHelp for EtwSession {

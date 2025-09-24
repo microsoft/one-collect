@@ -1420,6 +1420,11 @@ impl ExportMachineOSHooks for ExportMachine {
             libc::sysconf(libc::_SC_NPROCESSORS_ONLN) as u32
         }
     }
+
+    fn os_system_page_size() -> u64 {
+        system_page_size()
+    }
+
 }
 
 impl ExportBuilderHelp for RingBufSessionBuilder {
