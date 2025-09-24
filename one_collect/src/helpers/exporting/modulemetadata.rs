@@ -254,7 +254,9 @@ mod tests {
         expected.push_str("{");
         expected.push_str("\"type\": \"ELF\",");
         expected.push_str("\"debug_link\": \"debug_link\",");
-        expected.push_str("\"build_id\": \"0101010101010101010101010101010101010101\"");
+        expected.push_str("\"build_id\": \"0101010101010101010101010101010101010101\",");
+        expected.push_str("\"p_vaddr\": \"0x0\",");
+        expected.push_str("\"p_offset\": \"0x0\"");
         expected.push_str("}");
 
         assert_eq!(expected, out);
