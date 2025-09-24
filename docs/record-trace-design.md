@@ -2,7 +2,13 @@
 
 ## Overview
 
-The `record-trace` crate is a command-line application built on top of the `one_collect` library that provides an easy-to-use interface for recording system-wide performance traces. It serves as both a practical tool for performance analysis and a reference implementation demonstrating how to use the one_collect framework.
+The record-trace system provides a command-line interface for recording system-wide performance traces. The architecture is planned to be refactored into three separate crates:
+
+- **Engine Crate**: Core trace recording logic and session management
+- **FFI Crate**: Foreign Function Interface for language interoperability  
+- **Record-Trace Executable Crate**: Command-line application that uses the engine
+
+Currently implemented as a single crate built on top of the `one_collect` library, providing an easy-to-use interface for recording system-wide performance traces.
 
 ## Purpose and Responsibilities
 
@@ -93,28 +99,6 @@ Main orchestrator containing:
 - Event collection coordination
 - Signal handling registration
 
-#### Recording Flow
-1. **Initialization Phase**:
-   - Validate configuration compatibility
-   - Set up export pipeline with appropriate settings
-   - Configure event sources based on platform
-
-2. **Setup Phase**:
-   - Initialize platform-specific event collectors
-   - Register event handlers with export pipeline
-   - Set up signal handlers for graceful termination
-
-3. **Collection Phase**:
-   - Start event collection from OS sources
-   - Process events through pipeline in real-time
-   - Monitor for termination conditions
-
-4. **Cleanup Phase**:
-   - Stop event collection gracefully
-   - Flush remaining data through pipeline
-   - Finalize output files
-   - Report collection statistics
-
 #### Event Source Integration
 
 ##### Linux Integration
@@ -148,11 +132,6 @@ The tool supports various output formats through the one_collect export system:
 - **Standard Formats**: Industry-standard profiling formats
 - **Custom Formats**: User-defined export formats via scripting
 
-#### Output File Management
-- **File Creation**: Safe file creation with overwrite protection
-- **Path Validation**: Ensure output directories exist and are writable
-- **Atomic Writing**: Temporary files with atomic rename for consistency
-
 ## Cross-Platform Considerations
 
 ### Platform Abstraction
@@ -174,115 +153,70 @@ Graceful handling of insufficient permissions:
 - **Guidance**: Clear error messages explaining required permissions
 - **Fallback**: Reduced functionality when full privileges unavailable
 
-## Configuration and Extensibility
+## Adding New File Formats
 
-### Configuration Sources
-Multiple configuration sources in priority order:
-1. Command-line arguments (highest priority)
-2. Environment variables
-3. Configuration files
-4. Built-in defaults (lowest priority)
+To add a new export format to record-trace, implement the format in the one_collect export system and integrate it with the command-line interface:
 
-### Extensibility Points
+### 1. Define the Format Structure
+```rust
+// In your format implementation
+pub struct MyCustomFormat {
+    // Format-specific configuration
+}
 
-#### Custom Event Sources
-New event sources can be integrated by:
-- Extending the one_collect event system
-- Adding command-line options for new event types
-- Implementing platform-specific collection logic
+impl ExportFormat for MyCustomFormat {
+    fn export(&mut self, data: &ExportData) -> anyhow::Result<()> {
+        // Format-specific export logic
+        Ok(())
+    }
+}
+```
 
-#### Custom Export Formats
-New output formats supported through:
-- one_collect export trait implementation
-- Command-line format selection integration
-- Format-specific validation logic
+### 2. Add Command-Line Support
+```rust
+// In commandline.rs
+#[derive(Parser)]
+pub struct RecordArgs {
+    // ... existing fields ...
+    
+    /// Enable my custom format output
+    #[arg(long)]
+    pub my_format: bool,
+}
+```
 
-#### Custom Processing
-Data processing customization via:
-- Event handler registration
-- Pipeline modification
-- Script-based processing (when scripting feature enabled)
+### 3. Integrate with Export Pipeline
+```rust
+// In recorder.rs
+impl Recorder {
+    fn setup_exports(&mut self) -> anyhow::Result<()> {
+        if self.args.my_format {
+            let format = MyCustomFormat::new();
+            self.export_pipeline.add_format(Box::new(format))?;
+        }
+        Ok(())
+    }
+}
+```
 
-## Performance Characteristics
+## Testing and Quality Assurance
 
-### Memory Usage
-- **Streaming Processing**: Events processed as they arrive
-- **Bounded Buffers**: Ring buffers prevent unbounded memory growth
-- **Lazy Initialization**: Components initialized only when needed
+### Testing Scope
+Testing is limited to the command line parser.
 
-### CPU Overhead
-- **Minimal Hot Path**: Optimized event processing pipeline
-- **Batch Processing**: Events processed in batches for efficiency
-- **Platform Optimization**: Platform-specific performance tuning
-
-### I/O Efficiency
-- **Buffered Output**: Output buffering to reduce syscall overhead
-- **Async I/O**: Non-blocking I/O where supported
-- **Compression**: Optional output compression for large traces
-
-## Signal Handling and Lifecycle
-
-### Graceful Shutdown
-Comprehensive signal handling for clean termination:
-- **SIGINT/SIGTERM**: Graceful shutdown with data preservation
-- **Cleanup Registration**: Resource cleanup handlers
-- **Timeout Handling**: Bounded cleanup time to prevent hangs
-
-### Resource Management
-Careful resource lifecycle management:
-- **RAII Patterns**: Automatic resource cleanup
-- **Exception Safety**: Safe cleanup even during errors
-- **Platform Resources**: Platform-specific resource management
-
-## Testing Strategy
-
-### Unit Tests
-- **Command Parsing**: Argument parsing logic validation
-- **Configuration**: Validation logic testing
-- **Error Handling**: Error condition testing
-
-### Integration Tests
-- **End-to-End**: Full recording session testing
-- **Platform Testing**: Platform-specific functionality
-- **Format Testing**: Output format validation
-
-### Manual Testing
-- **Performance Testing**: Real workload profiling
-- **Stress Testing**: Long-running session validation
-- **Compatibility Testing**: Various system configurations
-
-## Usage Patterns
+## Example Usages
 
 ### Basic CPU Profiling
 ```bash
-record-trace --cpu --duration 30s --output profile.data
+record-trace --on-cpu --output trace.nettrace
 ```
 
-### Comprehensive System Tracing
+### Filter by Process IDs
 ```bash
-record-trace --cpu --context-switches --syscalls --output trace.data
+record-trace --on-cpu --pid 42
 ```
 
-### Filtered Recording
+### Capture Script File
 ```bash
-record-trace --cpu --process-filter myapp --output filtered.data
+record-trace --script-file script.file
 ```
-
-### Custom Export Format
-```bash
-record-trace --cpu --format flamegraph --output profile.svg
-```
-
-## Future Extensions
-
-### Planned Features
-- **Remote Collection**: Network-based trace collection
-- **Live Analysis**: Real-time trace analysis and visualization
-- **Custom Scripting**: User-defined processing scripts
-- **Distributed Tracing**: Multi-machine trace correlation
-
-### Architecture Extensibility
-The current design supports future extensions through:
-- **Plugin Architecture**: Loadable modules for new functionality
-- **API Stability**: Stable interfaces for external integration
-- **Configuration Schema**: Extensible configuration format

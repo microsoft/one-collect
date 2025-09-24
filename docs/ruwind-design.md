@@ -96,45 +96,13 @@ The library supports two primary unwinding strategies:
 - Fallback when DWARF information is unavailable
 - Less accurate but enables cross-language unwinding
 
-## Module Organization
+#### Per-Frame Strategy Switching
+The library is capable of switching between unwinding strategies on a per-frame basis, enabling complete call stacks even when different libraries in the same process use different unwind strategies. For example, a single call stack might include:
+- Native C++ frames unwound using DWARF information
+- JIT-compiled C# frames unwound using prolog scanning
+- Another native library using different debug information formats
 
-### `lib.rs`
-- Public API definitions
-- Core trait declarations
-- Type aliases and common structures
-
-### `module.rs`
-- `Module` and `ModuleKey` implementations
-- Address range management
-- Module comparison and sorting logic
-
-### `process.rs`
-- `Process` implementation
-- Module collection management
-- Binary search optimization for IP lookup
-
-### `machine.rs`
-- `Machine` implementation
-- Multi-process unwinding coordination
-- Process lifecycle management
-
-### `dwarf.rs`
-- DWARF parsing and interpretation
-- CFI (Call Frame Information) processing
-- Register rule evaluation
-- Frame unwinding state machine
-
-### `elf.rs`
-- ELF file format parsing
-- Section header processing
-- Symbol table access
-- Debug information extraction
-
-### `x64unwinder.rs`
-- x64-specific unwinding implementation
-- Register context management
-- Stack scanning algorithms
-- Integration between DWARF and prolog strategies
+This per-frame flexibility ensures maximum unwinding coverage across heterogeneous runtime environments.
 
 ## Design Patterns and Principles
 
@@ -171,18 +139,6 @@ The library uses traits extensively to enable:
 - x64 register set and calling conventions
 - Stack layout assumptions for prolog scanning
 
-## Integration Points
-
-### With one_collect
-- Provides unwinding services for profiling pipelines
-- Integrates with Linux perf event processing
-- Supports real-time unwinding during trace collection
-
-### File System Integration
-- Reads ELF binaries and debug symbols
-- Handles missing or moved files gracefully
-- Supports debug symbol search paths
-
 ## Performance Considerations
 
 ### Caching Strategy
@@ -199,37 +155,6 @@ The library uses traits extensively to enable:
 - O(log n) module lookup via binary search
 - Linear stack scanning with early termination
 - Bounded unwinding depth to prevent infinite loops
-
-## Extension Points
-
-### Custom Unwinding Strategies
-New unwinding algorithms can be added by:
-1. Implementing `MachineUnwinder` trait
-2. Defining appropriate `UnwindType` variants
-3. Integrating with module detection logic
-
-### Debug Information Formats
-Support for additional debug formats via:
-1. New section parsers in ELF processing
-2. Extended CFI rule interpretation
-3. Format-specific unwinding state machines
-
-### Architecture Support
-Porting to new architectures requires:
-1. Architecture-specific register definitions
-2. Calling convention adaptations
-3. Stack layout modifications
-
-## Testing Strategy
-
-### Unit Tests
-- Mock implementations of core traits
-- Isolated testing of unwinding algorithms
-- DWARF parsing validation
-
-### Integration Tests
-- Real binary unwinding scenarios
-- Cross-language unwinding validation
 - Performance regression testing
 
 ### Test Assets
