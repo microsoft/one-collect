@@ -27,13 +27,20 @@ static PAGE_MASK_CACHE: OnceLock<u64> = OnceLock::new();
 
 /// Gets the system page size in bytes
 pub fn system_page_size() -> u64 {
-    unsafe {
-        let page_size = libc::sysconf(libc::_SC_PAGESIZE);
-        if page_size > 0 {
-            page_size as u64
-        } else {
-            panic!("Failed to get system page size via sysconf(_SC_PAGESIZE)");
+    #[cfg(target_os = "linux")]
+    {
+        unsafe {
+            let page_size = libc::sysconf(libc::_SC_PAGESIZE);
+            if page_size > 0 {
+                page_size as u64
+            } else {
+                panic!("Failed to get system page size via sysconf(_SC_PAGESIZE)");
+            }
         }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        panic!("system_page_size() is not supported on this platform.");
     }
 }
 
