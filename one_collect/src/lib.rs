@@ -36,6 +36,7 @@ pub mod event;
 pub mod sharing;
 pub mod helpers;
 pub mod intern;
+pub mod os;
 
 #[cfg(any(doc, target_os = "linux"))]
 pub mod tracefs;
@@ -61,6 +62,10 @@ pub use pathbuf_ext::{PathBufInteger};
 
 pub type IOResult<T> = std::io::Result<T>;
 pub type IOError = std::io::Error;
+
+fn page_size_to_mask(page_size: u64) -> u64 {
+    !((page_size - 1) as u64)
+}
 
 pub fn io_error(message: &str) -> IOError {
     IOError::new(

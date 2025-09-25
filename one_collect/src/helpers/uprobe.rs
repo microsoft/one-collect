@@ -6,6 +6,8 @@ use std::fs::File;
 use anyhow::Result;
 
 use crate::procfs::*;
+use super::super::page_size_to_mask;
+use super::super::os::linux::system_page_size;
 
 pub struct UProbe<'a> {
     probe_type: &'a str,
@@ -45,8 +47,12 @@ pub fn enum_uprobes(
     /* Get the load header */
     let load_header = elf::get_load_header(&mut file)?;
 
+    /* Get the system page mask */
+    let system_page_size = system_page_size();
+    let system_page_mask = page_size_to_mask(system_page_size);
+
     /* Get symbols from those sections and pass to caller */
-    elf::get_symbols(&mut file, &load_header, &sections, move |symbol| {
+    elf::get_symbols(&mut file, &load_header, system_page_mask, &sections, move |symbol| {
         let probe = UProbe::new(
             "Func",
             symbol.name(),

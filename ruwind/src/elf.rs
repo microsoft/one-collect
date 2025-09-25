@@ -6,7 +6,6 @@ use std::io::{BufReader, Error, Read, Seek, SeekFrom};
 use std::marker::PhantomData;
 use std::mem::{zeroed, size_of};
 use std::slice;
-use std::sync::OnceLock;
 use cpp_demangle::{DemangleOptions, Symbol};
 use rustc_demangle::try_demangle;
 
@@ -22,35 +21,6 @@ pub const SHT_DYNSYM: ElfWord = 11;
 // which types of symbols are present in a binary.
 pub const SYMBOL_TYPE_ELF_SYMTAB: u32 = 1;
 pub const SYMBOL_TYPE_ELF_DYNSYM: u32 = 2;
-
-static PAGE_MASK_CACHE: OnceLock<u64> = OnceLock::new();
-
-/// Gets the system page size in bytes
-pub fn system_page_size() -> u64 {
-    #[cfg(target_os = "linux")]
-    {
-        unsafe {
-            let page_size = libc::sysconf(libc::_SC_PAGESIZE);
-            if page_size > 0 {
-                page_size as u64
-            } else {
-                panic!("Failed to get system page size via sysconf(_SC_PAGESIZE)");
-            }
-        }
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        panic!("system_page_size() is not supported on this platform.");
-    }
-}
-
-/// Gets the system page mask, caching the result for the life of the process
-pub fn system_page_mask() -> u64 {
-    *PAGE_MASK_CACHE.get_or_init(|| {
-        let page_size = system_page_size();
-        !((page_size - 1) as u64)
-    })
-}
 
 pub struct ElfSymbol {
     start: u64,
@@ -157,6 +127,7 @@ pub struct ElfSymbolIterator<'a> {
     section_str_offset: u64,
 
     load_header: ElfLoadHeader,
+    system_page_mask: u64,
 
     entry_count: u64,
     entry_index: u64,
@@ -165,7 +136,7 @@ pub struct ElfSymbolIterator<'a> {
 }
 
 impl<'a> ElfSymbolIterator<'a> {
-    pub fn new(file: File, load_header: ElfLoadHeader) -> Self {
+    pub fn new(file: File, load_header: ElfLoadHeader, system_page_size: u64) -> Self {
 
         Self {
             phantom: std::marker::PhantomData,
@@ -175,10 +146,15 @@ impl<'a> ElfSymbolIterator<'a> {
             section_offsets: Vec::new(),
             section_str_offset: 0,
             load_header: load_header,
+            system_page_mask: Self::page_size_to_mask(system_page_size),
             entry_count: 0,
             entry_index: 0,
             reset: true,
         }
+    }
+
+    fn page_size_to_mask(page_size: u64) -> u64 {
+        !((page_size - 1) as u64)
     }
 
     pub fn reset(&mut self) {
@@ -262,6 +238,7 @@ impl<'a> ElfSymbolIterator<'a> {
                 self.entry_index,
                 self.section_str_offset,
                 &self.load_header,
+                self.system_page_mask,
                 symbol);
 
             self.entry_index+=1;
@@ -302,6 +279,7 @@ pub fn get_str(
 fn get_symbols32(
     reader: &mut (impl Read + Seek),
     load_header: &ElfLoadHeader,
+    system_page_mask : u64,
     metadata: &SectionMetadata,
     count: u64,
     str_offset: u64,
@@ -315,6 +293,7 @@ fn get_symbols32(
             i,
             str_offset,
             load_header,
+            system_page_mask,
             &mut symbol).is_err() {
                 continue;
         }
@@ -327,11 +306,12 @@ fn get_symbols32(
 
 fn symbol_rva(
     value: u64,
-    load_header: &ElfLoadHeader) -> u64 {
+    load_header: &ElfLoadHeader,
+    system_page_mask: u64) -> u64 {
 
     // The load header values must be page aligned.
-    assert!(load_header.p_vaddr() & system_page_mask() == load_header.p_vaddr());
-    assert!(load_header.p_offset() & system_page_mask() == load_header.p_offset());
+    assert!(load_header.p_vaddr() & system_page_mask == load_header.p_vaddr());
+    assert!(load_header.p_offset() & system_page_mask == load_header.p_offset());
     (value - load_header.p_vaddr()) + load_header.p_offset()
 }
 
@@ -341,6 +321,7 @@ fn get_symbol32(
     sym_index: u64,
     str_offset: u64,
     load_header: &ElfLoadHeader,
+    system_page_mask: u64,
     symbol: &mut ElfSymbol) -> Result<(), Error> {
     let mut sym = ElfSymbol32::default();
     let pos = metadata.offset + (sym_index * metadata.entry_size);
@@ -351,7 +332,7 @@ fn get_symbol32(
         return Err(Error::new(std::io::ErrorKind::InvalidData, "Invalid symbol"));
     }
 
-    symbol.start = symbol_rva(sym.st_value as u64, load_header);
+    symbol.start = symbol_rva(sym.st_value as u64, load_header, system_page_mask);
     symbol.end = symbol.start + (sym.st_size as u64 - 1);
     let str_pos = sym.st_name as u64 + str_offset;
 
@@ -364,6 +345,7 @@ fn get_symbol32(
 fn get_symbols64(
     reader: &mut (impl Read + Seek),
     load_header: &ElfLoadHeader,
+    system_page_mask: u64,
     metadata: &SectionMetadata,
     count: u64,
     str_offset: u64,
@@ -377,6 +359,7 @@ fn get_symbols64(
             i,
             str_offset,
             load_header,
+            system_page_mask,
             &mut symbol).is_err() {
                 continue;
         }
@@ -393,6 +376,7 @@ fn get_symbol64(
     sym_index: u64,
     str_offset: u64,
     load_header: &ElfLoadHeader,
+    system_page_mask: u64,
     symbol: &mut ElfSymbol) -> Result<(), Error> {
     let mut sym = ElfSymbol64::default();
     let pos = metadata.offset + (sym_index * metadata.entry_size);
@@ -403,7 +387,7 @@ fn get_symbol64(
         return Err(Error::new(std::io::ErrorKind::InvalidData, "Invalid symbol"));
     }
 
-    symbol.start = symbol_rva(sym.st_value as u64, load_header);
+    symbol.start = symbol_rva(sym.st_value as u64, load_header, system_page_mask);
     symbol.end = symbol.start + (sym.st_size - 1);
     let str_pos = sym.st_name as u64 + str_offset;
 
@@ -446,6 +430,7 @@ fn demangle_symbol(
 pub fn get_symbols(
     reader: &mut (impl Read + Seek),
     load_header: &ElfLoadHeader,
+    system_page_mask: u64,
     metadata: &Vec<SectionMetadata>,
     mut callback: impl FnMut(&ElfSymbol)) -> Result<(), Error> {
     let mut offsets: Vec<u64> = Vec::new();
@@ -466,10 +451,10 @@ pub fn get_symbols(
 
         match m.class {
             ELFCLASS32 => {
-                get_symbols32(reader, load_header, m, count, str_offset, &mut callback)?;
+                get_symbols32(reader, load_header, system_page_mask, m, count, str_offset, &mut callback)?;
             },
             ELFCLASS64 => {
-                get_symbols64(reader, load_header, m, count, str_offset, &mut callback)?;
+                get_symbols64(reader, load_header, system_page_mask, m, count, str_offset, &mut callback)?;
             },
             _ => {
                 /* Unknown, no symbols */
@@ -486,13 +471,14 @@ pub fn get_symbol(
     sym_index: u64,
     str_offset: u64,
     load_header: &ElfLoadHeader,
+    system_page_mask : u64,
     symbol: &mut ElfSymbol) -> Result<(), Error> {
     match metadata.class {
         ELFCLASS32 => {
-            return get_symbol32(reader, metadata, sym_index, str_offset, load_header, symbol);
+            return get_symbol32(reader, metadata, sym_index, str_offset, load_header, system_page_mask, symbol);
         },
         ELFCLASS64 => {
-            return get_symbol64(reader, metadata, sym_index, str_offset, load_header, symbol);
+            return get_symbol64(reader, metadata, sym_index, str_offset, load_header, system_page_mask, symbol);
         }
         _ => {
             /* Unknown, no symbols */
@@ -1280,13 +1266,16 @@ mod tests {
         /* Get load header */
         let load_header = elf::get_load_header(&mut file).unwrap();
 
+        /* Get the system page mask */
+        let system_page_mask = system_page_mask();
+
         /* Get Dyn and Function Symbols */
         get_section_metadata(&mut file, None, SHT_SYMTAB, &mut sections).unwrap();
         get_section_metadata(&mut file, None, SHT_DYNSYM, &mut sections).unwrap();
 
         let mut found = false;
 
-        get_symbols(&mut file, &load_header, &sections, |symbol| {
+        get_symbols(&mut file, &load_header, system_page_mask, &sections, |symbol| {
             if symbol.name() == "malloc" {
                 println!("{} - {}: {}", symbol.start, symbol.end, symbol.name());
                 found = true;
@@ -1294,6 +1283,18 @@ mod tests {
         }).unwrap();
 
         assert!(found);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn system_page_mask() -> u64 {
+        unsafe {
+            let page_size = libc::sysconf(libc::_SC_PAGESIZE);
+            if page_size > 0 {
+                !((page_size - 1) as u64)
+            } else {
+                panic!("Failed to get system page size via sysconf(_SC_PAGESIZE)");
+            }
+        }
     }
 
     #[test]
@@ -1363,21 +1364,5 @@ mod tests {
 
         assert!(elf::build_id_equals(&build_id_1, &build_id_2));
         assert!(!elf::build_id_equals(&build_id_1, &build_id_3));
-    }
-
-    #[test]
-    fn page_size_functions() {
-        // Test that system_page_size returns a reasonable value
-        let page_size = system_page_size();
-        assert!(page_size > 0);
-        assert!(page_size <= 65536); // Common range: 4KB to 64KB
-
-        // Test that system_page_mask is consistent with page_size
-        let page_mask = system_page_mask();
-        let expected_mask = !((page_size - 1) as u64);
-        assert_eq!(page_mask, expected_mask);
-
-        // Test that page size is a power of 2
-        assert_eq!(page_size & (page_size - 1), 0);
     }
 }

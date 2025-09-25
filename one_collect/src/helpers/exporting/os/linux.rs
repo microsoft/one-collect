@@ -22,6 +22,8 @@ use crate::helpers::exporting::*;
 use crate::helpers::exporting::process::{ExportProcessOSHooks, MetricValue};
 use crate::helpers::exporting::universal::*;
 use crate::helpers::exporting::modulemetadata::{ModuleMetadata, ElfModuleMetadata};
+use crate::page_size_to_mask;
+use crate::os::system_page_size;
 
 use ruwind::elf::*;
 use ruwind::{ModuleAccessor, UnwindType};
@@ -118,7 +120,8 @@ impl ExportProcessLinuxExt for ExportProcess {
             return;
         }
 
-        let page_mask = system_page_mask();
+        let page_size = self.system_page_size();
+        let page_mask = self.system_page_mask();
 
         for map_index in 0..self.mappings().len() {
             let map = self.mappings().get(map_index).unwrap();
@@ -173,7 +176,7 @@ impl ExportProcessLinuxExt for ExportProcess {
                     let p_vaddr = metadata.p_vaddr() & page_mask;
 
                     let load_header = ElfLoadHeader::new(p_offset, p_vaddr);
-                    let mut sym_reader = ElfSymbolReader::new(sym_file, load_header);
+                    let mut sym_reader = ElfSymbolReader::new(sym_file, load_header, page_size);
                     let map_mut = self.mappings_mut().get_mut(map_index).unwrap();
 
                     map_mut.add_matching_symbols(
@@ -563,7 +566,8 @@ impl ExportProcessOSHooks for ExportProcess {
     }
 
     fn system_page_mask(&self) -> u64 {
-        system_page_mask()
+        let page_size = self.system_page_size();
+        page_size_to_mask(page_size)
     }
 
     fn system_page_size(&self) -> u64 {

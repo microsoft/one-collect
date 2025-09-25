@@ -344,9 +344,9 @@ pub struct ElfSymbolReader<'a> {
 }
 
 impl<'a> ElfSymbolReader<'a> {
-    pub fn new(file: File, load_header: ElfLoadHeader) -> Self {
+    pub fn new(file: File, load_header: ElfLoadHeader, system_page_size: u64) -> Self {
         Self {
-            iterator: ElfSymbolIterator::new(file, load_header),
+            iterator: ElfSymbolIterator::new(file, load_header, system_page_size),
             current_sym: ElfSymbol::new(),
             current_sym_valid: false,
         }
@@ -757,6 +757,7 @@ impl ExportSymbolReader for R2RLoadedLayoutSymbolTransformer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::os::system_page_size;
     use std::path::Path;
 
     #[test]
@@ -922,7 +923,8 @@ mod tests {
 
         if let Ok(file) = File::open(path) {
             let load_header = ElfLoadHeader::new(0, 0);
-            let mut reader = ElfSymbolReader::new(file, load_header);
+            let system_page_size = system_page_size();
+            let mut reader = ElfSymbolReader::new(file, load_header, system_page_size);
             reader.reset();
 
             let mut actual_count = 0;
