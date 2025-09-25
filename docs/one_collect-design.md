@@ -91,35 +91,40 @@ On Linux, the framework integrates with the kernel's perf_events subsystem to co
 
 ```rust
 use one_collect::perf_event::*;
+use one_collect::tracefs::TraceFS;
 use one_collect::event::*;
 
-// Create a perf event for CPU cycles
-let mut event = Event::new(0, "cpu-cycles".to_string());
+// Create a tracepoint event using tracefs for scheduler wakeups
+let tracefs = TraceFS::open()?;
+let mut event = tracefs.find_event("sched", "sched_waking")?;
 
 // Get field references outside the closure for high performance
-let cpu_field_ref = event.format().get_field_ref("cpu").unwrap();
+let pid_field_ref = event.format().get_field_ref("pid")?;
+let comm_field_ref = event.format().get_field_ref("comm")?;
 
 // Register a closure to handle each event
 event.add_callback(move |event_data: &EventData| -> anyhow::Result<()> {
-    let cpu_id = event_data.format().get_u32(
-        cpu_field_ref, 
+    let pid = event_data.format().get_u32(
+        pid_field_ref, 
         event_data.event_data()
     )?;
     
-    println!("CPU cycles event on CPU {}", cpu_id);
+    let comm = event_data.format().get_str(
+        comm_field_ref,
+        event_data.event_data()
+    )?;
+    
+    println!("Process {} ({}) is waking up", comm, pid);
     Ok(())
 });
 
-// Configure perf_event attributes
-let mut builder = RingBufSessionBuilder::new();
-builder.add_event(
-    PERF_TYPE_HARDWARE,
-    PERF_COUNT_HW_CPU_CYCLES,
-    event
-)?;
+// Configure tracepoint session
+let mut session = RingBufSessionBuilder::new()
+    .with_tracepoint_events(RingBufBuilder::for_tracepoint())
+    .build()?;
 
-// Start collection
-let session = builder.start()?;
+session.add_event(event);
+session.start()?;
 ```
 
 ##### Windows: ETW Integration
@@ -140,6 +145,22 @@ let provider_guid = Guid::from_u128(0x22fb2cd6_0e7b_422b_a0c7_2fad1fd0e716);
 event.extension_mut().provider_mut().clone_from(&provider_guid);
 *event.extension_mut().level_mut() = LEVEL_INFORMATION;
 *event.extension_mut().keyword_mut() = 0x10; // Process keyword
+
+// Add fields to the event format
+event.format_mut().add_field(EventField::new(
+    "ProcessId".to_string(),
+    "u32".to_string(),
+    LocationType::Static,
+    0,
+    4
+));
+event.format_mut().add_field(EventField::new(
+    "ImageFileName".to_string(),
+    "char".to_string(),
+    LocationType::StaticString,
+    4,
+    0
+));
 
 // Get field references outside the closure for high performance
 let process_id_field_ref = event.format().get_field_ref("ProcessId").unwrap();
