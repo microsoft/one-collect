@@ -234,14 +234,6 @@ let exporter = universal.parse_for_duration("perf_export", duration)
 let mut exporter = exporter.borrow_mut();
 
 exporter.capture_and_resolve_symbols();
-
-println!("Exporting...");
-
-/* Split by comm name */
-let comm_map = exporter.split_processes_by_comm();
-
-let cpu = exporter.find_sample_kind("cpu").expect("CPU sample kind should be known.");
-let cswitch = exporter.find_sample_kind("cswitch").expect("CSwitch sample kind should be known.");
 ```
 
 #### Helpers System (`helpers` module)
@@ -262,23 +254,6 @@ The dotnet helper:
 ##### Scripting Integration (`helpers::scripting`)
 
 The scripting engine integrates at the universal layer, allowing runtime customization of event capture and data processing. It hooks into the `ExportMachine` before and after all data has been aggregated:
-
-**Code Reference**: [`one_collect/src/helpers/exporting/scripting.rs`](one_collect/src/helpers/exporting/scripting.rs)
-
-```rust
-use one_collect::helpers::exporting::*;
-
-// Scripting hooks into the universal layer through UniversalExporterSwapper
-let mut swapper = UniversalExporterSwapper::new(settings);
-
-swapper.swap(|exporter| {
-    // Script can modify the exporter before data collection
-    exporter.with_additional_events()
-});
-
-// Script has access to aggregated data in the ExportMachine
-// for custom analysis and filtering
-```
 
 #### Utility Modules
 
@@ -382,6 +357,7 @@ Platform-specific code is isolated behind common interfaces using the OS trait p
 **Code Reference**: [`one_collect/src/helpers/exporting/os/`](one_collect/src/helpers/exporting/os/)
 
 #### OS Trait Pattern Example
+This example describes the pattern that we use to write platform-neutral code that calls into platform-specific code.  This is not a real example in the codebase.
 
 ```rust
 // Define the OS abstraction trait
@@ -453,4 +429,3 @@ This pattern enables:
 - **Conditional Compilation**: Platform features selected at compile time
 - **Consistent APIs**: Same interface across platforms  
 - **Platform-Specific Optimizations**: Each implementation can use OS-specific optimizations
-- **Easy Testing**: Mock implementations for unit testing
