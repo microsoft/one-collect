@@ -179,11 +179,11 @@ event.add_callback(move |event_data: &EventData| -> anyhow::Result<()> {
         image_name_field_ref,
         event_data.event_data()
     );
-    let (_, utf16_values, _) = image_name_data.align_to::<u16>();
-    let null_pos = utf16_values.iter()
-        .position(|&c| c == 0u16)
-        .unwrap_or(utf16_values.len());
-    let image_name = String::from_utf16(&utf16_values[0..null_pos])?;
+    let utf16_chars: Vec<u16> = image_name_data.chunks_exact(2)
+        .map(|chunk| u16::from_ne_bytes([chunk[0], chunk[1]]))
+        .take_while(|&c| c != 0)
+        .collect();
+    let image_name = String::from_utf16(&utf16_chars)?;
     
     println!("Process started: {} (PID: {})", image_name, process_id);
     Ok(())
