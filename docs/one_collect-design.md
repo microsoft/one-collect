@@ -159,7 +159,7 @@ event.format_mut().add_field(EventField::new(
 event.format_mut().add_field(EventField::new(
     "ImageFileName".to_string(),
     "string".to_string(),
-    LocationType::StaticString,
+    LocationType::StaticUTF16String,
     20,
     0
 ));
@@ -175,12 +175,15 @@ event.add_callback(move |event_data: &EventData| -> anyhow::Result<()> {
         event_data.event_data()
     )?;
     
-    let image_name = std::str::from_utf8(
-        event_data.format().get_data(
-            image_name_field_ref,
-            event_data.event_data()
-        )
-    )?;
+    let image_name_data = event_data.format().get_data(
+        image_name_field_ref,
+        event_data.event_data()
+    );
+    let (_, utf16_values, _) = image_name_data.align_to::<u16>();
+    let null_pos = utf16_values.iter()
+        .position(|&c| c == 0u16)
+        .unwrap_or(utf16_values.len());
+    let image_name = String::from_utf16(&utf16_values[0..null_pos])?;
     
     println!("Process started: {} (PID: {})", image_name, process_id);
     Ok(())
