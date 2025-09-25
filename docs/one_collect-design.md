@@ -109,9 +109,11 @@ event.add_callback(move |event_data: &EventData| -> anyhow::Result<()> {
         event_data.event_data()
     )?;
     
-    let comm = event_data.format().get_str(
-        comm_field_ref,
-        event_data.event_data()
+    let comm = std::str::from_utf8(
+        event_data.format().get_data(
+            comm_field_ref,
+            event_data.event_data()
+        )
     )?;
     
     println!("Process {} ({}) is waking up", comm, pid);
@@ -173,9 +175,11 @@ event.add_callback(move |event_data: &EventData| -> anyhow::Result<()> {
         event_data.event_data()
     )?;
     
-    let image_name = event_data.format().get_str(
-        image_name_field_ref,
-        event_data.event_data()
+    let image_name = std::str::from_utf8(
+        event_data.format().get_data(
+            image_name_field_ref,
+            event_data.event_data()
+        )
     )?;
     
     println!("Process started: {} (PID: {})", image_name, process_id);
