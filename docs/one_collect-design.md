@@ -158,9 +158,9 @@ event.format_mut().add_field(EventField::new(
 ));
 event.format_mut().add_field(EventField::new(
     "ImageFileName".to_string(),
-    "char".to_string(),
+    "string".to_string(),
     LocationType::StaticString,
-    4,
+    20,
     0
 ));
 
