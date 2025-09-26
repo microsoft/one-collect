@@ -120,6 +120,10 @@ pub (crate) fn format(&self) -> Box<dyn Exporter> {
 ```bash
 record-trace --on-cpu --output trace.nettrace
 ```
+### On-CPU and Off-CPU Profiling
+```bash
+record-trace --on-cpu --off-cpu --output trace.nettrace
+```
 
 ### Filter by Process IDs
 ```bash
