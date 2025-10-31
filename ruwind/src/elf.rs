@@ -1239,16 +1239,30 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn symbols() {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", target_env = "gnu"))]
         let paths = [
             "/usr/lib/x86_64-linux-gnu/libc.so.6",
             "/usr/lib/libc.so.6"
         ];
 
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(all(target_arch = "x86_64", target_env = "musl"))]
+        let paths = [
+            "/lib/ld-musl-x86_64.so.1",
+            "/lib/libc.musl-x86_64.so.1",
+            "/usr/lib/libc.musl-x86_64.so.1"
+        ];
+
+        #[cfg(all(target_arch = "aarch64", target_env = "gnu"))]
         let paths = [
             "/usr/lib/aarch64-linux-gnu/libc.so.6",
             "/usr/lib/libc.so.6"
+        ];
+
+        #[cfg(all(target_arch = "aarch64", target_env = "musl"))]
+        let paths = [
+            "/lib/ld-musl-aarch64.so.1",
+            "/lib/libc.musl-aarch64.so.1",
+            "/usr/lib/libc.musl-aarch64.so.1"
         ];
 
         let mut test_path = None;
@@ -1259,7 +1273,7 @@ mod tests {
             }
         }
 
-        let path = test_path.expect("No libc.so.6 found in any of the expected locations");
+        let path = test_path.expect("No libc found in any of the expected locations");
         let mut file = File::open(path).unwrap();
         let mut sections = Vec::new();
 

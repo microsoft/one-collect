@@ -218,16 +218,23 @@ pub (crate) struct UserUnreg {
 
 pub (crate) const UNREGISTERED_WRITE_INDEX: u32 = u32::MAX;
 
+#[cfg(target_os = "linux")]
 // ioctl request type differs between glibc (c_ulong) and musl (c_int)
 // Use libc::Ioctl which is platform-specific
 type IoctlRequest = libc::Ioctl;
 
+#[cfg(target_os = "linux")]
 const IOC_WRITE: IoctlRequest = 1;
+#[cfg(target_os = "linux")]
 const IOC_READ: IoctlRequest = 2;
+#[cfg(target_os = "linux")]
 const DIAG_IOC_MAGIC: IoctlRequest = '*' as IoctlRequest;
+#[cfg(target_os = "linux")]
 pub (crate) const DIAG_IOCSREG: IoctlRequest = ioc(IOC_WRITE | IOC_READ, DIAG_IOC_MAGIC, 0);
+#[cfg(target_os = "linux")]
 pub (crate) const DIAG_IOCSUNREG: IoctlRequest = ioc(IOC_WRITE, DIAG_IOC_MAGIC, 2);
 
+#[cfg(target_os = "linux")]
 const fn ioc(dir: IoctlRequest, typ: IoctlRequest, nr: IoctlRequest) -> IoctlRequest {
     const IOC_NRBITS: u8 = 8;
     const IOC_TYPEBITS: u8 = 8;
