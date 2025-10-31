@@ -94,6 +94,8 @@ jobs:
       image: rust:alpine
 
     steps:
+    - name: Install musl-dev
+      run: apk add --no-cache musl-dev
     - uses: actions/checkout@v3
     - name: 'one_collect: Build'
       working-directory: one_collect
@@ -121,6 +123,8 @@ jobs:
       image: rust:alpine
 
     steps:
+    - name: Install musl-dev
+      run: apk add --no-cache musl-dev
     - uses: actions/checkout@v3
     - name: 'one_collect: Build'
       working-directory: one_collect
