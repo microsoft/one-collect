@@ -218,13 +218,17 @@ pub (crate) struct UserUnreg {
 
 pub (crate) const UNREGISTERED_WRITE_INDEX: u32 = u32::MAX;
 
-const IOC_WRITE: ffi::c_ulong = 1;
-const IOC_READ: ffi::c_ulong = 2;
-const DIAG_IOC_MAGIC: ffi::c_ulong = '*' as ffi::c_ulong;
-pub (crate) const DIAG_IOCSREG: ffi::c_ulong = ioc(IOC_WRITE | IOC_READ, DIAG_IOC_MAGIC, 0);
-pub (crate) const DIAG_IOCSUNREG: ffi::c_ulong = ioc(IOC_WRITE, DIAG_IOC_MAGIC, 2);
+// ioctl request type differs between glibc (c_ulong) and musl (c_int)
+// Use libc::Ioctl which is platform-specific
+type IoctlRequest = libc::Ioctl;
 
-const fn ioc(dir: ffi::c_ulong, typ: ffi::c_ulong, nr: ffi::c_ulong) -> ffi::c_ulong {
+const IOC_WRITE: IoctlRequest = 1;
+const IOC_READ: IoctlRequest = 2;
+const DIAG_IOC_MAGIC: IoctlRequest = '*' as IoctlRequest;
+pub (crate) const DIAG_IOCSREG: IoctlRequest = ioc(IOC_WRITE | IOC_READ, DIAG_IOC_MAGIC, 0);
+pub (crate) const DIAG_IOCSUNREG: IoctlRequest = ioc(IOC_WRITE, DIAG_IOC_MAGIC, 2);
+
+const fn ioc(dir: IoctlRequest, typ: IoctlRequest, nr: IoctlRequest) -> IoctlRequest {
     const IOC_NRBITS: u8 = 8;
     const IOC_TYPEBITS: u8 = 8;
     const IOC_SIZEBITS: u8 = 14;
@@ -236,7 +240,7 @@ const fn ioc(dir: ffi::c_ulong, typ: ffi::c_ulong, nr: ffi::c_ulong) -> ffi::c_u
     (dir << IOC_DIRSHIFT)
         | (typ << IOC_TYPESHIFT)
         | (nr << IOC_NRSHIFT)
-        | ((mem::size_of::<usize>() as ffi::c_ulong) << IOC_SIZESHIFT)
+        | ((mem::size_of::<usize>() as IoctlRequest) << IOC_SIZESHIFT)
 }
 
 pub trait WithUserEventFD {
@@ -271,21 +275,22 @@ impl WithUserEventFD for UnixStream {
             let mut cmsg = Vec::with_capacity(
                 libc::CMSG_SPACE(fd_len) as usize);
 
-            let msg = msghdr {
-                msg_name: std::ptr::null_mut(),
-                msg_namelen: 0,
-                msg_iov: &mut iov,
-                msg_iovlen: 1,
-                msg_control: cmsg.as_mut_ptr(),
-                msg_controllen: libc::CMSG_LEN(fd_len) as usize,
-                msg_flags: 0,
-            };
+            // Initialize msghdr - on musl, this struct has private padding fields
+            // and msg_controllen is u32, not usize
+            let mut msg: msghdr = unsafe { mem::zeroed() };
+            msg.msg_name = std::ptr::null_mut();
+            msg.msg_namelen = 0;
+            msg.msg_iov = &mut iov;
+            msg.msg_iovlen = 1;
+            msg.msg_control = cmsg.as_mut_ptr();
+            msg.msg_controllen = libc::CMSG_LEN(fd_len) as _;
+            msg.msg_flags = 0;
 
             /* Init Control Message */
             let cmsg_raw = libc::CMSG_FIRSTHDR(&msg);
             let cmsg = &mut *cmsg_raw;
 
-            cmsg.cmsg_len = msg.msg_controllen;
+            cmsg.cmsg_len = libc::CMSG_LEN(fd_len) as _;
             cmsg.cmsg_level = libc::SOL_SOCKET;
             cmsg.cmsg_type = libc::SCM_RIGHTS;
 
