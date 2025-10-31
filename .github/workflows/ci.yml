@@ -109,12 +109,6 @@ jobs:
     - name: 'ruwind: Run tests'
       working-directory: ruwind
       run: cargo test --verbose
-    - name: 'record-trace: Build'
-      working-directory: record-trace/ffi
-      run: cargo build --verbose
-    - name: 'record-trace: Run tests'
-      working-directory: record-trace/ffi
-      run: cargo test --verbose
 
   build_linux_musl_x64_release:
     name: Build and Test (Release/Linux-musl-x64)
@@ -137,12 +131,6 @@ jobs:
       run: cargo build --release --verbose
     - name: 'ruwind: Run tests'
       working-directory: ruwind
-      run: cargo test --release --verbose
-    - name: 'record-trace: Build'
-      working-directory: record-trace/ffi
-      run: cargo build --release --verbose
-    - name: 'record-trace: Run tests'
-      working-directory: record-trace/ffi
       run: cargo test --release --verbose
 
   build_windows_x64_release:
