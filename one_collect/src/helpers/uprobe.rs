@@ -96,22 +96,36 @@ mod tests {
 
     #[test]
     fn enum_uprobes_helper() {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", target_env = "gnu"))]
         let possible_paths = [
             "/usr/lib/x86_64-linux-gnu/libc.so.6",
             "/usr/lib/libc.so.6"
         ];
 
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(all(target_arch = "x86_64", target_env = "musl"))]
+        let possible_paths = [
+            "/lib/ld-musl-x86_64.so.1",
+            "/lib/libc.musl-x86_64.so.1",
+            "/usr/lib/libc.musl-x86_64.so.1"
+        ];
+
+        #[cfg(all(target_arch = "aarch64", target_env = "gnu"))]
         let possible_paths = [
             "/usr/lib/aarch64-linux-gnu/libc.so.6",
             "/usr/lib/libc.so.6"
         ];
 
+        #[cfg(all(target_arch = "aarch64", target_env = "musl"))]
+        let possible_paths = [
+            "/lib/ld-musl-aarch64.so.1",
+            "/lib/libc.musl-aarch64.so.1",
+            "/usr/lib/libc.musl-aarch64.so.1"
+        ];
+
         let path = possible_paths
             .iter()
             .find(|&p| Path::new(p).exists())
-            .expect("Could not find libc.so.6 in any expected location");
+            .expect("Could not find libc in any expected location");
 
         let mut found = false;
 
