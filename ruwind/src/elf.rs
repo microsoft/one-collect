@@ -338,8 +338,10 @@ fn get_symbol32(
     read_symbol32(reader, &mut sym)?;
 
     if !sym.is_function() || sym.st_value == 0 || sym.st_size == 0 {
-        trace!("Skipping invalid symbol32: sym_index={}, is_function={}, st_value={:#x}, st_size={}", 
-               sym_index, sym.is_function(), sym.st_value, sym.st_size);
+        trace!(
+            "Skipping invalid symbol32: sym_index={}, is_function={}, st_value={:#x}, st_size={}", 
+            sym_index, sym.is_function(), sym.st_value, sym.st_size
+        );
         return Err(Error::new(std::io::ErrorKind::InvalidData, "Invalid symbol"));
     }
 
@@ -397,8 +399,10 @@ fn get_symbol64(
     read_symbol64(reader, &mut sym)?;
 
     if !sym.is_function() || sym.st_value == 0 || sym.st_size == 0 {
-        trace!("Skipping invalid symbol64: sym_index={}, is_function={}, st_value={:#x}, st_size={}", 
-               sym_index, sym.is_function(), sym.st_value, sym.st_size);
+        trace!(
+            "Skipping invalid symbol64: sym_index={}, is_function={}, st_value={:#x}, st_size={}", 
+            sym_index, sym.is_function(), sym.st_value, sym.st_size
+        );
         return Err(Error::new(std::io::ErrorKind::InvalidData, "Invalid symbol"));
     }
 
@@ -748,11 +752,10 @@ pub fn get_load_header(
         ELFCLASS64 => {
             return get_load_header64(reader);
         },
-        _ => { 
+        _ => {
             warn!("Unknown ELF class for load header: class={}", class);
-            return Ok(ElfLoadHeader::default()); 
+            return Ok(ElfLoadHeader::default());
         }
-
     }
 }
 
@@ -1272,10 +1275,10 @@ fn get_load_header64(
         get_program_header64(reader, &mut pheader)?;
         if pheader.p_type == PT_LOAD &&
             (pheader.p_flags & PF_X) == PF_X {
-                debug!("Found executable PT_LOAD segment: p_offset={:#x}, p_vaddr={:#x}", pheader.p_offset, pheader.p_vaddr);
-                return Ok(ElfLoadHeader::new(
-                    pheader.p_offset,
-                    pheader.p_vaddr));
+            debug!("Found executable PT_LOAD segment: p_offset={:#x}, p_vaddr={:#x}", pheader.p_offset, pheader.p_vaddr);
+            return Ok(ElfLoadHeader::new(
+                pheader.p_offset,
+                pheader.p_vaddr));
         }
         sec_offset += header.e_phentsize as u64;
     }
