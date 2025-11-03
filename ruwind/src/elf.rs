@@ -138,8 +138,6 @@ pub struct ElfSymbolIterator<'a> {
 
 impl<'a> ElfSymbolIterator<'a> {
     pub fn new(file: File, load_header: ElfLoadHeader, system_page_size: u64) -> Self {
-        debug!("ElfSymbolIterator::new called: system_page_size={}", system_page_size);
-
         Self {
             phantom: std::marker::PhantomData,
             reader: BufReader::new(file),
@@ -160,7 +158,6 @@ impl<'a> ElfSymbolIterator<'a> {
     }
 
     pub fn reset(&mut self) {
-        debug!("ElfSymbolIterator::reset called");
         let clear = |iterator: &mut ElfSymbolIterator| {
             iterator.sections.clear();
             iterator.section_index = 0;
@@ -182,7 +179,6 @@ impl<'a> ElfSymbolIterator<'a> {
     }
 
     fn initialize(&mut self) -> Result<(), Error> {
-        debug!("ElfSymbolIterator::initialize called");
         // Seek to the beginning of the file in-case this is not the first call to initialize.
         self.reader.seek(SeekFrom::Start(0))?;
 
@@ -258,7 +254,6 @@ impl<'a> ElfSymbolIterator<'a> {
 
 pub fn is_elf_file(
     reader: &mut (impl Read + Seek)) -> std::io::Result<bool> {
-    debug!("is_elf_file called");
     let mut buf: [u8; 4] = [0; 4];
     debug!("Reading ELF magic bytes: offset={:#x}", 0);
     reader.seek(SeekFrom::Start(0))?;
@@ -453,7 +448,6 @@ pub fn get_symbols(
     system_page_mask: u64,
     metadata: &Vec<SectionMetadata>,
     mut callback: impl FnMut(&ElfSymbol)) -> Result<(), Error> {
-    debug!("get_symbols called: metadata_count={}, system_page_mask={:#x}", metadata.len(), system_page_mask);
     let mut offsets: Vec<u64> = Vec::new();
     let mut sections: Vec<SectionMetadata> = Vec::new();
 
@@ -496,7 +490,6 @@ pub fn get_symbol(
     load_header: &ElfLoadHeader,
     system_page_mask : u64,
     symbol: &mut ElfSymbol) -> Result<(), Error> {
-    debug!("get_symbol called: sym_index={}, str_offset={:#x}, class={}", sym_index, str_offset, metadata.class);
     match metadata.class {
         ELFCLASS32 => {
             return get_symbol32(reader, metadata, sym_index, str_offset, load_header, system_page_mask, symbol);
@@ -515,7 +508,6 @@ pub fn get_section_offsets(
     reader: &mut (impl Read + Seek),
     ident: Option<&[u8]>,
     offsets: &mut Vec<u64>) -> Result<(), Error> {
-    debug!("get_section_offsets called");
     let class: u8;
 
     match ident {
@@ -551,7 +543,6 @@ pub fn get_section_metadata(
     ident: Option<&[u8]>,
     sec_type: u32,
     metadata: &mut Vec<SectionMetadata>) -> Result<(), Error> {
-    debug!("get_section_metadata called: sec_type={}", sec_type);
     enum_section_metadata(
         reader,
         ident,
@@ -564,7 +555,6 @@ pub fn enum_section_metadata(
     ident: Option<&[u8]>,
     sec_type: Option<u32>,
     metadata: &mut Vec<SectionMetadata>) -> Result<(), Error> {
-    debug!("enum_section_metadata called: sec_type={:?}", sec_type);
     let class: u8;
 
     match ident {
@@ -602,7 +592,6 @@ pub fn read_section_name<'a>(
     section: &SectionMetadata,
     section_offsets: &[u64],
     buf: &'a mut [u8]) -> Result<&'a str, Error> {
-    debug!("read_section_name called: name_offset={:#x}, link={}", section.name_offset, section.link);
     let mut str_offset = 0u64;
 
     if section.link < section_offsets.len() as u32 {
@@ -624,7 +613,6 @@ pub fn read_section_name<'a>(
 pub fn get_build_id<'a>(
     reader: &mut (impl Read + Seek),
     buf: &'a mut [u8; 20]) -> Result<Option<&'a [u8; 20]>, Error> {
-    debug!("get_build_id called");
     let mut sections = Vec::new();
     let mut section_offsets = Vec::new();
 
@@ -659,8 +647,6 @@ pub fn read_build_id<'a>(
     sections: &Vec<SectionMetadata>,
     section_offsets: &Vec<u64>,
     buf: &'a mut [u8; 20]) -> Result<Option<&'a [u8; 20]>, Error> {
-    debug!("read_build_id called: section_count={}", sections.len());
-    
     for section in sections {
         let mut name_buf: [u8; 1024] = [0; 1024];
         if let Ok(name) = read_section_name(reader, section, section_offsets, &mut name_buf) {
@@ -689,8 +675,6 @@ pub fn read_package_metadata(
     sections: &Vec<SectionMetadata>,
     section_offsets: &Vec<u64>,
     buf: &mut Vec<u8>) -> Result<(), Error> {
-    debug!("read_package_metadata called: section_count={}", sections.len());
-
     for section in sections {
         let mut name_buf: [u8; 1024] = [0; 1024];
         if let Ok(name) = read_section_name(reader, section, section_offsets, &mut name_buf) {
@@ -718,8 +702,6 @@ pub fn read_debug_link<'a>(
     sections: &Vec<SectionMetadata>,
     section_offsets: &Vec<u64>,
     buf: &'a mut [u8]) -> Result<Option<&'a [u8]>, Error> {
-    debug!("read_debug_link called: section_count={}", sections.len());
-    
     for section in sections {
         let mut name_buf: [u8; 1024] = [0; 1024];
         if let Ok(name) = read_section_name(reader, section, section_offsets, &mut name_buf) {
@@ -738,7 +720,6 @@ pub fn read_debug_link<'a>(
 
 pub fn get_load_header(
     reader: &mut (impl Read + Seek)) -> Result<ElfLoadHeader, Error> {
-    debug!("get_load_header called");
     debug!("Reading ELF ident: offset={:#x}", 0);
     reader.seek(SeekFrom::Start(0))?;
     let slice = get_ident(reader)?;
