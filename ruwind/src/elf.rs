@@ -255,7 +255,6 @@ impl<'a> ElfSymbolIterator<'a> {
 pub fn is_elf_file(
     reader: &mut (impl Read + Seek)) -> std::io::Result<bool> {
     let mut buf: [u8; 4] = [0; 4];
-    debug!("Reading ELF magic bytes: offset={:#x}", 0);
     reader.seek(SeekFrom::Start(0))?;
     reader.read_exact(&mut buf)?;
     Ok(buf == ELF_MAGIC)
@@ -516,14 +515,12 @@ pub fn get_section_offsets(
             reader.seek(SeekFrom::Start(16))?;
         },
         None => {
-            debug!("Reading ELF ident: offset={:#x}", 0);
             reader.seek(SeekFrom::Start(0))?;
             let slice = get_ident(reader)?;
             class = slice[EI_CLASS];
         },
     }
 
-    debug!("Processing section offsets: class={}", class);
     match class {
         ELFCLASS32 => {
             get_section_offsets32(reader, offsets)
@@ -563,14 +560,12 @@ pub fn enum_section_metadata(
             reader.seek(SeekFrom::Start(16))?;
         },
         None => {
-            debug!("Reading ELF ident: offset={:#x}", 0);
             reader.seek(SeekFrom::Start(0))?;
             let slice = get_ident(reader)?;
             class = slice[EI_CLASS];
         },
     }
 
-    debug!("Processing section metadata: class={}", class);
     match class {
         ELFCLASS32 => {
             get_section_metadata32(
@@ -653,7 +648,6 @@ pub fn read_build_id<'a>(
             if name == ".note.gnu.build-id" {
                 debug!("Found build-id section: offset={:#x}, size={}", section.offset, section.size);
                 let _len = seek_to_note_data(reader, section)?;
-                debug!("Reading build-id data");
                 reader.read(&mut buf[0..])?;
                 return Ok(Some(buf));
             }
@@ -685,7 +679,6 @@ pub fn read_package_metadata(
                 buf.clear();
                 buf.resize(len, 0);
 
-                debug!("Reading package metadata: len={}", len);
                 return reader.read_exact(&mut buf[0..]);
             }
         }
@@ -720,11 +713,9 @@ pub fn read_debug_link<'a>(
 
 pub fn get_load_header(
     reader: &mut (impl Read + Seek)) -> Result<ElfLoadHeader, Error> {
-    debug!("Reading ELF ident: offset={:#x}", 0);
     reader.seek(SeekFrom::Start(0))?;
     let slice = get_ident(reader)?;
     let class = slice[EI_CLASS];
-    debug!("Processing load header: class={}", class);
     match class {
         ELFCLASS32 => {
             return get_load_header32(reader);
@@ -1208,7 +1199,6 @@ fn get_section_metadata64(
 
 fn get_load_header32(
     reader: &mut (impl Read + Seek)) -> Result<ElfLoadHeader, Error> {
-    debug!("Reading ELF32 load header");
     let mut header = ElfHeader32::default();
     unsafe {
         reader.read_exact(
@@ -1239,7 +1229,6 @@ fn get_load_header32(
 
 fn get_load_header64(
     reader: &mut (impl Read + Seek)) -> Result<ElfLoadHeader, Error> {
-    debug!("Reading ELF64 load header");
     let mut header = ElfHeader64::default();
     unsafe {
         reader.read_exact(
