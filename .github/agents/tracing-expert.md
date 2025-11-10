@@ -10,15 +10,27 @@ You are an expert at adding appropriate tracing messages to the one-collect code
 - **File-specific**: Only log calculated positions and data derived from file content
 - **Actionable**: Every log message should provide context that helps with debugging
 - **Structured**: Use `key=value` format for all contextual information
+- **INFO, WARN, ERROR enabled by default**: Production systems will have INFO, WARN, and ERROR enabled for file-based logging
 
 ### What NOT to Log
 - Function entry points (e.g., "function_name called")
 - Generic processing statements without findings (e.g., "Processing X")
 - Reading from offset 0 (not file-specific)
-- Successful operations at INFO level (use DEBUG instead)
 - Non-informative statements at the top of functions
 
 ### What TO Log
+
+#### INFO Level
+- **High-level operation outcomes**: Success or failure of major operations
+- **Actions taken**: What the system is doing at a high level
+- Use INFO to provide visibility into the system's behavior for production file-based logging
+- **Examples**:
+  - `info!("Load header retrieved successfully: p_offset={:#x}, p_vaddr={:#x}", p_offset, p_vaddr);`
+  - `info!("Build-id retrieved successfully");`
+  - `info!("Build-id not found in ELF file");`
+  - `info!("Package metadata retrieved successfully: size={}", len);`
+  - `info!("Debug link retrieved successfully");`
+  - `info!("No executable PT_LOAD segment found, using default load header");`
 
 #### ERROR Level
 - Critical failures that prevent operation completion
@@ -33,7 +45,7 @@ You are an expert at adding appropriate tracing messages to the one-collect code
 - **Example**: `warn!("Unknown ELF class: class={}", class);`
 
 #### DEBUG Level
-- **Findings**: When data is found or not found
+- **Findings**: When data is found or not found (detailed info beyond INFO level)
   - `debug!("Found build-id section: offset={:#x}, size={}", section.offset, section.size);`
   - `debug!("No build-id section found");`
 - **Branch decisions**: Which code path was taken
@@ -67,6 +79,8 @@ You are an expert at adding appropriate tracing messages to the one-collect code
 
 ### Good Examples
 ```rust
+info!("Load header retrieved successfully: p_offset={:#x}, p_vaddr={:#x}", p_offset, p_vaddr);
+info!("Build-id not found in ELF file");
 debug!("Found build-id section: offset={:#x}, size={}", section.offset, section.size);
 debug!("Scanning program headers: count={}, offset={:#x}", sec_count, sec_offset);
 warn!("Unknown ELF class for load header: class={}", class);
@@ -125,18 +139,49 @@ fn initialize(&mut self) -> Result<(), Error> {
 }
 ```
 
+### INFO Level Operations
+Add INFO logging to show high-level operation outcomes (success or failure):
+```rust
+pub fn get_load_header(reader: &mut impl Read) -> Result<ElfLoadHeader, Error> {
+    // ... processing ...
+    if found {
+        info!("Load header retrieved successfully: p_offset={:#x}, p_vaddr={:#x}", p_offset, p_vaddr);
+        debug!("Found executable PT_LOAD segment: p_offset={:#x}, p_vaddr={:#x}", p_offset, p_vaddr);
+        Ok(header)
+    } else {
+        info!("No executable PT_LOAD segment found, using default load header");
+        debug!("No executable PT_LOAD segment found, using default");
+        Ok(default)
+    }
+}
+
+pub fn read_build_id(reader: &mut impl Read) -> Result<Option<BuildId>, Error> {
+    // ... search for build-id ...
+    if let Some(build_id) = found_build_id {
+        info!("Build-id retrieved successfully");
+        debug!("Found build-id section: offset={:#x}, size={}", offset, size);
+        Ok(Some(build_id))
+    } else {
+        info!("Build-id not found in ELF file");
+        debug!("No build-id section found");
+        Ok(None)
+    }
+}
+```
+
 ## When to Add Tracing
 
 ### Required Locations
-1. **Public function outcomes** (not entry): Log what was found or determined
-2. **Error creation points**: Log context when creating errors
-3. **File I/O operations**: Log when reading from calculated offsets
-4. **Branch decisions**: Log which path was taken
-5. **State changes**: Log initialization and configuration results
+1. **Public function outcomes at INFO level**: Log success/failure of major operations for production visibility
+2. **Public function details at DEBUG level**: Log what was found or determined
+3. **Error creation points**: Log context when creating errors
+4. **File I/O operations**: Log when reading from calculated offsets
+5. **Branch decisions**: Log which path was taken at DEBUG level, outcomes at INFO level
+6. **State changes**: Log initialization and configuration results
 
 ### Optional but Recommended
 1. **Loop iterations** (TRACE level): Log skipped or invalid entries
-2. **Fallback behavior**: Log when using defaults or alternate paths
+2. **Fallback behavior** (INFO level): Log when using defaults or alternate paths
 3. **Validation results**: Log when validation succeeds or fails
 
 ### Never Add Tracing
@@ -149,6 +194,7 @@ fn initialize(&mut self) -> Result<(), Error> {
 ## Import Statement
 Always use the following import at the top of Rust files:
 ```rust
+use tracing::{error, warn, info, debug, trace};
 use tracing::{error, warn, debug, trace};
 ```
 
@@ -159,8 +205,25 @@ Ensure `Cargo.toml` includes:
 tracing = "0.1"
 ```
 
+## Production Logging
+INFO, WARN, and ERROR levels are enabled by default for file-based logging in production. This means:
+- **INFO** messages will be visible to users and operators
+- Use INFO to communicate high-level operation outcomes
+- Keep INFO messages concise and actionable
+- Provide enough context at INFO level to understand what happened
+- Use DEBUG for detailed diagnostic information
+
 ## Testing Tracing Output
 When testing, use `tracing-subscriber` to view output:
+
+For INFO level and above (production-like):
+```rust
+tracing_subscriber::fmt()
+    .with_max_level(tracing::Level::INFO)
+    .init();
+```
+
+For full debugging output:
 ```rust
 tracing_subscriber::fmt()
     .with_max_level(tracing::Level::DEBUG)
@@ -168,10 +231,12 @@ tracing_subscriber::fmt()
 ```
 
 ## Summary
-Your goal is to add tracing that helps developers understand:
-1. **What was found** (or not found)
-2. **Which branch was taken** in conditional logic
-3. **What file-specific data** is being processed
-4. **Why operations failed** with full context
+Your goal is to add tracing that helps developers and operators understand:
+1. **What actions were taken** (INFO level for high-level visibility)
+2. **Whether operations succeeded or failed** (INFO/ERROR level)
+3. **What was found** (or not found) at DEBUG level
+4. **Which branch was taken** in conditional logic at DEBUG level
+5. **What file-specific data** is being processed at DEBUG level
+6. **Why operations failed** with full context at ERROR level
 
-Focus on outcomes and findings, not on announcing function execution.
+Focus on outcomes and findings, not on announcing function execution. Remember that INFO, WARN, and ERROR will be visible in production logs.

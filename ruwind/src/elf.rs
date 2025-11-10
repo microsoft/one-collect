@@ -8,7 +8,7 @@ use std::mem::{zeroed, size_of};
 use std::slice;
 use cpp_demangle::{DemangleOptions, Symbol};
 use rustc_demangle::try_demangle;
-use tracing::{error, warn, debug, trace};
+use tracing::{error, warn, info, debug, trace};
 
 pub const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
 
@@ -649,11 +649,13 @@ pub fn read_build_id<'a>(
                 debug!("Found build-id section: offset={:#x}, size={}", section.offset, section.size);
                 let _len = seek_to_note_data(reader, section)?;
                 reader.read(&mut buf[0..])?;
+                info!("Build-id retrieved successfully");
                 return Ok(Some(buf));
             }
         }
     }
 
+    info!("Build-id not found in ELF file");
     debug!("No build-id section found");
     Ok(None)
 }
@@ -679,7 +681,9 @@ pub fn read_package_metadata(
                 buf.clear();
                 buf.resize(len, 0);
 
-                return reader.read_exact(&mut buf[0..]);
+                reader.read_exact(&mut buf[0..])?;
+                info!("Package metadata retrieved successfully: size={}", len);
+                return Ok(());
             }
         }
     }
@@ -702,11 +706,13 @@ pub fn read_debug_link<'a>(
                 debug!("Found debug link section: offset={:#x}, size={}", section.offset, section.size);
                 reader.seek(SeekFrom::Start(section.offset))?;
                 reader.read(&mut buf[0..section.size as usize])?;
+                info!("Debug link retrieved successfully");
                 return Ok(Some(buf));
             }
         }
     }
 
+    info!("Debug link not found in ELF file");
     debug!("No debug link section found");
     Ok(None)
 }
@@ -1216,6 +1222,7 @@ fn get_load_header32(
         if pheader.p_type == PT_LOAD &&
             (pheader.p_flags & PF_X) == PF_X {
             debug!("Found executable PT_LOAD segment: p_offset={:#x}, p_vaddr={:#x}", pheader.p_offset, pheader.p_vaddr);
+            info!("Load header retrieved successfully: p_offset={:#x}, p_vaddr={:#x}", pheader.p_offset, pheader.p_vaddr);
             return Ok(ElfLoadHeader::new(
                 pheader.p_offset as u64,
                 pheader.p_vaddr as u64));
@@ -1223,6 +1230,7 @@ fn get_load_header32(
         sec_offset += header.e_phentsize as u64;
     }
     /* No program headers, assume absolute */
+    info!("No executable PT_LOAD segment found, using default load header");
     debug!("No executable PT_LOAD segment found, using default");
     Ok(ElfLoadHeader::default())
 }
@@ -1246,6 +1254,7 @@ fn get_load_header64(
         if pheader.p_type == PT_LOAD &&
             (pheader.p_flags & PF_X) == PF_X {
             debug!("Found executable PT_LOAD segment: p_offset={:#x}, p_vaddr={:#x}", pheader.p_offset, pheader.p_vaddr);
+            info!("Load header retrieved successfully: p_offset={:#x}, p_vaddr={:#x}", pheader.p_offset, pheader.p_vaddr);
             return Ok(ElfLoadHeader::new(
                 pheader.p_offset,
                 pheader.p_vaddr));
@@ -1253,6 +1262,7 @@ fn get_load_header64(
         sec_offset += header.e_phentsize as u64;
     }
     /* No program headers, assume absolute */
+    info!("No executable PT_LOAD segment found, using default load header");
     debug!("No executable PT_LOAD segment found, using default");
     Ok(ElfLoadHeader::default())
 }
