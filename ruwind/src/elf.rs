@@ -8,7 +8,7 @@ use std::mem::{zeroed, size_of};
 use std::slice;
 use cpp_demangle::{DemangleOptions, Symbol};
 use rustc_demangle::try_demangle;
-use log::{error, warn, debug, trace};
+use tracing::{error, warn, debug, trace};
 
 pub const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
 
