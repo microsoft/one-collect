@@ -11,12 +11,14 @@ You are an expert at adding appropriate tracing messages to the one-collect code
 - **Actionable**: Every log message should provide context that helps with debugging
 - **Structured**: Use `key=value` format for all contextual information
 - **INFO, WARN, ERROR enabled by default**: Production systems will have INFO, WARN, and ERROR enabled for file-based logging
+- **No duplicate logging**: Do not log the same data at multiple levels at the same call site
 
 ### What NOT to Log
 - Function entry points (e.g., "function_name called")
 - Generic processing statements without findings (e.g., "Processing X")
 - Reading from offset 0 (not file-specific)
 - Non-informative statements at the top of functions
+- **Duplicate log statements**: If logging the same data at INFO and DEBUG, choose INFO only
 
 ### What TO Log
 
@@ -93,7 +95,15 @@ debug!("is_elf_file called");  // Function entry
 debug!("Reading ELF magic bytes: offset={:#x}", 0);  // Offset 0, not file-specific
 debug!("Processing section metadata: class={}", class);  // Generic processing
 debug!("Reading build-id data");  // No context
-info!("Symbol loaded successfully");  // Successful operation at INFO
+
+// DUPLICATE LOGGING - DO NOT DO THIS:
+info!("Build-id not found in ELF file");
+debug!("No build-id section found");  // Same info, just duplicated
+
+// If logging same data at both levels, choose the less verbose one (INFO):
+debug!("Found PT_LOAD segment: p_offset={:#x}", p_offset);
+info!("Load header retrieved successfully: p_offset={:#x}", p_offset);  // Duplicate!
+// Instead, just use: info!("Load header retrieved successfully: p_offset={:#x}", p_offset);
 ```
 
 ## Implementation Patterns
@@ -140,17 +150,19 @@ fn initialize(&mut self) -> Result<(), Error> {
 ```
 
 ### INFO Level Operations
-Add INFO logging to show high-level operation outcomes (success or failure):
+Add INFO logging to show high-level operation outcomes (success or failure). **Do not duplicate log statements at the same call site** - if logging the same data at both INFO and DEBUG, only use INFO:
+
 ```rust
 pub fn get_load_header(reader: &mut impl Read) -> Result<ElfLoadHeader, Error> {
     // ... processing ...
+    debug!("Scanning program headers: count={}, offset={:#x}", count, offset);
     if found {
+        // INFO includes the key data - no need to duplicate at DEBUG
         info!("Load header retrieved successfully: p_offset={:#x}, p_vaddr={:#x}", p_offset, p_vaddr);
-        debug!("Found executable PT_LOAD segment: p_offset={:#x}, p_vaddr={:#x}", p_offset, p_vaddr);
         Ok(header)
     } else {
+        // INFO provides the outcome - no need to duplicate at DEBUG
         info!("No executable PT_LOAD segment found, using default load header");
-        debug!("No executable PT_LOAD segment found, using default");
         Ok(default)
     }
 }
@@ -158,16 +170,20 @@ pub fn get_load_header(reader: &mut impl Read) -> Result<ElfLoadHeader, Error> {
 pub fn read_build_id(reader: &mut impl Read) -> Result<Option<BuildId>, Error> {
     // ... search for build-id ...
     if let Some(build_id) = found_build_id {
-        info!("Build-id retrieved successfully");
+        // DEBUG provides additional detail (offset, size) not in INFO
         debug!("Found build-id section: offset={:#x}, size={}", offset, size);
+        // INFO provides the high-level outcome
+        info!("Build-id retrieved successfully");
         Ok(Some(build_id))
     } else {
+        // Only INFO - same message would be redundant at DEBUG
         info!("Build-id not found in ELF file");
-        debug!("No build-id section found");
         Ok(None)
     }
 }
 ```
+
+**Key principle**: Only duplicate logging at different levels if the more verbose log contains privileged or additional diagnostic data not present in the less verbose log.
 
 ## When to Add Tracing
 

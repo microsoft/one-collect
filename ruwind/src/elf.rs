@@ -656,7 +656,6 @@ pub fn read_build_id<'a>(
     }
 
     info!("Build-id not found in ELF file");
-    debug!("No build-id section found");
     Ok(None)
 }
 
@@ -713,7 +712,6 @@ pub fn read_debug_link<'a>(
     }
 
     info!("Debug link not found in ELF file");
-    debug!("No debug link section found");
     Ok(None)
 }
 
@@ -1221,7 +1219,6 @@ fn get_load_header32(
         get_program_header32(reader, &mut pheader)?;
         if pheader.p_type == PT_LOAD &&
             (pheader.p_flags & PF_X) == PF_X {
-            debug!("Found executable PT_LOAD segment: p_offset={:#x}, p_vaddr={:#x}", pheader.p_offset, pheader.p_vaddr);
             info!("Load header retrieved successfully: p_offset={:#x}, p_vaddr={:#x}", pheader.p_offset, pheader.p_vaddr);
             return Ok(ElfLoadHeader::new(
                 pheader.p_offset as u64,
@@ -1231,7 +1228,6 @@ fn get_load_header32(
     }
     /* No program headers, assume absolute */
     info!("No executable PT_LOAD segment found, using default load header");
-    debug!("No executable PT_LOAD segment found, using default");
     Ok(ElfLoadHeader::default())
 }
 
@@ -1253,7 +1249,6 @@ fn get_load_header64(
         get_program_header64(reader, &mut pheader)?;
         if pheader.p_type == PT_LOAD &&
             (pheader.p_flags & PF_X) == PF_X {
-            debug!("Found executable PT_LOAD segment: p_offset={:#x}, p_vaddr={:#x}", pheader.p_offset, pheader.p_vaddr);
             info!("Load header retrieved successfully: p_offset={:#x}, p_vaddr={:#x}", pheader.p_offset, pheader.p_vaddr);
             return Ok(ElfLoadHeader::new(
                 pheader.p_offset,
@@ -1263,7 +1258,6 @@ fn get_load_header64(
     }
     /* No program headers, assume absolute */
     info!("No executable PT_LOAD segment found, using default load header");
-    debug!("No executable PT_LOAD segment found, using default");
     Ok(ElfLoadHeader::default())
 }
 
