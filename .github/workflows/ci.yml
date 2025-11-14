@@ -14,6 +14,7 @@ env:
 jobs:
   # Linux builds ordered by platform (glibc, musl) then flavor (debug, release)
   build_linux_glibc_x64_debug:
+    name: Build and Test (Debug/Linux-glibc-x64)
     uses: ./.github/workflows/build-and-test.yml
     with:
       os: ubuntu-latest
@@ -21,6 +22,7 @@ jobs:
       platform-name: Linux-glibc-x64
 
   build_linux_glibc_x64_release:
+    name: Build and Test (Release/Linux-glibc-x64)
     uses: ./.github/workflows/build-and-test.yml
     with:
       os: ubuntu-latest
@@ -28,6 +30,7 @@ jobs:
       platform-name: Linux-glibc-x64
 
   build_linux_musl_x64_debug:
+    name: Build and Test (Debug/Linux-musl-x64)
     uses: ./.github/workflows/build-and-test.yml
     with:
       os: ubuntu-latest
@@ -37,6 +40,7 @@ jobs:
       platform-name: Linux-musl-x64
 
   build_linux_musl_x64_release:
+    name: Build and Test (Release/Linux-musl-x64)
     uses: ./.github/workflows/build-and-test.yml
     with:
       os: ubuntu-latest
@@ -47,6 +51,7 @@ jobs:
 
   # Windows builds ordered by flavor (debug, release)
   build_windows_x64_debug:
+    name: Build and Test (Debug/Windows-x64)
     uses: ./.github/workflows/build-and-test.yml
     with:
       os: windows-latest
@@ -54,6 +59,7 @@ jobs:
       platform-name: Windows-x64
 
   build_windows_x64_release:
+    name: Build and Test (Release/Windows-x64)
     uses: ./.github/workflows/build-and-test.yml
     with:
       os: windows-latest
@@ -62,12 +68,14 @@ jobs:
 
   # Benchmarks ordered by OS (linux, windows) then platform (glibc, musl)
   bench_linux_glibc_x64:
+    name: Run Benchmarks (Linux-glibc-x64)
     uses: ./.github/workflows/benchmarks.yml
     with:
       os: ubuntu-latest
       platform-name: Linux-glibc-x64
 
   bench_linux_musl_x64:
+    name: Run Benchmarks (Linux-musl-x64)
     uses: ./.github/workflows/benchmarks.yml
     with:
       os: ubuntu-latest
@@ -76,6 +84,7 @@ jobs:
       platform-name: Linux-musl-x64
 
   bench_windows_x64:
+    name: Run Benchmarks (Windows-x64)
     uses: ./.github/workflows/benchmarks.yml
     with:
       os: windows-latest
@@ -83,4 +92,5 @@ jobs:
 
   # Docker tests
   docker_console:
+    name: Run Docker Tests
     uses: ./.github/workflows/docker-tests.yml
