@@ -7,6 +7,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::ffi::OsString;
 use std::process;
+use tracing::{info, debug};
 
 use crate::export::{Exporter, NetTraceExporter, PerfViewExporter};
 
@@ -42,6 +43,12 @@ struct Args {
 
     #[arg(long, help = "Script file to run to enable complex configurations")]
     script_file: Option<String>,
+
+    #[arg(long, help = "Log filter configuration (e.g., 'target1=info,target2=debug')")]
+    log_filter: Option<String>,
+
+    #[arg(long, help = "Log file path")]
+    log_path: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
@@ -77,14 +84,25 @@ impl RecordArgs {
     where
         I: IntoIterator<Item = T>,
         T: Into<OsString> + Clone {
+        info!("Parsing command line arguments");
         let command_args = Args::parse_from(args);
+        
+        debug!("Command line arguments parsed: format={:?}, on_cpu={}, off_cpu={}, soft_page_faults={}, hard_page_faults={}, live={}", 
+               command_args.format, command_args.on_cpu, command_args.off_cpu, 
+               command_args.soft_page_faults, command_args.hard_page_faults, command_args.live);
         
         // If --out isn't specified, default to the current working directory.
         let output_path = match command_args.out {
-            Some(path) => { PathBuf::from(path) },
+            Some(path) => { 
+                info!("Output path specified: {}", path);
+                PathBuf::from(path) 
+            },
             None => {
                 match env::current_dir() {
-                    Ok(current_dir) => current_dir,
+                    Ok(current_dir) => {
+                        info!("Using current directory as output path: {}", current_dir.display());
+                        current_dir
+                    },
                     Err(e) => panic!("{}", format!("Unable to get current working directory: {}", e))
                 }
             }
@@ -92,6 +110,7 @@ impl RecordArgs {
 
         let script = match command_args.script_file {
             Some(script_file) => {
+                info!("Reading script from file: {}", script_file);
                 match std::fs::read_to_string(script_file) {
                     Ok(script) => { Some(script) },
                     Err(e) => panic!("{}", format!("Unable to read script file: {}", e))
@@ -108,7 +127,7 @@ impl RecordArgs {
             soft_page_faults: command_args.soft_page_faults,
             hard_page_faults: command_args.hard_page_faults,
             live: command_args.live,
-            target_pids: command_args.target_pids,
+            target_pids: command_args.target_pids.clone(),
             script,
         };
 
@@ -119,6 +138,8 @@ impl RecordArgs {
             eprintln!("No events or scripts selected. Exiting.");
             process::exit(1);
         }
+        
+        info!("Command line parsing complete");
 
         args
     }

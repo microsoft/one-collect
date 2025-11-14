@@ -10,3 +10,5 @@ repository = "https://github.com/microsoft/one-collect"
 anyhow = "1.0.75"
 clap = { version = "4.5.26", features = ["cargo", "derive"] }
 one_collect = { path = "../../one_collect" }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
