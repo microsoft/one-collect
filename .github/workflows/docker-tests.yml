@@ -1,0 +1,15 @@
+name: Docker Tests
+
+on:
+  workflow_call:
+
+jobs:
+  docker-tests:
+    name: Run Docker Tests
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+    - name: Run Docker tests
+      working-directory: test/docker/perf_export
+      run: ./run.sh

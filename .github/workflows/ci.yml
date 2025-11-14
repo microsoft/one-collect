@@ -13,239 +13,70 @@ env:
 
 jobs:
   build_linux_glibc_x64_debug:
-    name: Build and Test (Debug/Linux-glibc-x64)
-    runs-on: ubuntu-latest
-
-    steps:
-    - uses: actions/checkout@v3
-    - name: 'one_collect: Build'
-      working-directory: one_collect
-      run: cargo build --verbose
-    - name: 'one_collect: Run tests'
-      working-directory: one_collect
-      run: cargo test --verbose
-    - name: 'ruwind: Build'
-      working-directory: ruwind
-      run: cargo build --verbose
-    - name: 'ruwind: Run tests'
-      working-directory: ruwind
-      run: cargo test --verbose
-    - name: 'record-trace executable: Build'
-      working-directory: record-trace
-      run: cargo build --verbose
-    - name: 'record-trace executable: Run tests'
-      working-directory: record-trace
-      run: cargo test --verbose
-    - name: 'record-trace FFI: Build'
-      working-directory: record-trace/ffi
-      run: cargo build --verbose
-    - name: 'record-trace FFI: Run tests'
-      working-directory: record-trace/ffi
-      run: cargo test --verbose
+    uses: ./.github/workflows/build-and-test.yml
+    with:
+      os: ubuntu-latest
+      build-mode: debug
+      platform-name: Linux-glibc-x64
 
   build_windows_x64_debug:
-    name: Build and Test (Debug/Windows-x64)
-    runs-on: windows-latest
-
-    steps:
-    - uses: actions/checkout@v3
-    - name: 'one_collect: Build'
-      working-directory: one_collect
-      run: cargo build --verbose
-    - name: 'one_collect: Run tests'
-      working-directory: one_collect
-      run: cargo test --verbose
-    - name: 'ruwind: Build'
-      working-directory: ruwind
-      run: cargo build --verbose
-    - name: 'ruwind: Run tests'
-      working-directory: ruwind
-      run: cargo test --verbose
-    - name: 'record-trace executable: Build'
-      working-directory: record-trace
-      run: cargo build --verbose
-    - name: 'record-trace executable: Run tests'
-      working-directory: record-trace
-      run: cargo test --verbose
-    - name: 'record-trace FFI: Build'
-      working-directory: record-trace/ffi
-      run: cargo build --verbose
-    - name: 'record-trace FFI: Run tests'
-      working-directory: record-trace/ffi
-      run: cargo test --verbose
+    uses: ./.github/workflows/build-and-test.yml
+    with:
+      os: windows-latest
+      build-mode: debug
+      platform-name: Windows-x64
 
   build_linux_glibc_x64_release:
-    name: Build and Test (Release/Linux-glibc-x64)
-    runs-on: ubuntu-latest
-
-    steps:
-    - uses: actions/checkout@v3
-    - name: 'one_collect: Build'
-      working-directory: one_collect
-      run: cargo build --release --verbose
-    - name: 'one_collect: Run tests'
-      working-directory: one_collect
-      run: cargo test --release --verbose
-    - name: 'ruwind: Build'
-      working-directory: ruwind
-      run: cargo build --release --verbose
-    - name: 'ruwind: Run tests'
-      working-directory: ruwind
-      run: cargo test --release --verbose
-    - name: 'record-trace executable: Build'
-      working-directory: record-trace
-      run: cargo build --release --verbose
-    - name: 'record-trace executable: Run tests'
-      working-directory: record-trace
-      run: cargo test --release --verbose
-    - name: 'record-trace FFI: Build'
-      working-directory: record-trace/ffi
-      run: cargo build --release --verbose
-    - name: 'record-trace FFI: Run tests'
-      working-directory: record-trace/ffi
-      run: cargo test --release --verbose
+    uses: ./.github/workflows/build-and-test.yml
+    with:
+      os: ubuntu-latest
+      build-mode: release
+      platform-name: Linux-glibc-x64
 
   build_linux_musl_x64_debug:
-    name: Build and Test (Debug/Linux-musl-x64)
-    runs-on: ubuntu-latest
-    container:
-      image: rust:alpine
-
-    steps:
-    - name: Install musl-dev
-      run: apk add --no-cache musl-dev
-    - uses: actions/checkout@v3
-    - name: 'one_collect: Build'
-      working-directory: one_collect
-      run: cargo build --verbose
-    - name: 'one_collect: Run tests'
-      working-directory: one_collect
-      run: cargo test --verbose
-    - name: 'ruwind: Build'
-      working-directory: ruwind
-      run: cargo build --verbose
-    - name: 'ruwind: Run tests'
-      working-directory: ruwind
-      run: cargo test --verbose
-    - name: 'record-trace executable: Build'
-      working-directory: record-trace
-      run: cargo build --verbose
-    - name: 'record-trace executable: Run tests'
-      working-directory: record-trace
-      run: cargo test --verbose
-    - name: 'record-trace FFI: Build'
-      working-directory: record-trace/ffi
-      run: cargo build --verbose
-    - name: 'record-trace FFI: Run tests'
-      working-directory: record-trace/ffi
-      run: cargo test --verbose
+    uses: ./.github/workflows/build-and-test.yml
+    with:
+      os: ubuntu-latest
+      container: rust:alpine
+      setup-command: apk add --no-cache musl-dev
+      build-mode: debug
+      platform-name: Linux-musl-x64
 
   build_linux_musl_x64_release:
-    name: Build and Test (Release/Linux-musl-x64)
-    runs-on: ubuntu-latest
-    container:
-      image: rust:alpine
-
-    steps:
-    - name: Install musl-dev
-      run: apk add --no-cache musl-dev
-    - uses: actions/checkout@v3
-    - name: 'one_collect: Build'
-      working-directory: one_collect
-      run: cargo build --release --verbose
-    - name: 'one_collect: Run tests'
-      working-directory: one_collect
-      run: cargo test --release --verbose
-    - name: 'ruwind: Build'
-      working-directory: ruwind
-      run: cargo build --release --verbose
-    - name: 'ruwind: Run tests'
-      working-directory: ruwind
-      run: cargo test --release --verbose
-    - name: 'record-trace executable: Build'
-      working-directory: record-trace
-      run: cargo build --release --verbose
-    - name: 'record-trace executable: Run tests'
-      working-directory: record-trace
-      run: cargo test --release --verbose
-    - name: 'record-trace FFI: Build'
-      working-directory: record-trace/ffi
-      run: cargo build --release --verbose
-    - name: 'record-trace FFI: Run tests'
-      working-directory: record-trace/ffi
-      run: cargo test --release --verbose
+    uses: ./.github/workflows/build-and-test.yml
+    with:
+      os: ubuntu-latest
+      container: rust:alpine
+      setup-command: apk add --no-cache musl-dev
+      build-mode: release
+      platform-name: Linux-musl-x64
 
   build_windows_x64_release:
-    name: Build and Test (Release/Windows-x64)
-    runs-on: windows-latest
-
-    steps:
-    - uses: actions/checkout@v3
-    - name: 'one_collect: Build'
-      working-directory: one_collect
-      run: cargo build --release --verbose
-    - name: 'one_collect: Run tests'
-      working-directory: one_collect
-      run: cargo test --release --verbose
-    - name: 'ruwind: Build'
-      working-directory: ruwind
-      run: cargo build --release --verbose
-    - name: 'ruwind: Run tests'
-      working-directory: ruwind
-      run: cargo test --release --verbose
-    - name: 'record-trace executable: Build'
-      working-directory: record-trace
-      run: cargo build --release --verbose
-    - name: 'record-trace executable: Run tests'
-      working-directory: record-trace
-      run: cargo test --release --verbose
-    - name: 'record-trace FFI: Build'
-      working-directory: record-trace/ffi
-      run: cargo build --release --verbose
-    - name: 'record-trace FFI: Run tests'
-      working-directory: record-trace/ffi
-      run: cargo test --release --verbose
+    uses: ./.github/workflows/build-and-test.yml
+    with:
+      os: windows-latest
+      build-mode: release
+      platform-name: Windows-x64
 
   bench_linux_glibc_x64:
-    name: Run Benchmarks (Linux-glibc-x64)
-    runs-on: ubuntu-latest
-
-    steps:
-    - uses: actions/checkout@v3
-    - name: Run benchmarks
-      working-directory: one_collect
-      run: cargo bench --verbose
+    uses: ./.github/workflows/benchmarks.yml
+    with:
+      os: ubuntu-latest
+      platform-name: Linux-glibc-x64
 
   bench_windows_x64:
-    name: Run Benchmarks (Windows-x64)
-    runs-on: windows-latest
-
-    steps:
-    - uses: actions/checkout@v3
-    - name: Run benchmarks
-      working-directory: one_collect
-      run: cargo bench --verbose
+    uses: ./.github/workflows/benchmarks.yml
+    with:
+      os: windows-latest
+      platform-name: Windows-x64
 
   bench_linux_musl_x64:
-    name: Run Benchmarks (Linux-musl-x64)
-    runs-on: ubuntu-latest
-    container:
-      image: rust:alpine
-
-    steps:
-    - name: Install musl-dev
-      run: apk add --no-cache musl-dev
-    - uses: actions/checkout@v3
-    - name: Run benchmarks
-      working-directory: one_collect
-      run: cargo bench --verbose
+    uses: ./.github/workflows/benchmarks.yml
+    with:
+      os: ubuntu-latest
+      container: rust:alpine
+      setup-command: apk add --no-cache musl-dev
+      platform-name: Linux-musl-x64
 
   docker_console:
-    name: Run Docker Tests
-    runs-on: ubuntu-latest
-
-    steps:
-    - uses: actions/checkout@v3
-    - name: Run Docker tests
-      working-directory: test/docker/perf_export
-      run: ./run.sh
+    uses: ./.github/workflows/docker-tests.yml
