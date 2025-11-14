@@ -226,6 +226,20 @@ jobs:
       working-directory: one_collect
       run: cargo bench --verbose
 
+  bench_linux_musl_x64:
+    name: Run Benchmarks (Linux-musl-x64)
+    runs-on: ubuntu-latest
+    container:
+      image: rust:alpine
+
+    steps:
+    - name: Install musl-dev
+      run: apk add --no-cache musl-dev
+    - uses: actions/checkout@v3
+    - name: Run benchmarks
+      working-directory: one_collect
+      run: cargo bench --verbose
+
   docker_console:
     name: Run Docker Tests
     runs-on: ubuntu-latest
