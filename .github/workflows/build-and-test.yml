@@ -15,10 +15,10 @@ on:
         required: false
         type: string
         description: 'Setup command to run before checkout (e.g., apk add --no-cache musl-dev)'
-      build-mode:
+      build-flavor:
         required: true
         type: string
-        description: 'Build mode (debug or release)'
+        description: 'Build flavor (debug or release)'
       platform-name:
         required: true
         type: string
@@ -26,7 +26,7 @@ on:
 
 jobs:
   build-and-test:
-    name: Build and Test (${{ inputs.build-mode == 'release' && 'Release' || 'Debug' }}/${{ inputs.platform-name }})
+    name: Build and Test (${{ inputs.build-flavor == 'release' && 'Release' || 'Debug' }}/${{ inputs.platform-name }})
     runs-on: ${{ inputs.os }}
     container: ${{ inputs.container || null }}
 
@@ -39,32 +39,32 @@ jobs:
     
     - name: 'one_collect: Build'
       working-directory: one_collect
-      run: cargo build ${{ inputs.build-mode == 'release' && '--release' || '' }} --verbose
+      run: cargo build ${{ inputs.build-flavor == 'release' && '--release' || '' }} --verbose
     
     - name: 'one_collect: Run tests'
       working-directory: one_collect
-      run: cargo test ${{ inputs.build-mode == 'release' && '--release' || '' }} --verbose
+      run: cargo test ${{ inputs.build-flavor == 'release' && '--release' || '' }} --verbose
     
     - name: 'ruwind: Build'
       working-directory: ruwind
-      run: cargo build ${{ inputs.build-mode == 'release' && '--release' || '' }} --verbose
+      run: cargo build ${{ inputs.build-flavor == 'release' && '--release' || '' }} --verbose
     
     - name: 'ruwind: Run tests'
       working-directory: ruwind
-      run: cargo test ${{ inputs.build-mode == 'release' && '--release' || '' }} --verbose
+      run: cargo test ${{ inputs.build-flavor == 'release' && '--release' || '' }} --verbose
     
     - name: 'record-trace executable: Build'
       working-directory: record-trace
-      run: cargo build ${{ inputs.build-mode == 'release' && '--release' || '' }} --verbose
+      run: cargo build ${{ inputs.build-flavor == 'release' && '--release' || '' }} --verbose
     
     - name: 'record-trace executable: Run tests'
       working-directory: record-trace
-      run: cargo test ${{ inputs.build-mode == 'release' && '--release' || '' }} --verbose
+      run: cargo test ${{ inputs.build-flavor == 'release' && '--release' || '' }} --verbose
     
     - name: 'record-trace FFI: Build'
       working-directory: record-trace/ffi
-      run: cargo build ${{ inputs.build-mode == 'release' && '--release' || '' }} --verbose
+      run: cargo build ${{ inputs.build-flavor == 'release' && '--release' || '' }} --verbose
     
     - name: 'record-trace FFI: Run tests'
       working-directory: record-trace/ffi
-      run: cargo test ${{ inputs.build-mode == 'release' && '--release' || '' }} --verbose
+      run: cargo test ${{ inputs.build-flavor == 'release' && '--release' || '' }} --verbose

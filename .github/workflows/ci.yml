@@ -12,25 +12,19 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Linux builds ordered by platform (glibc, musl) then flavor (debug, release)
   build_linux_glibc_x64_debug:
     uses: ./.github/workflows/build-and-test.yml
     with:
       os: ubuntu-latest
-      build-mode: debug
+      build-flavor: debug
       platform-name: Linux-glibc-x64
-
-  build_windows_x64_debug:
-    uses: ./.github/workflows/build-and-test.yml
-    with:
-      os: windows-latest
-      build-mode: debug
-      platform-name: Windows-x64
 
   build_linux_glibc_x64_release:
     uses: ./.github/workflows/build-and-test.yml
     with:
       os: ubuntu-latest
-      build-mode: release
+      build-flavor: release
       platform-name: Linux-glibc-x64
 
   build_linux_musl_x64_debug:
@@ -39,7 +33,7 @@ jobs:
       os: ubuntu-latest
       container: rust:alpine
       setup-command: apk add --no-cache musl-dev
-      build-mode: debug
+      build-flavor: debug
       platform-name: Linux-musl-x64
 
   build_linux_musl_x64_release:
@@ -48,27 +42,30 @@ jobs:
       os: ubuntu-latest
       container: rust:alpine
       setup-command: apk add --no-cache musl-dev
-      build-mode: release
+      build-flavor: release
       platform-name: Linux-musl-x64
+
+  # Windows builds ordered by flavor (debug, release)
+  build_windows_x64_debug:
+    uses: ./.github/workflows/build-and-test.yml
+    with:
+      os: windows-latest
+      build-flavor: debug
+      platform-name: Windows-x64
 
   build_windows_x64_release:
     uses: ./.github/workflows/build-and-test.yml
     with:
       os: windows-latest
-      build-mode: release
+      build-flavor: release
       platform-name: Windows-x64
 
+  # Benchmarks ordered by OS (linux, windows) then platform (glibc, musl)
   bench_linux_glibc_x64:
     uses: ./.github/workflows/benchmarks.yml
     with:
       os: ubuntu-latest
       platform-name: Linux-glibc-x64
-
-  bench_windows_x64:
-    uses: ./.github/workflows/benchmarks.yml
-    with:
-      os: windows-latest
-      platform-name: Windows-x64
 
   bench_linux_musl_x64:
     uses: ./.github/workflows/benchmarks.yml
@@ -78,5 +75,12 @@ jobs:
       setup-command: apk add --no-cache musl-dev
       platform-name: Linux-musl-x64
 
+  bench_windows_x64:
+    uses: ./.github/workflows/benchmarks.yml
+    with:
+      os: windows-latest
+      platform-name: Windows-x64
+
+  # Docker tests
   docker_console:
     uses: ./.github/workflows/docker-tests.yml
