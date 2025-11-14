@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-use tracing::{warn, info, debug};
+use tracing::{error, info, debug};
 
 use crate::commandline::RecordArgs;
 use crate::EngineOutput;
@@ -43,12 +43,10 @@ impl Recorder {
     pub fn run(&mut self) -> i32 {
         let mut format = self.args.format();
         if let Err(e) = format.validate(&self.args) {
-            warn!("Format validation failed: error={}", e);
+            error!("Format validation failed: error={}", e);
             self.output.error(&format!("Error: {}", e));
             return 1;
         }
-        
-        debug!("Format validation successful");
 
         let mut settings = ExportSettings::default()
             .with_version_attributes()
@@ -244,7 +242,7 @@ impl Recorder {
                         universal 
                     },
                     Err(e) => {
-                        warn!("Script loading failed: error={}", e);
+                        error!("Script loading failed: error={}", e);
                         self.output.error(&format!("Error: {}", e));
                         return 1;
                     }
@@ -284,7 +282,7 @@ impl Recorder {
                 exporter
             },
             Err(e) => {
-                warn!("Recording session failed: error={}", e);
+                error!("Recording session failed: error={}", e);
                 self.output.error(&format!("Error: {}", e));
                 return 1;
             }
@@ -299,7 +297,7 @@ impl Recorder {
         exporter.capture_and_resolve_symbols();
 
         if let Err(e) = format.run(&mut exporter, &self.args) {
-            warn!("Export failed: error={}", e);
+            error!("Export failed: error={}", e);
             self.output.error(&format!("Error: {}", e));
             exporter.cleanup();
             return 1;

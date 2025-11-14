@@ -11,7 +11,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 fn main() {
-    info!("record-trace starting");
     let mut output = EngineOutput::default();
 
     let continue_recording = Arc::new(AtomicBool::new(true));

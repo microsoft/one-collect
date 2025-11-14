@@ -74,15 +74,15 @@ impl Exporter for PerfViewExporter {
         args: &RecordArgs) -> anyhow::Result<()> {
         let output_path = args.output_path();
         if output_path.exists() && !output_path.is_dir() {
-            warn!("PerfView export path is not a directory: path={}", output_path.display());
+            warn!("Export path is not a directory: path={}", output_path.display());
             return Err(anyhow!("{} is not a directory.", output_path.display()));
         }
         else if !output_path.exists() {
-            warn!("PerfView export path does not exist: path={}", output_path.display());
+            warn!("Export path does not exist: path={}", output_path.display());
             return Err(anyhow!("{} does not exist.", output_path.display()));
         }
 
-        debug!("PerfView export path validated: path={}", output_path.display());
+        debug!("Export path validated: path={}", output_path.display());
         Ok(())
     }
 
@@ -274,7 +274,6 @@ impl Exporter for NetTraceExporter {
             }
         }
 
-        debug!("NetTrace export path validated: path={}", self.output_path.display());
         Ok(())
     }
 

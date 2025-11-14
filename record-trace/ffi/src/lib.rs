@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-use tracing::{warn, info, debug};
+use tracing::{error, warn, info, debug};
 
 use engine::commandline::RecordArgs;
 use engine::recorder::Recorder;
@@ -78,7 +78,7 @@ extern "C" fn RecordTrace(
         info!("RecordTrace FFI call completed: result={}", result);
         result
     } else {
-        warn!("RecordTrace FFI call failed: invalid UTF-8 in arguments");
+        error!("RecordTrace FFI call failed: invalid UTF-8 in arguments");
         1
     }
 }

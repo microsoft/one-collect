@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-use tracing::{warn, debug};
+use tracing::{error, info, debug};
 
 use clap::{crate_version, Parser, ValueEnum};
 use std::env;
@@ -110,9 +110,6 @@ impl RecordArgs {
                 }
             },
             None => { 
-                if command_args.script.is_some() {
-                    debug!("Using inline script");
-                }
                 command_args.script 
             },
         };
@@ -133,13 +130,23 @@ impl RecordArgs {
         if !args.on_cpu && !args.off_cpu &&
             !args.soft_page_faults && !args.hard_page_faults &&
             args.script.is_none() {
-            warn!("No events or scripts selected");
+            error!("No events or scripts selected");
             eprintln!("No events or scripts selected. Exiting.");
             process::exit(1);
         }
 
-        debug!("Arguments parsed successfully: format={}, on_cpu={}, off_cpu={}, soft_page_faults={}, hard_page_faults={}, live={}", 
-            args.format, args.on_cpu, args.off_cpu, args.soft_page_faults, args.hard_page_faults, args.live);
+        info!("Arguments parsed: format={}", args.format);
+        info!("Arguments parsed: on_cpu={}", args.on_cpu);
+        info!("Arguments parsed: off_cpu={}", args.off_cpu);
+        info!("Arguments parsed: soft_page_faults={}", args.soft_page_faults);
+        info!("Arguments parsed: hard_page_faults={}", args.hard_page_faults);
+        info!("Arguments parsed: live={}", args.live);
+        if let Some(ref pids) = args.target_pids {
+            info!("Arguments parsed: target_pids={:?}", pids);
+        }
+        if args.script.is_some() {
+            info!("Arguments parsed: script=<provided>");
+        }
 
         args
     }
