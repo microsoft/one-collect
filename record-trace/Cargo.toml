@@ -9,3 +9,4 @@ repository = "https://github.com/microsoft/one-collect"
 [dependencies]
 ctrlc = "3.2"
 engine = { path = "engine" }
+tracing = "0.1"

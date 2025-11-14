@@ -275,6 +275,7 @@ dependencies = [
  "anyhow",
  "clap",
  "one_collect",
+ "tracing",
 ]
 
 [[package]]
@@ -542,6 +543,7 @@ name = "recordtrace"
 version = "0.0.0-dev"
 dependencies = [
  "engine",
+ "tracing",
 ]
 
 [[package]]

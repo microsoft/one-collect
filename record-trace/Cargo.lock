@@ -297,6 +297,7 @@ dependencies = [
  "anyhow",
  "clap",
  "one_collect",
+ "tracing",
 ]
 
 [[package]]
@@ -571,6 +572,7 @@ version = "0.0.0-dev"
 dependencies = [
  "ctrlc",
  "engine",
+ "tracing",
 ]
 
 [[package]]

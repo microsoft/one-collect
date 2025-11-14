@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
+use tracing::{info, debug};
+
 use engine::commandline::RecordArgs;
 use engine::recorder::Recorder;
 use engine::EngineOutput;
@@ -9,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 fn main() {
+    info!("record-trace starting");
     let mut output = EngineOutput::default();
 
     let continue_recording = Arc::new(AtomicBool::new(true));
@@ -16,6 +19,7 @@ fn main() {
 
     // Record until the user hits CTRL+C.
     ctrlc::set_handler(move || {
+        debug!("CTRL+C signal received");
         handler_clone.store(false, Ordering::SeqCst);
     }).expect("Unable to setup CTRL+C handler");
 
@@ -44,5 +48,6 @@ fn main() {
         RecordArgs::parse(std::env::args_os()),
         output);
 
-    recorder.run();
+    let exit_code = recorder.run();
+    info!("record-trace exiting: exit_code={}", exit_code);
 }

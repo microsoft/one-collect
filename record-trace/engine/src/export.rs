@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
+use tracing::{warn, info, debug};
+
 use one_collect::helpers::exporting::ExportMachine;
 use one_collect::helpers::exporting::formats::nettrace::*;
 use one_collect::helpers::exporting::formats::perf_view::*;
@@ -72,12 +74,15 @@ impl Exporter for PerfViewExporter {
         args: &RecordArgs) -> anyhow::Result<()> {
         let output_path = args.output_path();
         if output_path.exists() && !output_path.is_dir() {
+            warn!("PerfView export path is not a directory: path={}", output_path.display());
             return Err(anyhow!("{} is not a directory.", output_path.display()));
         }
         else if !output_path.exists() {
+            warn!("PerfView export path does not exist: path={}", output_path.display());
             return Err(anyhow!("{} does not exist.", output_path.display()));
         }
 
+        debug!("PerfView export path validated: path={}", output_path.display());
         Ok(())
     }
 
@@ -86,15 +91,21 @@ impl Exporter for PerfViewExporter {
         machine: &mut ExportMachine,
         args: &RecordArgs) -> anyhow::Result<()> {
         
+        info!("Starting PerfView XML export");
         let converter = PerfViewExportGraphMetricValueConverter::new(ExportMachine::qpc_freq());
 
         /* Split by comm name */
         let comm_map = machine.split_processes_by_comm();
+        debug!("Processes split by comm: count={}", comm_map.len());
 
         let cpu = match machine.find_sample_kind("cpu") {
-            Some(cpu) => { cpu },
+            Some(cpu) => { 
+                debug!("CPU sample kind found: kind={}", cpu);
+                cpu 
+            },
             None => {
                 if args.on_cpu() {
+                    warn!("CPU sample kind not found but CPU sampling was enabled");
                     return Err(anyhow!("CPU sample kind should be known."));
                 }
 
@@ -103,9 +114,13 @@ impl Exporter for PerfViewExporter {
         };
 
         let cswitch = match machine.find_sample_kind("cswitch") {
-            Some(cswitch) => { cswitch },
+            Some(cswitch) => { 
+                debug!("CSwitch sample kind found: kind={}", cswitch);
+                cswitch 
+            },
             None => {
                 if args.off_cpu() {
+                    warn!("CSwitch sample kind not found but context switch sampling was enabled");
                     return Err(anyhow!("CSwitch sample kind should be known."));
                 }
 
@@ -191,6 +206,7 @@ impl Exporter for PerfViewExporter {
                 }
             }
         }
+        info!("PerfView XML export completed successfully");
         Ok(())
     }
 }
@@ -248,14 +264,17 @@ impl Exporter for NetTraceExporter {
         if output_path.exists() && output_path.is_dir() {
             if let Some(extension) = output_path.extension() {
                 if extension == "nettrace" {
+                    warn!("NetTrace export path is a directory: path={}", output_path.display());
                     return Err(anyhow!("{} is a directory.", output_path.display()));
                 }
             }
             else {
+                debug!("Using default output filename: trace.nettrace");
                 self.output_path.push("trace.nettrace");
             }
         }
 
+        debug!("NetTrace export path validated: path={}", self.output_path.display());
         Ok(())
     }
 
@@ -264,7 +283,9 @@ impl Exporter for NetTraceExporter {
         machine: &mut ExportMachine,
         _args: &RecordArgs) -> anyhow::Result<()> {
 
+        info!("Starting NetTrace export: path={}", self.output_path.display());
         let _ = machine.to_net_trace(|_proc| { true }, &self.output_path.to_str().unwrap());
+        info!("NetTrace export completed successfully");
 
         Ok(())
     }
