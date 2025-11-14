@@ -144,8 +144,10 @@ impl RecordArgs {
         if let Some(ref pids) = args.target_pids {
             info!("Arguments parsed: target_pids={:?}", pids);
         }
-        if args.script.is_some() {
-            info!("Arguments parsed: script=<provided>");
+        if let Some(ref script) = args.script {
+            info!("Arguments parsed: script start");
+            info!("{}", script);
+            info!("Arguments parsed: script end");
         }
 
         args
