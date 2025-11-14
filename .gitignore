@@ -17,3 +17,6 @@ target/
 
 # Nettrace files
 *.nettrace
+
+# Log files
+*.log
