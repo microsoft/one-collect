@@ -285,7 +285,6 @@ impl Exporter for NetTraceExporter {
         info!("Starting NetTrace export: path={}", self.output_path.display());
         if let Err(e) = machine.to_net_trace(|_proc| { true }, &self.output_path.to_str().unwrap()) {
             error!("NetTrace export failed: error={}", e);
-            return Err(e);
         }
         info!("NetTrace export completed successfully");
 
