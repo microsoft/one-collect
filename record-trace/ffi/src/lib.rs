@@ -23,7 +23,7 @@ extern "C" fn RecordTrace(
     callback: Option<COutputCallback>) -> i32 {
     /* Safety checks */
     if args.is_null() || callback.is_none() {
-        warn!("RecordTrace FFI call failed: null pointer or missing callback");
+        warn!("RecordTrace FFI call failed: null args pointer or missing callback");
         return 1;
     }
 
