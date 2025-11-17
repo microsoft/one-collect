@@ -5,6 +5,7 @@ use std::str::FromStr;
 use std::fs::{self, File};
 use std::path::{self, PathBuf};
 use std::io::{BufRead, BufReader};
+use tracing::{debug};
 
 use crate::PathBufInteger;
 
@@ -39,14 +40,19 @@ pub fn get_comm(
                !comm.starts_with("kworker/") {
                 if let Some(long_comm) =
                     parse_long_comm(path) {
+                    debug!("Found long comm from cmdline: comm={}", long_comm);
                     return Some(long_comm);
                 }
             }
 
             /* Best comm */
+            debug!("Retrieved comm: comm={}", comm);
             Some(comm)
         },
-        Err(_) => None,
+        Err(_) => {
+            debug!("Failed to read comm from procfs");
+            None
+        },
     }
 }
 

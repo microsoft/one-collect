@@ -4,6 +4,7 @@
 use std::{fs::File, io::{BufRead, BufReader, Seek, SeekFrom}};
 use std::collections::HashSet;
 use ruwind::elf::{ElfLoadHeader, ElfSymbol, ElfSymbolIterator};
+use tracing::{info, debug};
 
 use crate::helpers::exporting::ExportMachine;
 
@@ -296,6 +297,7 @@ impl ExportSymbolReader for KernelSymbolReader {
             if reader.seek(SeekFrom::Start(0)).is_ok() {
                 self.done = false;
                 self.load_next();
+                debug!("Kernel symbol reader reset: using existing reader");
                 return;
             }
         }
@@ -304,6 +306,9 @@ impl ExportSymbolReader for KernelSymbolReader {
             self.reader = Some(BufReader::new(file));
             self.done = false;
             self.load_next();
+            info!("Kernel symbol reader initialized from /proc/kallsyms");
+        } else {
+            debug!("Failed to open /proc/kallsyms");
         }
     }
 
@@ -357,6 +362,7 @@ impl<'a> ExportSymbolReader for ElfSymbolReader<'a> {
     fn reset(&mut self) {
         self.iterator.reset();
         self.current_sym_valid = false;
+        debug!("ELF symbol reader reset");
     }
 
     fn next(&mut self) -> bool {
@@ -478,6 +484,7 @@ impl ExportSymbolReader for PerfMapSymbolReader {
     fn reset(&mut self) {
         if self.reader.seek(SeekFrom::Start(0)).is_ok() {
             self.done = false;
+            debug!("PerfMap symbol reader reset");
             return;
         }
         else {
@@ -488,6 +495,7 @@ impl ExportSymbolReader for PerfMapSymbolReader {
             self.end_ip = 0;
             self.name.clear();
             self.done = true;
+            debug!("PerfMap symbol reader reset failed: seek error");
         }
     }
 
