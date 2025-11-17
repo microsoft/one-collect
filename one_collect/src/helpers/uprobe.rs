@@ -4,6 +4,7 @@
 use ruwind::elf::{self, SHT_DYNSYM, SHT_SYMTAB};
 use std::fs::File;
 use anyhow::Result;
+use tracing::{info, debug};
 
 use crate::procfs::*;
 use super::super::page_size_to_mask;
@@ -51,6 +52,8 @@ pub fn enum_uprobes(
     let system_page_size = system_page_size();
     let system_page_mask = page_size_to_mask(system_page_size);
 
+    debug!("Enumerating uprobes: file={}, section_count={}", file_name, sections.len());
+
     /* Get symbols from those sections and pass to caller */
     elf::get_symbols(&mut file, &load_header, system_page_mask, &sections, move |symbol| {
         let probe = UProbe::new(
@@ -61,6 +64,7 @@ pub fn enum_uprobes(
         callback(&probe);
     })?;
 
+    info!("Uprobe enumeration completed: file={}", file_name);
     Ok(())
 }
 
