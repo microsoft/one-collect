@@ -7,6 +7,7 @@ use std::mem;
 use std::fs::File;
 use std::io::{self, Result};
 use std::rc::Rc;
+use tracing::{info, debug};
 
 #[cfg(target_os = "linux")]
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -116,6 +117,7 @@ impl UserEvent {
 
         self.write_index = reg.write_index;
 
+        debug!("User event registered: write_index={}", self.write_index);
         Ok(())
     }
 
@@ -138,6 +140,7 @@ impl UserEvent {
 
         self.write_index = UNREGISTERED_WRITE_INDEX;
 
+        debug!("User event unregistered");
         Ok(())
     }
 }
@@ -168,6 +171,7 @@ impl UserEventsFactory {
         let mut event = Box::new(UserEvent::new(&self.user_events_data, event_desc));
         event.register()?;
 
+        info!("User event created and registered");
         Ok(event)
     }
 }

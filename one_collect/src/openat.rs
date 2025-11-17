@@ -4,6 +4,7 @@
 use std::fs::File;
 use std::ffi::CString;
 use std::path::Path;
+use tracing::{warn, debug};
 
 #[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
@@ -101,9 +102,11 @@ impl OpenAt {
                 libc::O_RDONLY | libc::O_CLOEXEC);
 
             if fd == -1 {
+                warn!("Failed to open file with openat");
                 return Err(std::io::Error::last_os_error().into());
             }
 
+            debug!("File opened via openat: fd={}", fd);
             Ok(File::from_raw_fd(fd))
         }
     }
@@ -155,6 +158,7 @@ impl OpenAt {
         let file = self.open_file(path);
 
         if file.is_err() {
+            debug!("Failed to open directory for find operation");
             return None;
         }
 
@@ -167,6 +171,7 @@ impl OpenAt {
             let dir = libc::fdopendir(fd);
 
             if dir.is_null() {
+                debug!("Failed to open directory stream");
                 return None;
             }
 
@@ -198,9 +203,11 @@ impl OpenAt {
         }
 
         if paths.is_empty() {
+            debug!("No matching paths found: prefix={}", prefix);
             return None;
         }
 
+        debug!("Found matching paths: count={}, prefix={}", paths.len(), prefix);
         Some(paths)
     }
 }
