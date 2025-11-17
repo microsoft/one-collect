@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-use tracing::{warn, info, debug};
+use tracing::{error, warn, info, debug};
 
 use one_collect::helpers::exporting::ExportMachine;
 use one_collect::helpers::exporting::formats::nettrace::*;
@@ -283,7 +283,10 @@ impl Exporter for NetTraceExporter {
         _args: &RecordArgs) -> anyhow::Result<()> {
 
         info!("Starting NetTrace export: path={}", self.output_path.display());
-        let _ = machine.to_net_trace(|_proc| { true }, &self.output_path.to_str().unwrap());
+        if let Err(e) = machine.to_net_trace(|_proc| { true }, &self.output_path.to_str().unwrap()) {
+            error!("NetTrace export failed: error={}", e);
+            return Err(e);
+        }
         info!("NetTrace export completed successfully");
 
         Ok(())
