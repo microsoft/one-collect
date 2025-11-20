@@ -1236,53 +1236,65 @@ impl OSExportMachine {
                         continue;
                     }
 
-                    if let Ok(filename) = machine.strings.from_id(map.filename_id()) {
-                        let filename_owned = filename.to_owned();
-                        if let Ok(file) = proc.open_file(Path::new(&filename_owned)) {
-                            let mut reader = BufReader::new(file);
-                            let mut sections = Vec::new();
-                            let mut section_offsets = Vec::new();
+                    let filename_id = map.filename_id();
+                    
+                    // Open the file in a scoped borrow
+                    let file = {
+                        if let Ok(filename) = machine.strings.from_id(filename_id) {
+                            proc.open_file(Path::new(filename)).ok()
+                        } else {
+                            None
+                        }
+                    };
+                    
+                    if let Some(file) = file {
+                        let mut reader = BufReader::new(file);
+                        let mut sections = Vec::new();
+                        let mut section_offsets = Vec::new();
 
-                            if is_elf_file(&mut reader).unwrap_or(false) {
-                                if let ModuleMetadata::Elf(elf_metadata) = machine.module_metadata.entry(*key)
-                                    .or_insert(ModuleMetadata::Elf(ElfModuleMetadata::new())) {
+                        if is_elf_file(&mut reader).unwrap_or(false) {
+                            if let ModuleMetadata::Elf(elf_metadata) = machine.module_metadata.entry(*key)
+                                .or_insert(ModuleMetadata::Elf(ElfModuleMetadata::new())) {
 
-                                    if get_section_offsets(&mut reader, None, &mut section_offsets).is_err() {
-                                        continue;
+                                if get_section_offsets(&mut reader, None, &mut section_offsets).is_err() {
+                                    continue;
+                                }
+
+                                if get_section_metadata(&mut reader, None, SHT_NOTE, &mut sections).is_err() {
+                                    continue;
+                                }
+
+                                let mut build_id: [u8; 20] = [0; 20];
+                                if let Ok(id) = read_build_id(&mut reader, &sections, &section_offsets, &mut build_id) {
+                                    elf_metadata.set_build_id(id);
+                                    if let Ok(filename) = machine.strings.from_id(filename_id) {
+                                        debug!("ELF build-id set: filename={}", filename);
                                     }
+                                }
 
-                                    if get_section_metadata(&mut reader, None, SHT_NOTE, &mut sections).is_err() {
-                                        continue;
+                                // Read the load header from the binary to get p_vaddr and p_offset
+                                if let Ok(load_header) = get_load_header(&mut reader) {
+                                    elf_metadata.set_p_offset(load_header.p_offset());
+                                    elf_metadata.set_p_vaddr(load_header.p_vaddr());
+                                }
+
+                                if read_package_metadata(&mut reader, &sections, &section_offsets, &mut package_buf).is_ok() {
+                                    if let Ok(metadata) = std::str::from_utf8(&package_buf) {
+                                        elf_metadata.set_version_metadata(metadata, &mut machine.strings);
                                     }
+                                }
 
-                                    let mut build_id: [u8; 20] = [0; 20];
-                                    if let Ok(id) = read_build_id(&mut reader, &sections, &section_offsets, &mut build_id) {
-                                        elf_metadata.set_build_id(id);
-                                        debug!("ELF build-id set: filename={}", filename_owned);
-                                    }
+                                sections.clear();
+                                if get_section_metadata(&mut reader, None, SHT_PROGBITS, &mut sections).is_err() {
+                                    continue;
+                                }
 
-                                    // Read the load header from the binary to get p_vaddr and p_offset
-                                    if let Ok(load_header) = get_load_header(&mut reader) {
-                                        elf_metadata.set_p_offset(load_header.p_offset());
-                                        elf_metadata.set_p_vaddr(load_header.p_vaddr());
-                                    }
-
-                                    if read_package_metadata(&mut reader, &sections, &section_offsets, &mut package_buf).is_ok() {
-                                        if let Ok(metadata) = std::str::from_utf8(&package_buf) {
-                                            elf_metadata.set_version_metadata(metadata, &mut machine.strings);
-                                        }
-                                    }
-
-                                    sections.clear();
-                                    if get_section_metadata(&mut reader, None, SHT_PROGBITS, &mut sections).is_err() {
-                                        continue;
-                                    }
-
-                                    let mut debug_link_buf: [u8; 1024] = [0; 1024];
-                                    if let Ok(Some(debug_link)) = read_debug_link(&mut reader, &sections, &section_offsets, &mut debug_link_buf) {
-                                        let str_val = get_str(debug_link);
-                                        elf_metadata.set_debug_link(Some(str_val.to_owned()), &mut machine.strings);
-                                        debug!("ELF debug link set: link={}, filename={}", str_val, filename_owned);
+                                let mut debug_link_buf: [u8; 1024] = [0; 1024];
+                                if let Ok(Some(debug_link)) = read_debug_link(&mut reader, &sections, &section_offsets, &mut debug_link_buf) {
+                                    let str_val = get_str(debug_link);
+                                    elf_metadata.set_debug_link(Some(str_val.to_owned()), &mut machine.strings);
+                                    if let Ok(filename) = machine.strings.from_id(filename_id) {
+                                        debug!("ELF debug link set: filename={}, link={}", filename, str_val);
                                     }
                                 }
                             }
