@@ -282,16 +282,24 @@ impl TraceFS {
         path_buf.push(name);
         path_buf.push("format");
 
-        let format = File::open(&path_buf)?;
-        let mut reader = BufReader::new(format);
-
-        let event = Self::event_from_format(
-            system,
-            name,
-            &mut reader)?;
+        let format = File::open(&path_buf);
         
-        info!("Event found: system={}, name={}", system, name);
-        Ok(event)
+        match format {
+            Ok(file) => {
+                let mut reader = BufReader::new(file);
+                let event = Self::event_from_format(
+                    system,
+                    name,
+                    &mut reader)?;
+                
+                info!("Event found: system={}, name={}", system, name);
+                Ok(event)
+            },
+            Err(e) => {
+                warn!("Event not found: system={}, name={}, error={}", system, name, e);
+                Err(e)
+            }
+        }
     }
 
     /// Runs a command on the dynamic_events tracefs file.

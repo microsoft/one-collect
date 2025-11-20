@@ -26,6 +26,7 @@ use crate::PathBufInteger;
 /// that the process's actual name is longer. In such a case, the function attempts to retreive the full process name.
 pub fn get_comm(
     path: &mut path::PathBuf) -> Option<String> {
+    debug!("Retrieving comm: path={:?}", path);
     path.push("comm");
     let result = fs::read_to_string(&path);
     path.pop();

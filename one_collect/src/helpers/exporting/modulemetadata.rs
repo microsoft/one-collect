@@ -3,7 +3,6 @@
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use tracing::{debug};
 use crate::helpers::exporting::ExportDevNode;
 use super::InternedStrings;
 use super::pe_file::PEModuleMetadata;
@@ -118,9 +117,6 @@ impl ElfModuleMetadata {
         &mut self,
         build_id: Option<&[u8; 20]>) {
         self.build_id = build_id.copied();
-        if build_id.is_some() {
-            debug!("ELF build-id set");
-        }
     }
 
     pub fn debug_link_id(&self) -> usize {
@@ -141,7 +137,6 @@ impl ElfModuleMetadata {
         match debug_link {
             Some(link) => { 
                 self.debug_link_id = strings.to_id(link.as_str());
-                debug!("ELF debug link set: link={}", link);
             },
             None => { self.debug_link_id = 0 }
         }

@@ -1,13 +1,12 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-use core::ffi;
 use std::ffi::CString;
 use std::mem;
 use std::fs::File;
 use std::io::{self, Result};
 use std::rc::Rc;
-use tracing::{info, debug};
+use tracing::{debug, warn};
 
 #[cfg(target_os = "linux")]
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -112,6 +111,7 @@ impl UserEvent {
         };
 
         if ret < 0 {
+            warn!("User event registration failed: name_args={}", self.descr);
             return Err(io::Error::last_os_error());
         }
 
@@ -135,12 +135,12 @@ impl UserEvent {
         };
 
         if ret < 0 {
+            warn!("User event unregistration failed");
             return Err(io::Error::last_os_error());
         }
 
         self.write_index = UNREGISTERED_WRITE_INDEX;
 
-        debug!("User event unregistered");
         Ok(())
     }
 }
@@ -171,7 +171,6 @@ impl UserEventsFactory {
         let mut event = Box::new(UserEvent::new(&self.user_events_data, event_desc));
         event.register()?;
 
-        info!("User event created and registered");
         Ok(event)
     }
 }

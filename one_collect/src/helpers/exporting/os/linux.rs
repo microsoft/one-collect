@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::fs::File;
 use std::fmt::Write;
 use std::io::BufReader;
+use tracing::{debug};
 
 use crate::{ReadOnly, Writable};
 use crate::event::DataFieldRef;
@@ -1236,7 +1237,8 @@ impl OSExportMachine {
                     }
 
                     if let Ok(filename) = machine.strings.from_id(map.filename_id()) {
-                        if let Ok(file) = proc.open_file(Path::new(filename)) {
+                        let filename_owned = filename.to_owned();
+                        if let Ok(file) = proc.open_file(Path::new(&filename_owned)) {
                             let mut reader = BufReader::new(file);
                             let mut sections = Vec::new();
                             let mut section_offsets = Vec::new();
@@ -1256,6 +1258,7 @@ impl OSExportMachine {
                                     let mut build_id: [u8; 20] = [0; 20];
                                     if let Ok(id) = read_build_id(&mut reader, &sections, &section_offsets, &mut build_id) {
                                         elf_metadata.set_build_id(id);
+                                        debug!("ELF build-id set: filename={}", filename_owned);
                                     }
 
                                     // Read the load header from the binary to get p_vaddr and p_offset
@@ -1279,6 +1282,7 @@ impl OSExportMachine {
                                     if let Ok(Some(debug_link)) = read_debug_link(&mut reader, &sections, &section_offsets, &mut debug_link_buf) {
                                         let str_val = get_str(debug_link);
                                         elf_metadata.set_debug_link(Some(str_val.to_owned()), &mut machine.strings);
+                                        debug!("ELF debug link set: link={}, filename={}", str_val, filename_owned);
                                     }
                                 }
                             }

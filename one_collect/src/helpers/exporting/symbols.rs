@@ -4,7 +4,7 @@
 use std::{fs::File, io::{BufRead, BufReader, Seek, SeekFrom}};
 use std::collections::HashSet;
 use ruwind::elf::{ElfLoadHeader, ElfSymbol, ElfSymbolIterator};
-use tracing::{info, debug};
+use tracing::{info, trace, warn};
 
 use crate::helpers::exporting::ExportMachine;
 
@@ -297,7 +297,6 @@ impl ExportSymbolReader for KernelSymbolReader {
             if reader.seek(SeekFrom::Start(0)).is_ok() {
                 self.done = false;
                 self.load_next();
-                debug!("Kernel symbol reader reset: using existing reader");
                 return;
             }
         }
@@ -308,7 +307,7 @@ impl ExportSymbolReader for KernelSymbolReader {
             self.load_next();
             info!("Kernel symbol reader initialized from /proc/kallsyms");
         } else {
-            debug!("Failed to open /proc/kallsyms");
+            warn!("Failed to open /proc/kallsyms");
         }
     }
 
@@ -362,7 +361,6 @@ impl<'a> ExportSymbolReader for ElfSymbolReader<'a> {
     fn reset(&mut self) {
         self.iterator.reset();
         self.current_sym_valid = false;
-        debug!("ELF symbol reader reset");
     }
 
     fn next(&mut self) -> bool {
@@ -434,11 +432,15 @@ impl PerfMapSymbolReader {
 
             if let Ok(len) = self.reader.read_line(&mut self.buffer) {
                 if len == 0 {
+                    trace!("PerfMap load_next: end of file");
                     break;
                 }
             } else {
+                trace!("PerfMap load_next: read error");
                 break;
             }
+
+            trace!("PerfMap load_next: parsing line={}", self.buffer.trim());
 
             for (index, part) in self.buffer.splitn(3, ' ').enumerate() {
                 match index {
@@ -473,6 +475,7 @@ impl PerfMapSymbolReader {
 
             self.done = false;
 
+            trace!("PerfMap load_next: parsed symbol start_ip={:#x}, end_ip={:#x}, name={}", self.start_ip, self.end_ip, self.name);
             return;
         }
 
@@ -484,7 +487,6 @@ impl ExportSymbolReader for PerfMapSymbolReader {
     fn reset(&mut self) {
         if self.reader.seek(SeekFrom::Start(0)).is_ok() {
             self.done = false;
-            debug!("PerfMap symbol reader reset");
             return;
         }
         else {
@@ -495,7 +497,6 @@ impl ExportSymbolReader for PerfMapSymbolReader {
             self.end_ip = 0;
             self.name.clear();
             self.done = true;
-            debug!("PerfMap symbol reader reset failed: seek error");
         }
     }
 

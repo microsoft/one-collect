@@ -6,7 +6,7 @@ use std::fs::File;
 use std::mem::{zeroed, size_of};
 use std::string::{FromUtf8Error, FromUtf16Error};
 use std::slice;
-use tracing::{info, debug};
+use tracing::{debug};
 
 use crate::intern::InternedStrings;
 
@@ -115,7 +115,6 @@ impl PEModuleMetadata {
         self.get_metadata_direct(
             file,
             strings)?;
-        info!("PE metadata retrieved successfully: path={}", path);
         Ok(())
     }
 
@@ -124,7 +123,6 @@ impl PEModuleMetadata {
         mut file: File,
         strings: &mut InternedStrings) -> anyhow::Result<()> {
         get_pe_info(&mut file, self, strings)?;
-        info!("PE metadata retrieved successfully from file handle");
         Ok(())
     }
 
