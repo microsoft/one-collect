@@ -34,6 +34,8 @@ use crate::event::*;
 use crate::helpers::dotnet::scripting::*;
 use crate::helpers::dotnet::nettrace;
 
+use tracing::{warn, info, debug};
+
 #[cfg(target_os = "linux")]
 use libc::PROT_EXEC;
 
@@ -71,6 +73,7 @@ impl PerfMapContext {
                 for path in paths {
                     let path = format!("/proc/{}/root/tmp/{}", self.pid, path);
                     if let Ok(sock) = UnixStream::connect(path) {
+                        debug!("Opened diagnostic socket: pid={}, nspid={}", self.pid, self.nspid);
                         return Some(sock);
                     }
                 }
@@ -78,6 +81,7 @@ impl PerfMapContext {
             None => { },
         }
 
+        warn!("Failed to open diagnostic socket: pid={}, nspid={}", self.pid, self.nspid);
         None
     }
 
@@ -333,14 +337,16 @@ impl UserEventTracker {
             socket.read_exact(&mut code)?;
 
             let code = u32::from_le_bytes(code);
-
+            
+            warn!("IPC enablement with user_events failed: error_code={:#x}", code);
             anyhow::bail!("IPC enablement with user_events failed with 0x{:X}.", code);
         }
 
         let mut session = [0; 8];
 
         socket.read_exact(&mut session)?;
-
+        
+        info!("User events enabled successfully");
         Ok(())
     }
 
@@ -372,8 +378,13 @@ impl UserEventTracker {
                 if let Some(mut socket) = diag.open_diag_socket() {
                     if let Ok(settings) = arc.lock() {
                         match Self::enable_events(&mut socket, &settings, &mut buffer) {
-                            Ok(()) => { pids.insert(pid, socket); },
-                            Err(_) => { /* Nothing */ },
+                            Ok(()) => {
+                                debug!("Enabled .NET events for process: pid={}", pid);
+                                pids.insert(pid, socket);
+                            },
+                            Err(err) => {
+                                warn!("Failed to enable .NET events: pid={}, error={}", pid, err);
+                            },
                         }
                     }
                 }
@@ -887,6 +898,8 @@ fn register_dotnet_tracepoint(
     let _ = user_events.create(&DotNetEventDesc::new(name))?;
 
     let mut event = tracefs.find_event("user_events", name)?;
+    
+    debug!("Registered .NET tracepoint: name={}, callstacks={}, use_names={}", name, callstacks, use_names);
 
     if !callstacks {
         event.set_no_callstack_flag();
