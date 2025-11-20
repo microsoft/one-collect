@@ -7,6 +7,7 @@ use std::os::fd::{FromRawFd, IntoRawFd, RawFd};
 use std::ops::DerefMut;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry::{self, Vacant};
+use tracing::{debug, trace};
 
 use super::*;
 use crate::PathBufInteger;
@@ -109,6 +110,7 @@ impl MachineState {
         self.machine.add_process(
             pid,
             Process::new());
+        debug!("Process added for callstack tracking: pid={}", pid);
     }
 
     fn fork(
@@ -116,12 +118,14 @@ impl MachineState {
         pid: u32,
         ppid: u32) {
         self.machine.fork_process(pid, ppid);
+        debug!("Process forked: pid={}, ppid={}", pid, ppid);
     }
 
     fn exit(
         &mut self,
         pid: u32) {
         self.machine.remove_process(pid);
+        debug!("Process removed from callstack tracking: pid={}", pid);
     }
 
     fn add_mmap_exec(
@@ -155,6 +159,9 @@ impl MachineState {
                 /* Only insert if we can actually open it */
                 if let Ok(file) = std::fs::File::open(&self.path) {
                     entry.insert(file.into_raw_fd());
+                    debug!("Module file opened for callstack: pid={}, filename={}, dev={}, ino={}", pid, filename, dev, ino);
+                } else {
+                    debug!("Failed to open module file: pid={}, filename={}", pid, filename);
                 }
             }
         }
@@ -188,6 +195,7 @@ impl MachineState {
             }
 
             process.add_module(module);
+            trace!("Module added to process: pid={}, start={:#x}, end={:#x}, filename={}", pid, start, end, filename);
         }
     }
 }
@@ -234,7 +242,8 @@ impl<'a> UnwindRequest<'a> {
 
     pub fn unwind_machine(
         &mut self) -> UnwindResult {
-        self.machine.unwind_process(
+        trace!("Starting machine unwind: pid={}, rip={:#x}, rbp={:#x}, rsp={:#x}", self.pid, self.rip, self.rbp, self.rsp);
+        let result = self.machine.unwind_process(
             self.pid,
             self.unwinder,
             self.modules,
@@ -242,13 +251,16 @@ impl<'a> UnwindRequest<'a> {
             self.rbp,
             self.rsp,
             self.stack_data,
-            self.frames)
+            self.frames);
+        trace!("Machine unwind completed: pid={}, frames_pushed={}", self.pid, result.frames_pushed);
+        result
     }
 
     pub fn unwind_process(
         &mut self,
         process: &dyn Unwindable,
         accessor: &dyn ModuleAccessor) -> UnwindResult {
+        trace!("Starting process unwind: pid={}, rip={:#x}", self.pid, self.rip);
         let mut result = UnwindResult::new();
 
         self.unwinder.reset(
@@ -266,6 +278,7 @@ impl<'a> UnwindRequest<'a> {
             self.frames,
             &mut result);
 
+        trace!("Process unwind completed: pid={}, frames_pushed={}", self.pid, result.frames_pushed);
         result
     }
 }
@@ -291,7 +304,10 @@ impl CallstackReader {
                 /* No callchain, try to get from IP */
                 if let Some(ip) = state.ip_field.try_get_u64(full_data) {
                     frames.push(ip);
+                    debug!("Read single frame from IP: ip={:#x}", ip);
                 }
+            } else {
+                debug!("Reading frames from callchain: frame_count={}", count);
             }
 
             while count > 0 {
@@ -318,13 +334,17 @@ impl CallstackReader {
 
                 /* Expected 3 registers on x64 */
                 if data.len() != 24 {
+                    debug!("Invalid register data length: expected=24, got={}", data.len());
                     return;
                 }
 
                 /* PID */
                 match state.pid_field.try_get_u32(full_data) {
                     Some(_pid) => { pid = _pid; },
-                    None => { return; },
+                    None => { 
+                        debug!("Failed to read PID from data");
+                        return; 
+                    },
                 }
 
                 let rbp = u64::from_ne_bytes(data[0..8].try_into().unwrap());
@@ -333,6 +353,8 @@ impl CallstackReader {
 
                 /* Stack data */
                 let data = state.stack_user_field.get_data(full_data);
+
+                trace!("Unwinding with user stack: pid={}, rip={:#x}, rbp={:#x}, rsp={:#x}, stack_size={}", pid, rip, rbp, rsp, data.len());
 
                 let mut request = UnwindRequest::new(
                     pid,
