@@ -7,7 +7,7 @@ use std::os::fd::{FromRawFd, IntoRawFd, RawFd};
 use std::ops::DerefMut;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry::{self, Vacant};
-use tracing::{debug, trace};
+use tracing::{debug, warn, trace};
 
 use super::*;
 use crate::PathBufInteger;
@@ -159,9 +159,8 @@ impl MachineState {
                 /* Only insert if we can actually open it */
                 if let Ok(file) = std::fs::File::open(&self.path) {
                     entry.insert(file.into_raw_fd());
-                    debug!("Module file opened for callstack: pid={}, filename={}, dev={}, ino={}", pid, filename, dev, ino);
                 } else {
-                    debug!("Failed to open module file: pid={}, filename={}", pid, filename);
+                    warn!("Failed to open module file: pid={}, filename={}", pid, filename);
                 }
             }
         }
