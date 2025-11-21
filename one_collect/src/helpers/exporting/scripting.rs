@@ -860,11 +860,14 @@ impl ScriptedUniversalExporter {
     }
 
     fn init(&mut self) {
+        info!("Initializing script environment");
+        debug!("Registering export configuration functions");
         let fn_exporter = self.export_swapper();
 
         self.rhai_engine().register_fn(
             "with_per_cpu_buffer_bytes",
             move |size: i64| {
+                debug!("Setting per-CPU buffer size: bytes={}", size);
                 fn_exporter.borrow_mut().swap(|exporter| {
                     exporter.with_per_cpu_buffer_bytes(size as usize)
                 });
@@ -1000,7 +1003,13 @@ impl ScriptedUniversalExporter {
     pub fn from_script(
         self,
         script: &str) -> anyhow::Result<UniversalExporter> {
-        info!("Starting script execution for export configuration");
+        info!("Starting script execution: length={}", script.len());
+        debug!("Script content preview: {}", 
+            if script.len() > 100 { 
+                format!("{}...", &script[..100])
+            } else { 
+                script.to_string() 
+            });
         
         match self.engine.run(script) {
             Ok(()) => {
@@ -1016,6 +1025,7 @@ impl ScriptedUniversalExporter {
             },
         }
 
+        info!("Finalizing script configuration");
         self.exporter.borrow_mut().take()
     }
 }

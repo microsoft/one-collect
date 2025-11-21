@@ -308,7 +308,7 @@ impl ExportGraph {
         process: &ExportProcess,
         kind: u16,
         value_converter: Option<&dyn ExportGraphMetricValueConverter>) {
-        if tracing::level_filters::LevelFilter::current() >= tracing::Level::DEBUG {
+        if enabled!(Level::DEBUG) {
             let sample_count = process.samples().iter().filter(|s| s.kind() == kind).count();
             debug!("Adding samples to graph: process_pid={}, kind={}, sample_count={}", 
                 process.pid(), kind, sample_count);
