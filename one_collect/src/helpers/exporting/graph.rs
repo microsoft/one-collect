@@ -4,6 +4,8 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry::{Vacant, Occupied};
 
+use tracing::{debug, info};
+
 use crate::intern::InternedStrings;
 use crate::helpers::exporting::{*};
 
@@ -306,6 +308,10 @@ impl ExportGraph {
         process: &ExportProcess,
         kind: u16,
         value_converter: Option<&dyn ExportGraphMetricValueConverter>) {
+        let sample_count = process.samples().iter().filter(|s| s.kind() == kind).count();
+        debug!("Adding samples to graph: process_pid={}, kind={}, sample_count={}", 
+            process.pid(), kind, sample_count);
+        
         let mut callstack_id_to_node: HashMap<usize, usize> = HashMap::new();
 
         let default_converter = DefaultExportGraphMetricValueConverter::default();
@@ -387,6 +393,9 @@ impl ExportGraph {
             node.exclusive += value;
             node.total += value;
         }
+        
+        info!("Graph construction complete: node_count={}, resolvable_count={}", 
+            self.nodes.len(), self.resolvables.len());
     }
 }
 

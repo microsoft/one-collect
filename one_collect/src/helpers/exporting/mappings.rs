@@ -3,6 +3,8 @@
 
 use std::cmp::Ordering;
 
+use tracing::debug;
+
 use ruwind::{CodeSection, ModuleKey, UnwindType};
 
 use super::*;
@@ -186,6 +188,7 @@ impl ExportMapping {
         unique_ips: &mut Vec<u64>,
         sym_reader: &mut impl ExportSymbolReader,
         strings: &mut InternedStrings) {
+        let initial_symbol_count = self.symbols.len();
         unique_ips.sort();
         sym_reader.reset();
 
@@ -227,6 +230,12 @@ impl ExportMapping {
                     self.add_symbol(symbol);
                 }
             }
+        }
+        
+        let added_symbols = self.symbols.len() - initial_symbol_count;
+        if added_symbols > 0 {
+            debug!("Added symbols to mapping: mapping_id={}, start={:#x}, added_count={}", 
+                self.id, self.start, added_symbols);
         }
     }
 }
@@ -278,6 +287,7 @@ impl ExportMappingLookup {
     pub fn mappings(&self) -> &Vec<ExportMapping> { &self.mappings }
 
     fn build_lookup(&self) {
+        debug!("Building mapping lookup: mapping_count={}", self.mappings.len());
         let mut items = Vec::new();
 
         for (i, mapping) in self.mappings.iter().enumerate() {
