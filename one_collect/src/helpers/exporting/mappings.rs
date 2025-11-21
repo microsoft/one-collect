@@ -3,7 +3,7 @@
 
 use std::cmp::Ordering;
 
-use tracing::debug;
+use tracing::{debug, info, trace};
 
 use ruwind::{CodeSection, ModuleKey, UnwindType};
 

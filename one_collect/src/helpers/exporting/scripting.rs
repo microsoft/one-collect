@@ -6,6 +6,7 @@ use crate::scripting::{ScriptEngine, ScriptEvent};
 use crate::event::*;
 
 use rhai::{CustomType, TypeBuilder, Engine, EvalAltResult};
+use tracing::{info, error};
 
 pub struct UniversalExporterSwapper {
     exporter: Option<UniversalExporter>,
@@ -861,13 +862,12 @@ impl ScriptedUniversalExporter {
 
     fn init(&mut self) {
         info!("Initializing script environment");
-        debug!("Registering export configuration functions");
         let fn_exporter = self.export_swapper();
 
         self.rhai_engine().register_fn(
             "with_per_cpu_buffer_bytes",
             move |size: i64| {
-                debug!("Setting per-CPU buffer size: bytes={}", size);
+                info!("Setting per-CPU buffer size: bytes={}", size);
                 fn_exporter.borrow_mut().swap(|exporter| {
                     exporter.with_per_cpu_buffer_bytes(size as usize)
                 });
@@ -885,8 +885,9 @@ impl ScriptedUniversalExporter {
         self.rhai_engine().register_fn(
             "new_timeline",
             |name: String| -> Result<ScriptTimeline, Box<EvalAltResult>> {
-            Ok(ScriptTimeline {
-                timeline: Writable::new(ExporterTimeline::new(name))
+                info!("Script registered new_timeline: name={}", name);
+                Ok(ScriptTimeline {
+                    timeline: Writable::new(ExporterTimeline::new(name))
                 })
         });
 
@@ -895,7 +896,8 @@ impl ScriptedUniversalExporter {
         self.rhai_engine().register_fn(
             "use_timeline",
             move |timeline: ScriptTimeline| -> Result<(), Box<EvalAltResult>> {
-            timeline.apply(&mut fn_exporter.borrow_mut())
+                info!("Script called use_timeline");
+                timeline.apply(&mut fn_exporter.borrow_mut())
         });
 
         let fn_exporter = self.export_swapper();
@@ -903,7 +905,8 @@ impl ScriptedUniversalExporter {
         self.rhai_engine().register_fn(
             "record_event",
             move |event: ScriptEvent| -> Result<(), Box<EvalAltResult>> {
-            if let Some(event) = event.to_event() {
+                info!("Script called record_event");
+                if let Some(event) = event.to_event() {
                 fn_exporter.borrow_mut().add_event(
                     event,
                     move |built| {
@@ -935,6 +938,8 @@ impl ScriptedUniversalExporter {
                 sample_field: String,
                 sample_type: String,
                 record_data: bool| -> Result<(), Box<EvalAltResult>> {
+                info!("Script called sample_event: sample_field={}, sample_type={}, record_data={}", 
+                      sample_field, sample_type, record_data);
                 if let Some(event) = event.to_event() {
                     let mut get_data = match event.try_get_field_data_closure(&sample_field) {
                         Some(closure) => { closure },
@@ -1003,13 +1008,7 @@ impl ScriptedUniversalExporter {
     pub fn from_script(
         self,
         script: &str) -> anyhow::Result<UniversalExporter> {
-        info!("Starting script execution: length={}", script.len());
-        debug!("Script content preview: {}", 
-            if script.len() > 100 { 
-                format!("{}...", &script[..100])
-            } else { 
-                script.to_string() 
-            });
+        info!("Starting script execution:\n{}", script);
         
         match self.engine.run(script) {
             Ok(()) => {
@@ -1025,7 +1024,6 @@ impl ScriptedUniversalExporter {
             },
         }
 
-        info!("Finalizing script configuration");
         self.exporter.borrow_mut().take()
     }
 }

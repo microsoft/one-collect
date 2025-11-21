@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry::{Vacant, Occupied};
 
-use tracing::{debug, info};
+use tracing::{debug, info, enabled, Level};
 
 use crate::intern::InternedStrings;
 use crate::helpers::exporting::{*};
