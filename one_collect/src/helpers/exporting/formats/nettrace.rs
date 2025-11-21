@@ -12,7 +12,7 @@ use crate::helpers::exporting::*;
 use crate::helpers::exporting::graph::*;
 use crate::helpers::exporting::attributes::*;
 
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 pub trait NetTraceFormat {
     fn to_net_trace(
@@ -285,7 +285,6 @@ struct NetTraceWriter {
 
 impl NetTraceWriter {
     fn new(path: &str) -> anyhow::Result<Self> {
-        debug!("Creating NetTrace writer: path={}", path);
         let mut trace = Self {
             output: BufWriter::new(File::create(path)?),
             event_block: Vec::new(),
@@ -1407,8 +1406,6 @@ impl NetTraceWriter {
     fn finish(
         &mut self,
         machine: &ExportMachine) -> anyhow::Result<()> {
-        debug!("Finalizing NetTrace file");
-        
         /* Determine end time to use */
         let end_time = match machine.end_qpc() {
             Some(end_qpc) => { end_qpc },
@@ -1443,7 +1440,7 @@ impl NetTraceFormat for ExportMachine {
         let sync_time = match self.start_date() {
             Some(value) => { value },
             None => { 
-                warn!("NetTrace export failed: no start date");
+                error!("NetTrace export failed: no start date");
                 anyhow::bail!("No start date saved, invoke mark_start()."); 
             },
         };
@@ -1451,7 +1448,7 @@ impl NetTraceFormat for ExportMachine {
         let sync_time_qpc = match self.start_qpc() {
             Some(value) => { value },
             None => { 
-                warn!("NetTrace export failed: no start qpc");
+                error!("NetTrace export failed: no start qpc");
                 anyhow::bail!("No start qpc saved, invoke mark_start()."); 
             },
         };
