@@ -227,6 +227,8 @@ impl ExportMapping {
                         start_ip,
                         end_ip);
 
+                    trace!("Adding symbol to mapping: mapping_id={}, name={}, start={:#x}, end={:#x}", 
+                        self.id, demangled_name, start_ip, end_ip);
                     self.add_symbol(symbol);
                 }
             }
@@ -234,7 +236,7 @@ impl ExportMapping {
         
         let added_symbols = self.symbols.len() - initial_symbol_count;
         if added_symbols > 0 {
-            debug!("Added symbols to mapping: mapping_id={}, start={:#x}, added_count={}", 
+            info!("Added symbols to mapping: mapping_id={}, start={:#x}, added_count={}", 
                 self.id, self.start, added_symbols);
         }
     }
@@ -287,7 +289,6 @@ impl ExportMappingLookup {
     pub fn mappings(&self) -> &Vec<ExportMapping> { &self.mappings }
 
     fn build_lookup(&self) {
-        debug!("Building mapping lookup: mapping_count={}", self.mappings.len());
         let mut items = Vec::new();
 
         for (i, mapping) in self.mappings.iter().enumerate() {

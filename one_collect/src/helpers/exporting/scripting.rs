@@ -1000,9 +1000,14 @@ impl ScriptedUniversalExporter {
     pub fn from_script(
         self,
         script: &str) -> anyhow::Result<UniversalExporter> {
+        info!("Starting script execution for export configuration");
+        
         match self.engine.run(script) {
-            Ok(()) => {},
+            Ok(()) => {
+                info!("Script execution completed successfully");
+            },
             Err(err) => {
+                error!("Script execution failed: {:?}", err);
                 let mut exporter = self.exporter.borrow_mut().take()?;
 
                 exporter.cleanup();

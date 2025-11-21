@@ -308,9 +308,11 @@ impl ExportGraph {
         process: &ExportProcess,
         kind: u16,
         value_converter: Option<&dyn ExportGraphMetricValueConverter>) {
-        let sample_count = process.samples().iter().filter(|s| s.kind() == kind).count();
-        debug!("Adding samples to graph: process_pid={}, kind={}, sample_count={}", 
-            process.pid(), kind, sample_count);
+        if tracing::level_filters::LevelFilter::current() >= tracing::Level::DEBUG {
+            let sample_count = process.samples().iter().filter(|s| s.kind() == kind).count();
+            debug!("Adding samples to graph: process_pid={}, kind={}, sample_count={}", 
+                process.pid(), kind, sample_count);
+        }
         
         let mut callstack_id_to_node: HashMap<usize, usize> = HashMap::new();
 
@@ -394,8 +396,8 @@ impl ExportGraph {
             node.total += value;
         }
         
-        info!("Graph construction complete: node_count={}, resolvable_count={}", 
-            self.nodes.len(), self.resolvables.len());
+        info!("Samples added to graph: pid={}, node_count={}, resolvable_count={}", 
+            process.pid(), self.nodes.len(), self.resolvables.len());
     }
 }
 
