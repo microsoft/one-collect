@@ -18,7 +18,7 @@ use protobuf::rt::{self, *};
 use flate2::write::GzEncoder;
 use flate2::Compression;
 
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 fn write_value_type(
     field_number: u32,

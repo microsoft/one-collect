@@ -7,7 +7,7 @@ use std::str::FromStr;
 use crate::event::*;
 
 use rhai::{Engine, CustomType, TypeBuilder};
-use tracing::{debug, info, warn, error};
+
 
 mod os;
 use os::OSScriptEngine;

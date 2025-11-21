@@ -12,7 +12,7 @@ use crate::helpers::exporting::*;
 use crate::helpers::exporting::graph::*;
 use crate::helpers::exporting::attributes::*;
 
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 pub trait NetTraceFormat {
     fn to_net_trace(

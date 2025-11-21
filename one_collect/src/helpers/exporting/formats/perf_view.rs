@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry::{Vacant, Occupied};
 use crate::helpers::exporting::graph::{Target, ExportGraph};
 
-use tracing::{debug, info};
+use tracing::info;
 
 pub trait PerfViewXmlFormat {
     fn to_perf_view_xml(

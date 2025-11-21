@@ -2,7 +2,7 @@
 // Licensed under the MIT license.
 
 use std::fs::File;
-use std::path::PathBuf;
+
 use std::time::Duration;
 use std::array::TryFromSliceError;
 use std::collections::{HashSet, HashMap};
@@ -11,7 +11,7 @@ use std::rc::Rc;
 use super::*;
 use crate::sharing::*;
 use crate::event::*;
-use crate::PathBufInteger;
+
 
 #[cfg(target_os = "linux")]
 use std::os::fd::FromRawFd;
