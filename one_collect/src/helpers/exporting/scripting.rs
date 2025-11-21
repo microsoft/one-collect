@@ -885,7 +885,7 @@ impl ScriptedUniversalExporter {
         self.rhai_engine().register_fn(
             "new_timeline",
             |name: String| -> Result<ScriptTimeline, Box<EvalAltResult>> {
-                info!("Script registered new_timeline: name={}", name);
+                info!("Registered new_timeline: name={}", name);
                 Ok(ScriptTimeline {
                     timeline: Writable::new(ExporterTimeline::new(name))
                 })
@@ -896,7 +896,7 @@ impl ScriptedUniversalExporter {
         self.rhai_engine().register_fn(
             "use_timeline",
             move |timeline: ScriptTimeline| -> Result<(), Box<EvalAltResult>> {
-                info!("Script called use_timeline");
+                info!("Using timeline");
                 timeline.apply(&mut fn_exporter.borrow_mut())
         });
 
@@ -905,7 +905,7 @@ impl ScriptedUniversalExporter {
         self.rhai_engine().register_fn(
             "record_event",
             move |event: ScriptEvent| -> Result<(), Box<EvalAltResult>> {
-                info!("Script called record_event");
+                info!("Recording event: ");
                 if let Some(event) = event.to_event() {
                 fn_exporter.borrow_mut().add_event(
                     event,
