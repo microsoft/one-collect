@@ -106,6 +106,7 @@ impl PerfMapContext {
                    line.starts_with("DOTNET_PerfMapEnabled=") {
                     /* Unless it's defined as 0, we treat it as enabled */
                     if !line.ends_with("=0") {
+                       debug!("Process already has perfmap enabled: pid={}", self.pid);
                        return Ok(true);
                     }
                 }
@@ -135,7 +136,10 @@ impl PerfMapContext {
             Some(mut sock) => {
                 let mut result = [0; 24];
 
-                sock.write_all(bytes)?;
+                if let Err(e) = sock.write_all(bytes) {
+                    warn!("Failed to write to diagnostic socket: pid={}, nspid={}, error={}", self.pid, self.nspid, e);
+                    anyhow::bail!("Failed to write to diagnostic socket: {}", e);
+                }
                 sock.read_exact(&mut result)?;
 
                 let result = u32::from_le_bytes(result[20..].try_into()?);
@@ -154,7 +158,13 @@ impl PerfMapContext {
         let bytes = b"DOTNET_IPC_V1\x00\x14\x00\x04\x06\x00\x00";
 
         match self.open_diag_socket() {
-            Some(mut sock) => { Ok(sock.write_all(bytes)?) },
+            Some(mut sock) => { 
+                if let Err(e) = sock.write_all(bytes) {
+                    warn!("Failed to write to diagnostic socket: pid={}, nspid={}, error={}", self.pid, self.nspid, e);
+                    anyhow::bail!("Failed to write to diagnostic socket: {}", e);
+                }
+                Ok(())
+            },
             None => { anyhow::bail!("Socket not found."); },
         }
     }
@@ -346,7 +356,6 @@ impl UserEventTracker {
 
         socket.read_exact(&mut session)?;
         
-        info!("User events enabled successfully");
         Ok(())
     }
 
@@ -379,7 +388,7 @@ impl UserEventTracker {
                     if let Ok(settings) = arc.lock() {
                         match Self::enable_events(&mut socket, &settings, &mut buffer) {
                             Ok(()) => {
-                                debug!("Enabled .NET events for process: pid={}", pid);
+                                info!("Enabled .NET events for process: pid={}", pid);
                                 pids.insert(pid, socket);
                             },
                             Err(err) => {
