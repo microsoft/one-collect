@@ -7,6 +7,7 @@ use crate::Guid;
 use crate::scripting::ScriptEvent;
 
 use rhai::{Engine, EvalAltResult};
+use tracing::{debug, info, warn, error};
 
 #[repr(C)]
 struct NtOsVersionInfo {

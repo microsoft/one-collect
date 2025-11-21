@@ -9,6 +9,7 @@ use crate::page_size_to_mask;
 use crate::Writable;
 
 use rhai::{Engine, EvalAltResult};
+use tracing::{debug, info, warn, error};
 
 pub(crate) fn version() -> (u16, u16) {
     let mut major = 0;

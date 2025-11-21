@@ -905,8 +905,8 @@ impl ScriptedUniversalExporter {
         self.rhai_engine().register_fn(
             "record_event",
             move |event: ScriptEvent| -> Result<(), Box<EvalAltResult>> {
-                info!("Recording event: ");
                 if let Some(event) = event.to_event() {
+                    info!("Recording event: name={}", event.name());
                 fn_exporter.borrow_mut().add_event(
                     event,
                     move |built| {
