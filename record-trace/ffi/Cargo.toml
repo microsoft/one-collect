@@ -14,3 +14,4 @@ lto = true
 
 [dependencies]
 engine = { path = "../engine" }
+tracing = "0.1"

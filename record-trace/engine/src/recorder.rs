@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
+use tracing::{error, info, debug};
+
 use crate::commandline::RecordArgs;
 use crate::EngineOutput;
 
@@ -41,6 +43,7 @@ impl Recorder {
     pub fn run(&mut self) -> i32 {
         let mut format = self.args.format();
         if let Err(e) = format.validate(&self.args) {
+            error!("Format validation failed: error={}", e);
             self.output.error(&format!("Error: {}", e));
             return 1;
         }
@@ -52,20 +55,24 @@ impl Recorder {
 
         // CPU sampling.
         if self.args.on_cpu() {
+            debug!("CPU sampling enabled: frequency={}", DEFAULT_CPU_FREQUENCY);
             settings = settings.with_cpu_profiling(DEFAULT_CPU_FREQUENCY);
         }
 
         // Context switches.
         if self.args.off_cpu() {
+            debug!("Context switch sampling enabled");
             settings = settings.with_cswitches();
         }
 
         // Page faults.
         if self.args.soft_page_faults() {
+            debug!("Soft page fault sampling enabled");
             settings = settings.with_soft_page_faults();
         }
 
         if self.args.hard_page_faults() {
+            debug!("Hard page fault sampling enabled");
             settings = settings.with_hard_page_faults();
         }
 
@@ -212,6 +219,7 @@ impl Recorder {
 
         // Filter pids.
         if let Some(target_pids) = self.args.target_pids() {
+            debug!("Process filter enabled: pids={:?}", target_pids);
             for target_pid in target_pids {
                 settings = settings.with_target_pid(*target_pid);
             }
@@ -222,25 +230,32 @@ impl Recorder {
 
         let universal = match self.args.script() {
             Some(script) => {
+                debug!("Script-based configuration enabled");
                 let mut scripted = ScriptedUniversalExporter::new(settings);
 
                 scripted.enable_os_scripting();
                 scripted.enable_dotnet_scripting();
 
                 match scripted.from_script(script) {
-                    Ok(universal) => { universal },
+                    Ok(universal) => { 
+                        debug!("Script loaded successfully");
+                        universal 
+                    },
                     Err(e) => {
+                        error!("Script loading failed: error={}", e);
                         self.output.error(&format!("Error: {}", e));
                         return 1;
                     }
                 }
             },
             None => {
+                debug!("Using default configuration");
                 UniversalExporter::new(settings)
             }
         }.with_dotnet_help(dotnet);
         
         // Start recording.
+        info!("Starting recording session");
         let print_banner = Arc::new(AtomicBool::new(true));
         let parse_output = self.output.clone();
 
@@ -262,8 +277,12 @@ impl Recorder {
         });
 
         let exporter = match parse_result {
-            Ok(exporter) => exporter,
+            Ok(exporter) => {
+                info!("Recording session completed successfully");
+                exporter
+            },
             Err(e) => {
+                error!("Recording session failed: error={}", e);
                 self.output.error(&format!("Error: {}", e));
                 return 1;
             }
@@ -273,15 +292,18 @@ impl Recorder {
         let mut exporter = exporter.borrow_mut();
 
         // Capture binary metdata and resolve symbols.
+        info!("Resolving symbols");
         self.output.normal("Resolving symbols.");
         exporter.capture_and_resolve_symbols();
 
         if let Err(e) = format.run(&mut exporter, &self.args) {
+            error!("Export failed: error={}", e);
             self.output.error(&format!("Error: {}", e));
             exporter.cleanup();
             return 1;
         }
 
+        info!("Trace written successfully: path={}", self.args.output_path().display());
         self.output.normal("Finished recording trace.");
         self.output.normal(
             &format!("Trace written to {}", self.args.output_path().display()));

@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
+use tracing::{error, warn, info, debug};
+
 use engine::commandline::RecordArgs;
 use engine::recorder::Recorder;
 use engine::EngineOutput;
@@ -21,13 +23,17 @@ extern "C" fn RecordTrace(
     callback: Option<COutputCallback>) -> i32 {
     /* Safety checks */
     if args.is_null() || callback.is_none() {
+        warn!("RecordTrace FFI call failed: null args pointer or missing callback");
         return 1;
     }
+
+    info!("RecordTrace FFI call started: args_len={}", args_len);
 
     let args = unsafe { std::slice::from_raw_parts(args, args_len) };
     let callback = callback.unwrap();
 
     if let Ok(args) = std::str::from_utf8(args) {
+        debug!("Arguments parsed successfully: args={}", args);
         let mut output = EngineOutput::default();
 
         output.with_normal(move |output| {
@@ -68,8 +74,11 @@ extern "C" fn RecordTrace(
             RecordArgs::parse(parser),
             output);
 
-        recorder.run()
+        let result = recorder.run();
+        info!("RecordTrace FFI call completed: result={}", result);
+        result
     } else {
+        error!("RecordTrace FFI call failed: invalid UTF-8 in arguments");
         1
     }
 }
