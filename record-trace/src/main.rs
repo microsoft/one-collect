@@ -73,7 +73,8 @@ fn resolve_log_path(log_path: Option<String>, output_path: Option<String>) -> Pa
 fn init_logging(filter: &Option<String>, path: &PathBuf) {
     let file = match std::fs::OpenOptions::new()
         .create(true)
-        .append(true)
+        .write(true)
+        .truncate(true)
         .open(path)
     {
         Ok(file) => file,
@@ -83,9 +84,16 @@ fn init_logging(filter: &Option<String>, path: &PathBuf) {
         }
     };
 
-    let filter_str = filter.as_deref().unwrap_or("info");
+    // Build filter with default "info" level plus any user-specified rules
+    let filter_str = if let Some(user_filter) = filter {
+        // Combine default "info" with user's filter rules
+        format!("info,{}", user_filter)
+    } else {
+        "info".to_string()
+    };
+    
     let env_filter = EnvFilter::try_from_default_env()
-        .or_else(|_| EnvFilter::try_new(filter_str))
+        .or_else(|_| EnvFilter::try_new(&filter_str))
         .unwrap_or_else(|_| EnvFilter::new("info"));
 
     tracing_subscriber::fmt()
