@@ -86,7 +86,6 @@ fn init_logging(filter: &Option<String>, path: &PathBuf) {
 
     // Build filter with default "info" level plus any user-specified rules
     let filter_str = if let Some(user_filter) = filter {
-        // Combine default "info" with user's filter rules
         format!("info,{}", user_filter)
     } else {
         "info".to_string()
