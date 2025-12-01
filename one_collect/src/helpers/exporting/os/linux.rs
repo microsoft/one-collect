@@ -1279,7 +1279,7 @@ impl OSExportMachine {
                                     let mut debug_link_buf: [u8; 1024] = [0; 1024];
                                     if let Ok(Some(debug_link)) = read_debug_link(&mut reader, &sections, &section_offsets, &mut debug_link_buf) {
                                         let str_val = get_str(debug_link);
-                                        debug!("ELF debug link found: link={}", str_val);
+                                        debug!("ELF debug link: link={}", str_val);
                                         elf_metadata.set_debug_link(Some(str_val.to_owned()), &mut machine.strings);
                                     }
                                 }
