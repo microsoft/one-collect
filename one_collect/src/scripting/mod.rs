@@ -8,7 +8,6 @@ use crate::event::*;
 
 use rhai::{Engine, CustomType, TypeBuilder};
 
-
 mod os;
 use os::OSScriptEngine;
 

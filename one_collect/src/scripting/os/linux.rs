@@ -10,7 +10,6 @@ use crate::Writable;
 
 use rhai::{Engine, EvalAltResult};
 
-
 pub(crate) fn version() -> (u16, u16) {
     let mut major = 0;
     let mut minor = 0;

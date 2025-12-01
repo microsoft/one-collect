@@ -248,14 +248,15 @@ impl OSDotNetEventFactory {
         let provider = guid_from_provider(provider_name)?;
         name = event_full_name(provider_name, provider, &name);
 
+        debug!("Creating new .NET event: provider={}, name={}, keyword={:#x}, level={}", provider_name, name, keyword, level);
+
         /* TODO: Windows TraceLogging Support */
-        let mut event = Event::new(id.unwrap_or(0), name.clone());
+        let mut event = Event::new(id.unwrap_or(0), name);
 
         *event.extension_mut().provider_mut() = provider;
         *event.extension_mut().level_mut() = level;
         *event.extension_mut().keyword_mut() = keyword;
         
-        debug!("Created new .NET event: provider={}, name={}, keyword={:#x}, level={}", provider_name, name, keyword, level);
         Ok(event)
     }
 }
