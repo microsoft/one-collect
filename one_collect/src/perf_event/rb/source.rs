@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
+use tracing::{debug, info, trace, warn};
+
 use super::*;
 
 type BoxedBuilderHook = Box<dyn FnOnce(&mut RingBufSessionBuilder)>;
@@ -333,6 +335,11 @@ impl RingBufSessionBuilder {
     }
 
     pub fn build(&mut self) -> IOResult<PerfSession> {
+        debug!(
+            "RingBufSessionBuilder::build: pages={}, target_pids={:?}",
+            self.pages, self.target_pids
+        );
+
         let mut hooks = self.hooks.take();
 
         if let Some(hooks) = &mut hooks {
@@ -365,6 +372,8 @@ impl RingBufSessionBuilder {
                 }
             }
         }
+
+        info!("PerfSession created successfully");
 
         Ok(session)
     }
@@ -451,14 +460,28 @@ impl RingBufDataSource {
                                 cpu_buf.fd.unwrap()));
                     }
 
+                    trace!(
+                        "add_cpu_bufs: cpu={}, id={}, leader_id={}, target_pid={:?}",
+                        i, id, leader_id, target_pid
+                    );
+
                     ring_bufs.insert(id, cpu_buf);
                 },
                 None => {
+                    warn!(
+                        "add_cpu_bufs failed: no buffer ID returned, cpu={}, target_pid={:?}",
+                        i, target_pid
+                    );
                     return Err(io_error(
                         "Internal error getting buffer ID."));
                 }
             }
         }
+
+        debug!(
+            "add_cpu_bufs completed: cpu_count={}, target_pid={:?}",
+            cpu_count(), target_pid
+        );
 
         Ok(())
     }
@@ -482,6 +505,11 @@ impl RingBufDataSource {
     }
 
     fn build(&mut self) -> IOResult<()> {
+        debug!(
+            "RingBufDataSource::build: pages={}, target_pids={:?}",
+            self.pages, self.target_pids
+        );
+
         /* Always required */
         let common = self.kernel_builder
             .get_or_insert_with(RingBufBuilder::for_kernel)
@@ -495,6 +523,8 @@ impl RingBufDataSource {
             Some(pids) => {
                 /* Populate current tasks for PIDs */
                 Self::tasks_for_pids(pids);
+
+                debug!("build: found {} task(s) for target PIDs", pids.len());
 
                 pids
             },
@@ -520,14 +550,22 @@ impl RingBufDataSource {
                     self.readers.push(reader);
                     self.cursors.push(CpuRingCursor::default());
 
+                    trace!("build: leader ring buffer created, cpu={}, id={}", i, id);
+
                     self.ring_bufs.insert(id, cpu_buf);
                 },
                 None => {
+                    warn!("build failed: no buffer ID returned for leader ring, cpu={}", i);
                     return Err(io_error(
                         "Internal error getting buffer ID."));
                 }
             }
         }
+
+        debug!(
+            "build: leader ring buffers created, cpu_count={}, ring_buf_count={}",
+            cpu_count(), self.ring_bufs.len()
+        );
 
         /* Redirect other kernel events for other PIDs */
         if !pids.is_empty() {
@@ -544,6 +582,7 @@ impl RingBufDataSource {
 
         /* Add in profiling samples and redirect to kernel outputs */
         if let Some(profiling_builder) = self.profiling_builder.as_mut() {
+            debug!("build: adding profiling event buffers");
             let common = profiling_builder.build();
 
             if pids.is_empty() {
@@ -567,6 +606,7 @@ impl RingBufDataSource {
 
         /* Add in cswitch samples and redirect to kernel outputs */
         if let Some(cswitch_builder) = self.cswitch_builder.as_mut() {
+            debug!("build: adding context switch event buffers");
             let common = cswitch_builder.build();
 
             if pids.is_empty() {
@@ -590,6 +630,7 @@ impl RingBufDataSource {
 
         /* Add in page fault samples and redirect to kernel outputs */
         if let Some(faults_builder) = self.soft_page_faults_builder.as_mut() {
+            debug!("build: adding soft page faults event buffers");
             let common = faults_builder.build();
 
             if pids.is_empty() {
@@ -612,6 +653,7 @@ impl RingBufDataSource {
         }
 
         if let Some(faults_builder) = self.hard_page_faults_builder.as_mut() {
+            debug!("build: adding hard page faults event buffers");
             let common = faults_builder.build();
 
             if pids.is_empty() {
@@ -633,25 +675,38 @@ impl RingBufDataSource {
             }
         }
 
+        info!(
+            "RingBufDataSource built successfully: ring_buf_count={}, reader_count={}",
+            self.ring_bufs.len(), self.readers.len()
+        );
+
         Ok(())
     }
 
     fn enable(&mut self) -> IOResult<()> {
+        debug!("RingBufDataSource::enable: enabling {} ring buffers", self.ring_bufs.len());
+
         for rb in self.ring_bufs.values() {
             rb.enable()?;
         }
 
         self.enabled = true;
 
+        info!("RingBufDataSource enabled: ring_buf_count={}", self.ring_bufs.len());
+
         Ok(())
     }
 
     fn disable(&mut self) -> IOResult<()> {
+        debug!("RingBufDataSource::disable: disabling {} ring buffers", self.ring_bufs.len());
+
         for rb in self.ring_bufs.values() {
             rb.disable()?;
         }
 
         self.enabled = false;
+
+        info!("RingBufDataSource disabled: ring_buf_count={}", self.ring_bufs.len());
 
         Ok(())
     }
@@ -754,6 +809,11 @@ impl RingBufDataSource {
 
         self.oldest_cpu = oldest_cpu;
         self.next_time = next_time;
+
+        trace!(
+            "find_current_buffer: oldest_cpu={:?}, oldest_time={:?}, next_time={:?}",
+            oldest_cpu, oldest_time, next_time
+        );
     }
 }
 
@@ -779,10 +839,13 @@ impl PerfDataSource for RingBufDataSource {
         let mut files = Vec::new();
 
         if let Some(bpf_builder) = self.bpf_builder.as_mut() {
+            debug!("create_bpf_files: creating BPF event buffers");
+
             let mut common = bpf_builder.build();
 
             if let Some(event) = &event {
                 if event.has_no_callstack_flag() {
+                    debug!("create_bpf_files: event has no_callstack flag, disabling callstack");
                     common = common.without_callstack();
                 }
             }
@@ -807,6 +870,10 @@ impl PerfDataSource for RingBufDataSource {
                     }
                 },
             }
+
+            info!("BPF files created: file_count={}", files.len());
+        } else {
+            debug!("create_bpf_files: no BPF builder configured");
         }
 
         Ok(files)
@@ -817,10 +884,13 @@ impl PerfDataSource for RingBufDataSource {
         event: &Event) -> IOResult<()> {
         /* Add in all the events and redirect to kernel outputs */
         if let Some(event_builder) = self.event_builder.as_mut() {
+            debug!("add_event: adding event id={}", event.id());
+
             let mut common = event_builder.build(event.id() as u64);
 
             /* Mutate attributes based on flags */
             if event.has_no_callstack_flag() {
+                debug!("add_event: event has no_callstack flag, disabling callstack");
                 common = common.without_callstack();
             }
 
@@ -844,12 +914,18 @@ impl PerfDataSource for RingBufDataSource {
                     }
                 },
             }
+
+            info!("Event added: event_id={}", event.id());
+        } else {
+            debug!("add_event: no event builder configured");
         }
 
         Ok(())
     }
 
     fn begin_reading(&mut self) {
+        trace!("begin_reading: starting read cycle for {} readers", self.readers.len());
+
         for i in 0..self.readers.len() {
             let reader = &mut self.readers[i];
             let cursor = &mut self.cursors[i];
@@ -858,6 +934,11 @@ impl PerfDataSource for RingBufDataSource {
         }
 
         self.find_current_buffer();
+
+        trace!(
+            "begin_reading: oldest_cpu={:?}, next_time={:?}",
+            self.oldest_cpu, self.next_time
+        );
     }
 
     fn read(
@@ -865,6 +946,7 @@ impl PerfDataSource for RingBufDataSource {
         timeout: Duration) -> Option<PerfData<'_>> {
         /* Bail if we couldn't find a current buffer */
         if self.oldest_cpu.is_none() {
+            trace!("read: no data available, sleeping for {:?}", timeout);
             std::thread::sleep(timeout);
             return None;
         }
@@ -884,6 +966,10 @@ impl PerfDataSource for RingBufDataSource {
                 if let Some(next_time) = self.next_time {
                     /* If older than next oldest, stop */
                     if time > next_time {
+                        trace!(
+                            "read: time {} exceeds next_time {}, switching buffers",
+                            time, next_time
+                        );
                         return None;
                     }
                 }
@@ -893,6 +979,7 @@ impl PerfDataSource for RingBufDataSource {
             },
             /* No data left, stop */
             None => {
+                trace!("read: no more data in buffer for cpu={}", cpu);
                 return None;
             }
         }
@@ -902,6 +989,8 @@ impl PerfDataSource for RingBufDataSource {
             cursor,
             &mut self.temp) {
             Ok(raw_data) => {
+                trace!("read: data read from cpu={}, size={}", cpu, raw_data.len());
+
                 let perf_data = PerfData {
                     ancillary,
                     raw_data,
@@ -909,12 +998,17 @@ impl PerfDataSource for RingBufDataSource {
 
                 Some(perf_data)
             },
-            Err(_) => None,
+            Err(e) => {
+                warn!("read failed: cpu={}, error={}", cpu, e);
+                None
+            },
         }
     }
 
     fn end_reading(&mut self) {
         if let Some(oldest_cpu) = self.oldest_cpu {
+            trace!("end_reading: completing read for cpu={}", oldest_cpu);
+
             let reader = &mut self.readers[oldest_cpu];
             let cursor = &mut self.cursors[oldest_cpu];
 
