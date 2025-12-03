@@ -4,6 +4,8 @@
 use std::cell::RefCell;
 use std::str::FromStr;
 
+use tracing::{debug, info, warn};
+
 use crate::event::*;
 
 use rhai::{Engine, CustomType, TypeBuilder};
@@ -189,6 +191,8 @@ pub struct ScriptEngine {
 
 impl ScriptEngine {
     pub fn new() -> Self {
+        debug!("ScriptEngine::new: creating new script engine");
+
         let mut engine = Engine::new();
 
         engine.
@@ -197,6 +201,8 @@ impl ScriptEngine {
             register_fn(
                 "new_environment",
                 || -> ScriptEnvironment { ScriptEnvironment::default() });
+
+        info!("ScriptEngine created successfully");
 
         Self {
             engine,
@@ -207,15 +213,22 @@ impl ScriptEngine {
     pub(crate) fn rhai_engine(&mut self) -> &mut Engine { &mut self.engine }
 
     pub fn enable_os_scripting(&mut self) {
+        debug!("ScriptEngine::enable_os_scripting: enabling OS-specific scripting features");
         self.os.enable(&mut self.engine);
+        info!("OS scripting enabled successfully");
     }
 
     pub fn eval<T: Clone + 'static>(
         &self,
         script: &str) -> anyhow::Result<T> {
+        debug!("ScriptEngine::eval: evaluating script, length={}", script.len());
         match self.engine.eval(script) {
-            Ok(value) => { Ok(value) },
+            Ok(value) => {
+                debug!("ScriptEngine::eval: evaluation successful");
+                Ok(value)
+            },
             Err(err) => {
+                warn!("ScriptEngine::eval failed: error={}", err);
                 anyhow::bail!("Error: {}", err);
             }
         }
@@ -224,9 +237,14 @@ impl ScriptEngine {
     pub fn run(
         &self,
         script: &str) -> anyhow::Result<()> {
+        debug!("ScriptEngine::run: running script, length={}", script.len());
         match self.engine.run(script) {
-            Ok(()) => { Ok(()) },
+            Ok(()) => {
+                debug!("ScriptEngine::run: execution successful");
+                Ok(())
+            },
             Err(err) => {
+                warn!("ScriptEngine::run failed: error={}", err);
                 anyhow::bail!("Error: {}", err);
             }
         }

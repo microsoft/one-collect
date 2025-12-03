@@ -43,8 +43,11 @@ pub(crate) fn version() -> (u16, u16) {
     let status = unsafe { RtlGetVersion(&mut version) };
 
     if status != 0 {
+        warn!("version: RtlGetVersion failed, status={}", status);
         /* Revert to default if any errors */
         version = NtOsVersionInfo::default();
+    } else {
+        debug!("version: OS version retrieved, major={}, minor={}", version.major, version.minor);
     }
 
     (version.major as u16, version.minor as u16)
@@ -63,9 +66,13 @@ impl OSScriptEngine {
 
         let provider = match u128::from_str_radix(provider.trim(), 16) {
             Ok(provider) => { provider },
-            Err(_) => { return Err("Invalid provider format.".into()); }
+            Err(_) => {
+                warn!("provider_from_str: invalid provider format, input={}", provider);
+                return Err("Invalid provider format.".into());
+            }
         };
 
+        debug!("provider_from_str: provider parsed successfully");
         Ok(Guid::from_u128(provider))
     }
 
@@ -75,21 +82,30 @@ impl OSScriptEngine {
         level: i64,
         id: i64,
         name: String) -> Result<Event, Box<EvalAltResult>> {
+        debug!(
+            "event_from_parts: creating ETW event, provider={}, keyword={}, level={}, id={}, name={}",
+            provider, keyword, level, id, name
+        );
+
         let provider = Self::provider_from_str(&provider)?;
 
         if level > 255 {
+            warn!("event_from_parts: level out of range, level={}", level);
             return Err("Level must be 8-bit.".into());
         }
 
         if id > u32::max as i64 {
+            warn!("event_from_parts: id out of range, id={}", id);
             return Err("Id must be 32-bit.".into());
         }
 
-        let mut event = Event::new(id as usize, name);
+        let mut event = Event::new(id as usize, name.clone());
 
         *event.extension_mut().provider_mut() = provider;
         *event.extension_mut().level_mut() = level as u8;
         *event.extension_mut().keyword_mut() = keyword as u64;
+
+        debug!("event_from_parts: ETW event created successfully, name={}", name);
 
         Ok(event)
     }
@@ -97,6 +113,8 @@ impl OSScriptEngine {
     pub fn enable(
         &mut self,
         engine: &mut Engine) {
+        debug!("OSScriptEngine::enable: registering Windows-specific ETW script functions");
+
         engine.register_fn(
             "event_from_etw",
             move |
@@ -137,6 +155,8 @@ impl OSScriptEngine {
 
             Ok(event.into())
         });
+
+        info!("OSScriptEngine::enable: Windows ETW script functions registered successfully");
     }
 
     pub fn cleanup_task(&mut self) -> Box<dyn FnMut()> {

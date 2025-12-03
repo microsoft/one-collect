@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
+use tracing::{debug, info, warn};
+
 use crate::os::system_page_size;
 use crate::tracefs::TraceFS;
 use crate::scripting::ScriptEvent;
@@ -47,23 +49,34 @@ impl OSScriptEngine {
         system: &str,
         name: &str,
         command: &str) -> anyhow::Result<Event> {
+        debug!(
+            "event_from_probe: creating event, system={}, name={}, command={}",
+            system, name, command
+        );
+
         match tracefs.borrow().as_ref() {
             Ok(tracefs) => {
                 match tracefs.dynamic_event_command(&command) {
                     Ok(()) => {
                         match tracefs.find_event(&system, &name) {
-                            Ok(event) => { Ok(event.into()) },
+                            Ok(event) => {
+                                info!("event_from_probe: event created successfully, system={}, name={}", system, name);
+                                Ok(event.into())
+                            },
                             Err(_) => {
+                                warn!("event_from_probe: event not found, system={}, name={}", system, name);
                                 anyhow::bail!("Event \"{}/{}\" not found.", &system, &name);
                             },
                         }
                     },
                     Err(err) => {
+                        warn!("event_from_probe: dynamic event command failed, error={}", err);
                         anyhow::bail!("Dynamic events parsing error: {}", err);
                     }
                 }
             },
             Err(err) => {
+                warn!("event_from_probe: TraceFS not accessible, error={}", err);
                 anyhow::bail!("TraceFS is not accessible: {}", err);
             }
         }
@@ -74,6 +87,8 @@ impl OSScriptEngine {
         name: &str) -> anyhow::Result<u64> {
         use ruwind::elf::{self, SHT_DYNSYM, SHT_SYMTAB};
         use std::fs::File;
+
+        debug!("elf_symbol_offset: looking up symbol, path={}, name={}", path, name);
 
         let mut file = File::open(path)?;
         let mut sections = Vec::new();
@@ -101,8 +116,12 @@ impl OSScriptEngine {
         })?;
 
         match offset {
-            Some(offset) => { Ok(offset) },
-            None =>{
+            Some(offset) => {
+                debug!("elf_symbol_offset: symbol found, path={}, name={}, offset={:#x}", path, name, offset);
+                Ok(offset)
+            },
+            None => {
+                warn!("elf_symbol_offset: symbol not found, path={}, name={}", path, name);
                 anyhow::bail!("Symbol \"{}\" not found in {}", name, path);
             }
         }
@@ -111,6 +130,8 @@ impl OSScriptEngine {
     pub fn enable(
         &mut self,
         engine: &mut Engine) {
+        debug!("OSScriptEngine::enable: registering Linux-specific script functions");
+
         /* Use single tracefs for all function invocations */
         let tracefs = Writable::new(TraceFS::open());
 
@@ -316,17 +337,25 @@ impl OSScriptEngine {
                 Err(err) => { Err(format!("Error: {}", err).into()) },
             }
         });
+
+        info!("OSScriptEngine::enable: Linux script functions registered successfully");
     }
 
     pub fn cleanup_task(&mut self) -> Box<dyn FnMut()> {
         let probe_cleanups = self.probe_cleanups.clone();
 
         Box::new(move || {
+            debug!("OSScriptEngine::cleanup_task: starting probe cleanup");
+
             /* Cleanup any probes with best effort */
             if let Ok(tracefs) = TraceFS::open() {
+                let cleanup_count = probe_cleanups.borrow().len();
                 for cleanup in probe_cleanups.borrow().iter() {
                     _ = tracefs.dynamic_event_command(&cleanup);
                 }
+                info!("OSScriptEngine::cleanup_task: cleaned up {} probe(s)", cleanup_count);
+            } else {
+                warn!("OSScriptEngine::cleanup_task: TraceFS not accessible for cleanup");
             }
         })
     }
