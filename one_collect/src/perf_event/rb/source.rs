@@ -839,6 +839,7 @@ impl PerfDataSource for RingBufDataSource {
             let mut common = bpf_builder.build();
 
             if let Some(event) = &event {
+                debug!("create_bpf_files: event_name={}, event_id={}", event.name(), event.id());
                 if event.has_no_callstack_flag() {
                     debug!("create_bpf_files: event has no_callstack flag, disabling callstack");
                     common = common.without_callstack();
@@ -879,7 +880,7 @@ impl PerfDataSource for RingBufDataSource {
         event: &Event) -> IOResult<()> {
         /* Add in all the events and redirect to kernel outputs */
         if let Some(event_builder) = self.event_builder.as_mut() {
-            debug!("add_event: adding event id={}", event.id());
+            debug!("add_event: adding event_name={}, event_id={}", event.name(), event.id());
 
             let mut common = event_builder.build(event.id() as u64);
 
@@ -910,7 +911,7 @@ impl PerfDataSource for RingBufDataSource {
                 },
             }
 
-            info!("Event added: event_id={}", event.id());
+            info!("Event added: event_name={}, event_id={}", event.name(), event.id());
         } else {
             warn!("add_event: no event builder configured");
         }
