@@ -8,7 +8,7 @@ use std::array::TryFromSliceError;
 use std::collections::{HashSet, HashMap};
 use std::rc::Rc;
 
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, trace, warn, enabled, Level};
 
 use super::*;
 use crate::sharing::*;
@@ -290,11 +290,13 @@ impl PerfSession {
                         old_cur, limit.rlim_max
                     );
                 } else {
-                    let error = std::io::Error::last_os_error();
-                    warn!(
-                        "PerfSession::new: setrlimit failed, attempted to increase from {} to {}, error={}",
-                        old_cur, limit.rlim_max, error
-                    );
+                    if enabled!(Level::WARN) {
+                        let error = std::io::Error::last_os_error();
+                        warn!(
+                            "PerfSession::new: setrlimit failed, attempted to increase from {} to {}, error={}",
+                            old_cur, limit.rlim_max, error
+                        );
+                    }
                 }
             }
         }
