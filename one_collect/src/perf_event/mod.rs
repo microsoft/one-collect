@@ -348,8 +348,6 @@ impl PerfSession {
         session.data_type_field.update(0, 4);
         session.misc_field.update(4, 2);
 
-        info!("PerfSession created successfully");
-
         session
     }
 
