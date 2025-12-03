@@ -8,7 +8,7 @@ use std::rc::Rc;
 #[cfg(target_os = "linux")]
 use libc::*;
 
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, trace, warn, error};
 
 use super::abi;
 use super::*;
@@ -149,7 +149,7 @@ fn perf_event_open(
             flags) {
             -1 => {
                 let err = std::io::Error::last_os_error();
-                warn!("perf_event_open failed: pid={}, cpu={}, error={}", pid, cpu, err);
+                error!("perf_event_open failed: pid={}, cpu={}, error={}", pid, cpu, err);
                 Err(err)
             },
             result => {
@@ -610,7 +610,7 @@ impl<'a> CpuRingReader {
         match abi::Header::from_slice(header_slice) {
             Ok(header) => Ok(header),
             Err(_) => {
-                warn!(
+                trace!(
                     "peek_header failed: header slice too small, start={:#x}, end={:#x}",
                     *start, end
                 );
@@ -695,7 +695,6 @@ impl<'a> CpuRingReader {
 
 impl Drop for CpuRingReader {
     fn drop(&mut self) {
-        debug!("CpuRingReader dropped: pages_len={}", self.pages_len);
         unsafe {
             munmap(self.pages as *mut c_void, self.pages_len);
         }
@@ -767,7 +766,7 @@ impl CpuRingBuf {
                     }
                 }
 
-                debug!("read_id succeeded: cpu={}, id={}", self.cpu, id.id);
+                trace!("read_id succeeded: cpu={}, id={}", self.cpu, id.id);
                 Ok(id.id)
             },
 
@@ -942,7 +941,6 @@ impl CpuRingBuf {
 impl Drop for CpuRingBuf {
     fn drop(&mut self) {
         if let Some(fd) = self.fd {
-            debug!("CpuRingBuf dropped: cpu={}, fd={}, id={:?}", self.cpu, fd, self.id);
             unsafe {
                 close(fd);
             }

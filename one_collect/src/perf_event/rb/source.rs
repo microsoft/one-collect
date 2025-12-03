@@ -460,7 +460,7 @@ impl RingBufDataSource {
                                 cpu_buf.fd.unwrap()));
                     }
 
-                    trace!(
+                    debug!(
                         "add_cpu_bufs: cpu={}, id={}, leader_id={}, target_pid={:?}",
                         i, id, leader_id, target_pid
                     );
@@ -477,11 +477,6 @@ impl RingBufDataSource {
                 }
             }
         }
-
-        debug!(
-            "add_cpu_bufs completed: cpu_count={}, target_pid={:?}",
-            cpu_count(), target_pid
-        );
 
         Ok(())
     }
@@ -550,7 +545,7 @@ impl RingBufDataSource {
                     self.readers.push(reader);
                     self.cursors.push(CpuRingCursor::default());
 
-                    trace!("build: leader ring buffer created, cpu={}, id={}", i, id);
+                    debug!("build: leader ring buffer created, cpu={}, id={}", i, id);
 
                     self.ring_bufs.insert(id, cpu_buf);
                 },
@@ -873,7 +868,7 @@ impl PerfDataSource for RingBufDataSource {
 
             info!("BPF files created: file_count={}", files.len());
         } else {
-            debug!("create_bpf_files: no BPF builder configured");
+            warn!("create_bpf_files: no BPF builder configured");
         }
 
         Ok(files)
@@ -917,7 +912,7 @@ impl PerfDataSource for RingBufDataSource {
 
             info!("Event added: event_id={}", event.id());
         } else {
-            debug!("add_event: no event builder configured");
+            warn!("add_event: no event builder configured");
         }
 
         Ok(())
