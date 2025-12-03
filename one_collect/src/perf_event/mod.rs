@@ -8,6 +8,8 @@ use std::array::TryFromSliceError;
 use std::collections::{HashSet, HashMap};
 use std::rc::Rc;
 
+use tracing::{debug, info, trace, warn};
+
 use super::*;
 use crate::sharing::*;
 use crate::event::*;
@@ -269,6 +271,8 @@ impl Drop for PerfSession {
 impl PerfSession {
     pub fn new(
         source: Box<dyn PerfDataSource>) -> Self {
+        debug!("PerfSession::new: creating new PerfSession");
+
         /* Increase rlimit for open files */
         unsafe {
             let mut limit = libc::rlimit {
@@ -277,8 +281,13 @@ impl PerfSession {
             };
 
             if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) == 0 {
+                let old_cur = limit.rlim_cur;
                 limit.rlim_cur = limit.rlim_max;
                 libc::setrlimit(libc::RLIMIT_NOFILE, &limit);
+                debug!(
+                    "PerfSession::new: increased rlimit NOFILE from {} to {}",
+                    old_cur, limit.rlim_max
+                );
             }
         }
 
@@ -338,6 +347,8 @@ impl PerfSession {
         /* Header static offsets */
         session.data_type_field.update(0, 4);
         session.misc_field.update(4, 2);
+
+        info!("PerfSession created successfully");
 
         session
     }
@@ -504,10 +515,19 @@ impl PerfSession {
         &mut self,
         fd: i32,
         event: Event) -> IOResult<()> {
+        debug!(
+            "attach_to_bpf_map_fd: attaching event_name={}, event_id={}, fd={}",
+            event.name(), event.id(), fd
+        );
+
         let bpf_files = match self.create_bpf_files(Some(&event)) {
             Ok(bpf_files) => { bpf_files },
             Err(err) => {
                 /* Close FD, no BPF programs */
+                warn!(
+                    "attach_to_bpf_map_fd failed: cannot create BPF files for event_name={}, fd={}, error={}",
+                    event.name(), fd, err
+                );
                 unsafe {
                     libc::close(fd);
                 }
@@ -531,9 +551,17 @@ impl PerfSession {
 
                     self.bpf_map_files.push(file);
                     self.bpf_events.insert(perf_file.id(), event.clone());
+                    trace!(
+                        "attach_to_bpf_map_fd: attached perf_file, index={}, id={}, fd={}",
+                        i, perf_file.id(), perf_file.fd()
+                    );
                 },
                 Err(err) => {
                     /* Close FD on error */
+                    warn!(
+                        "attach_to_bpf_map_fd: bpf_set_map_element failed, index={}, fd={}, error={}",
+                        i, fd, err
+                    );
                     unsafe {
                         libc::close(fd);
                     }
@@ -543,39 +571,66 @@ impl PerfSession {
             }
         }
 
+        info!(
+            "attach_to_bpf_map_fd completed: event_name={}, fd={}, bpf_file_count={}",
+            event.borrow().name(), fd, bpf_files.len()
+        );
+
         Ok(())
     }
 
     pub fn add_event(
         &mut self,
         event: Event) -> IOResult<()> {
+        debug!("add_event: adding event_name={}, event_id={}", event.name(), event.id());
+
         self.source.add_event(&event)?;
 
         self.events.insert(event.id(), event);
+
+        info!("PerfSession event added: event_count={}", self.events.len());
 
         Ok(())
     }
 
     pub fn enable(&mut self) -> IOResult<()> {
+        debug!("PerfSession::enable: enabling data source");
         self.source_enabled = true;
-        self.source.enable()
+        self.source.enable()?;
+        info!("PerfSession enabled");
+        Ok(())
     }
 
     pub fn disable(&mut self) -> IOResult<()> {
+        debug!("PerfSession::disable: disabling data source");
         self.source_enabled = false;
-        self.source.disable()
+        self.source.disable()?;
+        info!("PerfSession disabled");
+        Ok(())
     }
 
     pub fn parse_all(&mut self) -> Result<(), TryFromSliceError> {
-        self.parse_until(|| false)
+        debug!("parse_all: starting to parse all available data");
+        let result = self.parse_until(|| false);
+        match &result {
+            Ok(_) => info!("parse_all completed successfully"),
+            Err(e) => warn!("parse_all failed: error={}", e),
+        }
+        result
     }
 
     pub fn parse_for_duration(
         &mut self,
         duration: Duration) -> Result<(), TryFromSliceError> {
+        debug!("parse_for_duration: parsing for {:?}", duration);
         let now = std::time::Instant::now();
 
-        self.parse_until(|| { now.elapsed() >= duration })
+        let result = self.parse_until(|| { now.elapsed() >= duration });
+        match &result {
+            Ok(_) => info!("parse_for_duration completed successfully: elapsed={:?}", now.elapsed()),
+            Err(e) => warn!("parse_for_duration failed: error={}", e),
+        }
+        result
     }
 
     fn log_errors(
@@ -598,11 +653,17 @@ impl PerfSession {
         });
 
         if perf_data.is_none() {
+            trace!("parse_perf_data: no data available");
             return Ok(false);
         }
 
         let perf_data = perf_data.unwrap();
         let header = abi::Header::from_slice(perf_data.raw_data)?;
+
+        trace!(
+            "parse_perf_data: processing record, entry_type={}, size={}",
+            header.entry_type, header.size
+        );
 
         self.ancillary.write(|value| {
             *value = perf_data.ancillary.clone();
@@ -1044,6 +1105,11 @@ impl PerfSession {
     pub fn capture_environment_comms(
         &mut self,
         pid_lookup: &Option<HashSet<i32>>) {
+        debug!(
+            "capture_environment_comms: starting, pid_filter={}",
+            pid_lookup.is_some()
+        );
+
         let attributes = RingBufBuilder::common_attributes();
         let enabled = self.source_enabled;
 
@@ -1052,6 +1118,7 @@ impl PerfSession {
         let mut full_data: Vec<u8> = Vec::new();
 
         let id_bytes = 0u64.to_ne_bytes();
+        let mut comm_count = 0;
 
         procfs::iter_processes(move |pid, path_buf| {
             // Skip non-target PIDs if we have them
@@ -1107,12 +1174,20 @@ impl PerfSession {
             };
 
             let _ = self.parse_perf_data(Some(perf_data));
+            comm_count += 1;
         });
+
+        info!("capture_environment_comms completed: comm_count={}", comm_count);
     }
 
     pub fn capture_environment_modules(
         &mut self,
         pid_lookup: &Option<HashSet<i32>>) {
+        debug!(
+            "capture_environment_modules: starting, pid_filter={}",
+            pid_lookup.is_some()
+        );
+
         let attributes = RingBufBuilder::common_attributes();
         let enabled = self.source_enabled;
         let mut event_data: Vec<u8> = Vec::new();
@@ -1123,6 +1198,7 @@ impl PerfSession {
         let prot_bytes = 4u32.to_ne_bytes();
         let flag_bytes = 0u32.to_ne_bytes();
         let id_bytes = 0u64.to_ne_bytes();
+        let mut module_count = 0;
 
         procfs::iter_modules(move |pid, module| {
             if !module.is_exec() || module.path.is_none() {
@@ -1188,10 +1264,15 @@ impl PerfSession {
             };
 
             let _ = self.parse_perf_data(Some(perf_data));
+            module_count += 1;
         });
+
+        info!("capture_environment_modules completed: module_count={}", module_count);
     }
 
     pub fn capture_environment(&mut self) {
+        debug!("capture_environment: starting environment capture");
+
         let mut pid_lookup = None;
 
         if let Some(pids) = self.source.target_pids() {
@@ -1201,11 +1282,14 @@ impl PerfSession {
                 lookup.insert(*pid);
             }
 
+            debug!("capture_environment: filtering by {} target PIDs", lookup.len());
             pid_lookup = Some(lookup);
         }
 
         self.capture_environment_comms(&pid_lookup);
         self.capture_environment_modules(&pid_lookup);
+
+        info!("capture_environment completed");
     }
 }
 
