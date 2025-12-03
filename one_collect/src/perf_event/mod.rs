@@ -8,7 +8,7 @@ use std::array::TryFromSliceError;
 use std::collections::{HashSet, HashMap};
 use std::rc::Rc;
 
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use super::*;
 use crate::sharing::*;
@@ -283,11 +283,18 @@ impl PerfSession {
             if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) == 0 {
                 let old_cur = limit.rlim_cur;
                 limit.rlim_cur = limit.rlim_max;
-                libc::setrlimit(libc::RLIMIT_NOFILE, &limit);
-                debug!(
-                    "PerfSession::new: increased rlimit NOFILE from {} to {}",
-                    old_cur, limit.rlim_max
-                );
+                let result = libc::setrlimit(libc::RLIMIT_NOFILE, &limit);
+                if result == 0 {
+                    debug!(
+                        "PerfSession::new: increased rlimit NOFILE from {} to {}",
+                        old_cur, limit.rlim_max
+                    );
+                } else {
+                    warn!(
+                        "PerfSession::new: setrlimit failed, attempted to increase from {} to {}, result={}",
+                        old_cur, limit.rlim_max, result
+                    );
+                }
             }
         }
 
@@ -638,7 +645,7 @@ impl PerfSession {
             if let Some(callback) = &self.event_error_callback {
                 callback(event, error);
             } else {
-                eprintln!("Error: Event '{}': {}", event.name(), error);
+                error!("Event '{}': {}", event.name(), error);
             }
         }
     }
@@ -873,7 +880,7 @@ impl PerfSession {
 
                 /* For now print warning if we see this */
                 if offset > perf_data.raw_data.len() {
-                    eprintln!("WARN: Truncated sample");
+                    warn!("Truncated sample: offset={}, data_len={}", offset, perf_data.raw_data.len());
                 }
 
                 /* Process if we have an ID to use */
