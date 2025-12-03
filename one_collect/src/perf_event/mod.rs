@@ -290,9 +290,10 @@ impl PerfSession {
                         old_cur, limit.rlim_max
                     );
                 } else {
+                    let error = std::io::Error::last_os_error();
                     warn!(
-                        "PerfSession::new: setrlimit failed, attempted to increase from {} to {}, result={}",
-                        old_cur, limit.rlim_max, result
+                        "PerfSession::new: setrlimit failed, attempted to increase from {} to {}, error={}",
+                        old_cur, limit.rlim_max, error
                     );
                 }
             }
