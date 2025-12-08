@@ -4,7 +4,7 @@
 use std::cell::RefCell;
 use std::str::FromStr;
 
-use tracing::{debug, info, warn};
+use tracing::{debug, info, warn, error};
 
 use crate::event::*;
 
@@ -191,8 +191,6 @@ pub struct ScriptEngine {
 
 impl ScriptEngine {
     pub fn new() -> Self {
-        debug!("ScriptEngine::new: creating new script engine");
-
         let mut engine = Engine::new();
 
         engine.
@@ -201,8 +199,6 @@ impl ScriptEngine {
             register_fn(
                 "new_environment",
                 || -> ScriptEnvironment { ScriptEnvironment::default() });
-
-        info!("ScriptEngine created successfully");
 
         Self {
             engine,
@@ -213,9 +209,7 @@ impl ScriptEngine {
     pub(crate) fn rhai_engine(&mut self) -> &mut Engine { &mut self.engine }
 
     pub fn enable_os_scripting(&mut self) {
-        debug!("ScriptEngine::enable_os_scripting: enabling OS-specific scripting features");
         self.os.enable(&mut self.engine);
-        info!("OS scripting enabled successfully");
     }
 
     pub fn eval<T: Clone + 'static>(
@@ -244,7 +238,7 @@ impl ScriptEngine {
                 Ok(())
             },
             Err(err) => {
-                warn!("ScriptEngine::run failed: error={}", err);
+                error!("ScriptEngine::run failed: error={}", err);
                 anyhow::bail!("Error: {}", err);
             }
         }

@@ -72,7 +72,6 @@ impl OSScriptEngine {
             }
         };
 
-        debug!("provider_from_str: provider parsed successfully");
         Ok(Guid::from_u128(provider))
     }
 
@@ -113,8 +112,6 @@ impl OSScriptEngine {
     pub fn enable(
         &mut self,
         engine: &mut Engine) {
-        debug!("OSScriptEngine::enable: registering Windows-specific ETW script functions");
-
         engine.register_fn(
             "event_from_etw",
             move |
@@ -155,8 +152,6 @@ impl OSScriptEngine {
 
             Ok(event.into())
         });
-
-        info!("OSScriptEngine::enable: Windows ETW script functions registered successfully");
     }
 
     pub fn cleanup_task(&mut self) -> Box<dyn FnMut()> {

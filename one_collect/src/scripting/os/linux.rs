@@ -130,8 +130,6 @@ impl OSScriptEngine {
     pub fn enable(
         &mut self,
         engine: &mut Engine) {
-        debug!("OSScriptEngine::enable: registering Linux-specific script functions");
-
         /* Use single tracefs for all function invocations */
         let tracefs = Writable::new(TraceFS::open());
 
@@ -345,17 +343,11 @@ impl OSScriptEngine {
         let probe_cleanups = self.probe_cleanups.clone();
 
         Box::new(move || {
-            debug!("OSScriptEngine::cleanup_task: starting probe cleanup");
-
             /* Cleanup any probes with best effort */
             if let Ok(tracefs) = TraceFS::open() {
-                let cleanup_count = probe_cleanups.borrow().len();
                 for cleanup in probe_cleanups.borrow().iter() {
                     _ = tracefs.dynamic_event_command(&cleanup);
                 }
-                info!("OSScriptEngine::cleanup_task: cleaned up {} probe(s)", cleanup_count);
-            } else {
-                warn!("OSScriptEngine::cleanup_task: TraceFS not accessible for cleanup");
             }
         })
     }
