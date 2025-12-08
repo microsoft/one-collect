@@ -140,6 +140,11 @@ impl ScriptEnvironment {
 
         let engine_patch = u16::from_str(engine_patch).unwrap_or(0);
 
+        info!(
+            "ScriptEnvironment::new: os_major={}, os_minor={}, engine_major={}, engine_minor={}, engine_patch={}",
+            os_major, os_minor, engine_major, engine_minor, engine_patch
+        );
+
         Self {
             os_major,
             os_minor,
@@ -215,7 +220,9 @@ impl ScriptEngine {
     pub fn eval<T: Clone + 'static>(
         &self,
         script: &str) -> anyhow::Result<T> {
-        debug!("ScriptEngine::eval: evaluating script, length={}", script.len());
+        info!("ScriptEngine::eval: start script");
+        info!("{}", script);
+        info!("ScriptEngine::eval: end script");
         match self.engine.eval(script) {
             Ok(value) => {
                 debug!("ScriptEngine::eval: evaluation successful");
