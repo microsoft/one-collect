@@ -160,21 +160,23 @@ impl TraceFS {
         /* Odd/incomplete field */
         if fname.is_none() || ftype.is_none() ||
            foffset.is_none() || fsize.is_none() {
-            warn!("field_from_line: field missing required data");
+            warn!("field_from_line: field is missing one of: type, name, offset, size.");
             return Err(Error::new(
                 ErrorKind::Other,
                 "Field is missing one of: type, name, offset, size."));
         }
 
-        let field_name = fname.as_ref().unwrap();
-        let field_type = ftype.as_ref().unwrap();
-        let field_offset = foffset.unwrap();
-        let field_size = fsize.unwrap();
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let field_name = fname.as_ref().unwrap();
+            let field_type = ftype.as_ref().unwrap();
+            let field_offset = foffset.unwrap();
+            let field_size = fsize.unwrap();
 
-        debug!(
-            "field_from_line: field parsed successfully, name={}, type={}, offset={}, size={}",
-            field_name, field_type, field_offset, field_size
-        );
+            debug!(
+                "field_from_line: field parsed successfully, name={}, type={}, offset={}, size={}",
+                field_name, field_type, field_offset, field_size
+            );
+        }
 
         Ok(EventField::new(
             fname.unwrap(),
@@ -215,7 +217,7 @@ impl TraceFS {
                         id = Some(read_id);
                         debug!("event_from_format: found event ID, id={}", read_id);
                     } else {
-                        warn!("event_from_format: ID was not an integer");
+                        warn!("event_from_format: ID is not an integer");
                         return Err(Error::new(
                             ErrorKind::Other,
                             "ID was not an integer."));
