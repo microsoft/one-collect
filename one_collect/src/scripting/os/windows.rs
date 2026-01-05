@@ -98,13 +98,13 @@ impl OSScriptEngine {
             return Err("Id must be 32-bit.".into());
         }
 
-        let mut event = Event::new(id as usize, name.clone());
+        debug!("event_from_parts: ETW event created successfully, name={}", name);
+
+        let mut event = Event::new(id as usize, name);
 
         *event.extension_mut().provider_mut() = provider;
         *event.extension_mut().level_mut() = level as u8;
         *event.extension_mut().keyword_mut() = keyword as u64;
-
-        debug!("event_from_parts: ETW event created successfully, name={}", name);
 
         Ok(event)
     }
