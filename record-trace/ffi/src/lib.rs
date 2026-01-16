@@ -5,6 +5,7 @@ use tracing::{error, warn, info, debug};
 
 use engine::commandline::RecordArgs;
 use engine::recorder::Recorder;
+use engine::logger;
 use engine::EngineOutput;
 
 const OUTPUT_NORMAL: i32 = 0;
@@ -34,6 +35,16 @@ extern "C" fn RecordTrace(
 
     if let Ok(args) = std::str::from_utf8(args) {
         debug!("Arguments parsed successfully: args={}", args);
+
+        let parser = RecordArgsParser::new(
+            "RecordTraceFFI",
+            args);
+
+        let record_args = RecordArgs::parse(parser);
+
+        // Initialize logging before anything else
+        logger::start_for_ffi(&record_args);
+
         let mut output = EngineOutput::default();
 
         output.with_normal(move |output| {
@@ -66,12 +77,8 @@ extern "C" fn RecordTrace(
             callback(OUTPUT_END, bytes.as_ptr(), bytes.len())
         });
 
-        let parser = RecordArgsParser::new(
-            "RecordTraceFFI",
-            args);
-
         let mut recorder = Recorder::new(
-            RecordArgs::parse(parser),
+            record_args,
             output);
 
         let result = recorder.run();

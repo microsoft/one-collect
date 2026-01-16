@@ -196,6 +196,7 @@ impl RecordArgs {
     }
 
     pub fn write_to_log(&self) {
+        info!("Arguments parsed: output_path={}", self.output_path.display());
         info!("Arguments parsed: format={}", self.format);
         info!("Arguments parsed: on_cpu={}", self.on_cpu);
         info!("Arguments parsed: off_cpu={}", self.off_cpu);
@@ -204,6 +205,12 @@ impl RecordArgs {
         info!("Arguments parsed: live={}", self.live);
         if let Some(ref pids) = self.target_pids {
             info!("Arguments parsed: target_pids={:?}", pids);
+        }
+        if let Some(ref filter) = self.log_filter {
+            info!("Arguments parsed: log_filter={}", filter);
+        }
+        if let Some(ref path) = self.log_path {
+            info!("Arguments parsed: log_path={}", path);
         }
         if let Some(ref script) = self.script {
             info!("Arguments parsed: script start");

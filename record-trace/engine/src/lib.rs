@@ -3,6 +3,7 @@
 
 pub mod commandline;
 pub mod recorder;
+pub mod logger;
 mod export;
 
 pub type EngineOutputCallback = dyn Fn(&str) -> i32 + Send + Sync;
