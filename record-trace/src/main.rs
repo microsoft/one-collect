@@ -12,55 +12,25 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 
-/// Parse logging-related arguments from command line before full parsing
-fn parse_logging_args() -> (Option<String>, Option<String>, Option<String>) {
-    let args: Vec<String> = std::env::args().collect();
-    let mut log_filter = None;
-    let mut log_path = None;
-    let mut output_path = None;
-
-    let mut i = 0;
-    while i < args.len() {
-        if args[i] == "--log-filter" && i + 1 < args.len() {
-            log_filter = Some(args[i + 1].clone());
-            i += 2;
-        } else if args[i] == "--log-path" && i + 1 < args.len() {
-            log_path = Some(args[i + 1].clone());
-            i += 2;
-        } else if args[i] == "--out" && i + 1 < args.len() {
-            output_path = Some(args[i + 1].clone());
-            i += 2;
-        } else {
-            i += 1;
-        }
-    }
-
-    (log_filter, log_path, output_path)
-}
-
 /// Resolve the log file path based on provided arguments
-fn resolve_log_path(log_path: Option<String>, output_path: Option<String>) -> PathBuf {
+fn resolve_log_path(log_path: &Option<String>, output_path: &PathBuf) -> PathBuf {
     if let Some(path) = log_path {
         return PathBuf::from(path);
     }
 
-    if let Some(out) = output_path {
-        let out_path = PathBuf::from(out);
-        
-        // Check if it has an extension (is a file)
-        if out_path.extension().is_some() {
-            // It's a file, use stem.log
-            if let Some(stem) = out_path.file_stem() {
-                if let Some(parent) = out_path.parent() {
-                    return parent.join(format!("{}.log", stem.to_string_lossy()));
-                } else {
-                    return PathBuf::from(format!("{}.log", stem.to_string_lossy()));
-                }
+    // Check if output_path has an extension (is a file)
+    if output_path.extension().is_some() {
+        // It's a file, use stem.log
+        if let Some(stem) = output_path.file_stem() {
+            if let Some(parent) = output_path.parent() {
+                return parent.join(format!("{}.log", stem.to_string_lossy()));
+            } else {
+                return PathBuf::from(format!("{}.log", stem.to_string_lossy()));
             }
-        } else {
-            // It's a directory, use <dir>/trace.log
-            return out_path.join("trace.log");
         }
+    } else {
+        // It's a directory, use <dir>/trace.log
+        return output_path.join("trace.log");
     }
 
     // Default to current directory
@@ -97,23 +67,27 @@ fn init_logging(filter: &Option<String>, path: &PathBuf) {
         .or_else(|_| EnvFilter::try_new(&filter_str))
         .unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
 
+    let filter_str = env_filter.to_string();
+
     tracing_subscriber::fmt()
         .with_writer(file)
         .with_env_filter(env_filter)
         .with_ansi(false)
         .init();
     
-    tracing::info!("Logging initialized. Log file: {}", path.display());
+    tracing::info!("Version: {}", env!("CARGO_PKG_VERSION"));
     tracing::info!("Log filter: {}", filter_str);
 }
 
 fn main() {
-    // Parse logging args early, before full argument parsing
-    let (log_filter, log_path, output_path) = parse_logging_args();
-    let resolved_log_path = resolve_log_path(log_path, output_path);
-    
+    let args = RecordArgs::parse(std::env::args_os());
+
     // Initialize logging before anything else
-    init_logging(&log_filter, &resolved_log_path);
+    let resolved_log_path = resolve_log_path(args.log_path(), args.output_path());
+    init_logging(args.log_filter(), &resolved_log_path);
+
+    // Log the parsed arguments
+    args.write_to_log();
 
     let mut output = EngineOutput::default();
 
@@ -148,7 +122,7 @@ fn main() {
 
     // Record.
     let mut recorder = Recorder::new(
-        RecordArgs::parse(std::env::args_os()),
+        args,
         output);
 
     let exit_code = recorder.run();

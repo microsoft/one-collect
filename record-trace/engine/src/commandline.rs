@@ -78,6 +78,8 @@ pub struct RecordArgs {
     live: bool,
     target_pids: Option<Vec<i32>>,
     script: Option<String>,
+    log_filter: Option<String>,
+    log_path: Option<String>,
 }
 
 impl RecordArgs {
@@ -128,8 +130,10 @@ impl RecordArgs {
             soft_page_faults: command_args.soft_page_faults,
             hard_page_faults: command_args.hard_page_faults,
             live: command_args.live,
-            target_pids: command_args.target_pids.clone(),
+            target_pids: command_args.target_pids,
             script,
+            log_filter: command_args.log_filter,
+            log_path: command_args.log_path,
         };
 
         // Cross-argument validation.
@@ -141,25 +145,10 @@ impl RecordArgs {
             process::exit(1);
         }
 
-        info!("Arguments parsed: format={}", args.format);
-        info!("Arguments parsed: on_cpu={}", args.on_cpu);
-        info!("Arguments parsed: off_cpu={}", args.off_cpu);
-        info!("Arguments parsed: soft_page_faults={}", args.soft_page_faults);
-        info!("Arguments parsed: hard_page_faults={}", args.hard_page_faults);
-        info!("Arguments parsed: live={}", args.live);
-        if let Some(ref pids) = args.target_pids {
-            info!("Arguments parsed: target_pids={:?}", pids);
-        }
-        if let Some(ref script) = args.script {
-            info!("Arguments parsed: script start");
-            info!("{}", script);
-            info!("Arguments parsed: script end");
-        }
-
         args
     }
 
-    pub (crate) fn output_path(&self) -> &PathBuf {
+    pub fn output_path(&self) -> &PathBuf {
         &self.output_path
     }
 
@@ -196,5 +185,30 @@ impl RecordArgs {
 
     pub (crate) fn script(&self) -> &Option<String> {
         &self.script
+    }
+
+    pub fn log_filter(&self) -> &Option<String> {
+        &self.log_filter
+    }
+
+    pub fn log_path(&self) -> &Option<String> {
+        &self.log_path
+    }
+
+    pub fn write_to_log(&self) {
+        info!("Arguments parsed: format={}", self.format);
+        info!("Arguments parsed: on_cpu={}", self.on_cpu);
+        info!("Arguments parsed: off_cpu={}", self.off_cpu);
+        info!("Arguments parsed: soft_page_faults={}", self.soft_page_faults);
+        info!("Arguments parsed: hard_page_faults={}", self.hard_page_faults);
+        info!("Arguments parsed: live={}", self.live);
+        if let Some(ref pids) = self.target_pids {
+            info!("Arguments parsed: target_pids={:?}", pids);
+        }
+        if let Some(ref script) = self.script {
+            info!("Arguments parsed: script start");
+            info!("{}", script);
+            info!("Arguments parsed: script end");
+        }
     }
 }
