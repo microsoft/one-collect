@@ -12,6 +12,8 @@ use crate::helpers::exporting::*;
 use crate::helpers::exporting::graph::*;
 use crate::helpers::exporting::attributes::*;
 
+use tracing::{debug, error, info};
+
 pub trait NetTraceFormat {
     fn to_net_trace(
         &mut self,
@@ -307,6 +309,7 @@ impl NetTraceWriter {
         };
 
         trace.init()?;
+        info!("NetTrace writer created successfully: path={}", path);
 
         Ok(trace)
     }
@@ -508,6 +511,9 @@ impl NetTraceWriter {
         machine: &ExportMachine,
         start_time: u64,
         end_time: u64) -> anyhow::Result<()> {
+        debug!("Flushing NetTrace event block: start_time={}, end_time={}, event_count={}", 
+            start_time, end_time, self.event_block.len());
+        
         /* Write sequence block */
         self.write_seq_block(start_time)?;
 
@@ -1429,20 +1435,31 @@ impl NetTraceFormat for ExportMachine {
         &mut self,
         predicate: impl Fn(&ExportProcess) -> bool,
         path: &str) -> anyhow::Result<()> {
+        info!("Starting NetTrace export: path={}", path);
+        
         let sync_time = match self.start_date() {
             Some(value) => { value },
-            None => { anyhow::bail!("No start date saved, invoke mark_start()."); },
+            None => { 
+                error!("NetTrace export failed: no start date");
+                anyhow::bail!("No start date saved, invoke mark_start()."); 
+            },
         };
 
         let sync_time_qpc = match self.start_qpc() {
             Some(value) => { value },
-            None => { anyhow::bail!("No start qpc saved, invoke mark_start()."); },
+            None => { 
+                error!("NetTrace export failed: no start qpc");
+                anyhow::bail!("No start qpc saved, invoke mark_start()."); 
+            },
         };
 
         let qpc_freq = Self::qpc_freq();
         let cpu_count = Self::cpu_count();
         let sample_freq = self.settings().cpu_freq() as u32;
         let system_page_size = Self::system_page_size();
+
+        debug!("NetTrace parameters: qpc_freq={}, cpu_count={}, sample_freq={}, page_size={}", 
+            qpc_freq, cpu_count, sample_freq, system_page_size);
 
         let mut writer = NetTraceWriter::new(path)?;
 
@@ -1467,6 +1484,8 @@ impl NetTraceFormat for ExportMachine {
             })?;
 
         writer.finish(&self)?;
+        
+        info!("NetTrace export completed successfully: path={}", path);
 
         Ok(())
     }

@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
+use tracing::{debug, info, trace, warn};
+
 use super::*;
 
 type BoxedBuilderHook = Box<dyn FnOnce(&mut RingBufSessionBuilder)>;
@@ -33,6 +35,7 @@ impl RingBufSessionHook {
 pub struct RingBufSessionBuilder {
     pages: usize,
     target_pids: Option<Vec<i32>>,
+    target_cpus: Option<Vec<u16>>,
     kernel_builder: Option<RingBufBuilder<Kernel>>,
     event_builder: Option<RingBufBuilder<Tracepoint>>,
     profiling_builder: Option<RingBufBuilder<Profiling>>,
@@ -54,6 +57,7 @@ impl RingBufSessionBuilder {
         Self {
             pages: 1,
             target_pids: None,
+            target_cpus: None,
             kernel_builder: None,
             event_builder: None,
             profiling_builder: None,
@@ -83,6 +87,37 @@ impl RingBufSessionBuilder {
         Self {
             pages: self.pages,
             target_pids: pids,
+            target_cpus: self.target_cpus.take(),
+            kernel_builder: self.kernel_builder.take(),
+            event_builder: self.event_builder.take(),
+            profiling_builder: self.profiling_builder.take(),
+            cswitch_builder: self.cswitch_builder.take(),
+            bpf_builder: self.bpf_builder.take(),
+            soft_page_faults_builder: self.soft_page_faults_builder.take(),
+            hard_page_faults_builder: self.hard_page_faults_builder.take(),
+            hooks: self.hooks.take(),
+        }
+    }
+
+    pub fn with_target_cpu(
+        &mut self,
+        cpu: u16) -> Self {
+        let cpus = match self.target_cpus.take() {
+            Some(mut cpus) => {
+                cpus.push(cpu);
+                Some(cpus)
+            },
+            None => {
+                let mut cpus = Vec::new();
+                cpus.push(cpu);
+                Some(cpus)
+            },
+        };
+
+        Self {
+            pages: self.pages,
+            target_pids: self.target_pids.take(),
+            target_cpus: cpus,
             kernel_builder: self.kernel_builder.take(),
             event_builder: self.event_builder.take(),
             profiling_builder: self.profiling_builder.take(),
@@ -100,6 +135,7 @@ impl RingBufSessionBuilder {
         Self {
             pages,
             target_pids: self.target_pids.take(),
+            target_cpus: self.target_cpus.take(),
             kernel_builder: self.kernel_builder.take(),
             event_builder: self.event_builder.take(),
             profiling_builder: self.profiling_builder.take(),
@@ -117,6 +153,7 @@ impl RingBufSessionBuilder {
         Self {
             pages: self.pages,
             target_pids: self.target_pids.take(),
+            target_cpus: self.target_cpus.take(),
             kernel_builder: Some(builder),
             event_builder: self.event_builder.take(),
             profiling_builder: self.profiling_builder.take(),
@@ -145,6 +182,7 @@ impl RingBufSessionBuilder {
         Self {
             pages: self.pages,
             target_pids: self.target_pids.take(),
+            target_cpus: self.target_cpus.take(),
             kernel_builder: self.kernel_builder.take(),
             event_builder: Some(builder),
             profiling_builder: self.profiling_builder.take(),
@@ -173,6 +211,7 @@ impl RingBufSessionBuilder {
         Self {
             pages: self.pages,
             target_pids: self.target_pids.take(),
+            target_cpus: self.target_cpus.take(),
             kernel_builder: self.kernel_builder.take(),
             event_builder: self.event_builder.take(),
             profiling_builder: Some(builder),
@@ -201,6 +240,7 @@ impl RingBufSessionBuilder {
         Self {
             pages: self.pages,
             target_pids: self.target_pids.take(),
+            target_cpus: self.target_cpus.take(),
             kernel_builder: self.kernel_builder.take(),
             event_builder: self.event_builder.take(),
             profiling_builder: self.profiling_builder.take(),
@@ -229,6 +269,7 @@ impl RingBufSessionBuilder {
         Self {
             pages: self.pages,
             target_pids: self.target_pids.take(),
+            target_cpus: self.target_cpus.take(),
             kernel_builder: self.kernel_builder.take(),
             event_builder: self.event_builder.take(),
             profiling_builder: self.profiling_builder.take(),
@@ -257,6 +298,7 @@ impl RingBufSessionBuilder {
         Self {
             pages: self.pages,
             target_pids: self.target_pids.take(),
+            target_cpus: self.target_cpus.take(),
             kernel_builder: self.kernel_builder.take(),
             event_builder: self.event_builder.take(),
             profiling_builder: self.profiling_builder.take(),
@@ -285,6 +327,7 @@ impl RingBufSessionBuilder {
         Self {
             pages: self.pages,
             target_pids: self.target_pids.take(),
+            target_cpus: self.target_cpus.take(),
             kernel_builder: self.kernel_builder.take(),
             event_builder: self.event_builder.take(),
             profiling_builder: self.profiling_builder.take(),
@@ -321,6 +364,7 @@ impl RingBufSessionBuilder {
         Self {
             pages: self.pages,
             target_pids: self.target_pids.take(),
+            target_cpus: self.target_cpus.take(),
             kernel_builder: self.kernel_builder.take(),
             event_builder: self.event_builder.take(),
             profiling_builder: self.profiling_builder.take(),
@@ -333,6 +377,11 @@ impl RingBufSessionBuilder {
     }
 
     pub fn build(&mut self) -> IOResult<PerfSession> {
+        debug!(
+            "RingBufSessionBuilder::build: pages={}, target_pids={:?}",
+            self.pages, self.target_pids
+        );
+
         let mut hooks = self.hooks.take();
 
         if let Some(hooks) = &mut hooks {
@@ -346,6 +395,7 @@ impl RingBufSessionBuilder {
         let mut source = RingBufDataSource::new(
             self.pages,
             self.target_pids.take(),
+            self.target_cpus.take(),
             self.kernel_builder.take(),
             self.event_builder.take(),
             self.profiling_builder.take(),
@@ -366,6 +416,8 @@ impl RingBufSessionBuilder {
             }
         }
 
+        info!("PerfSession created successfully");
+
         Ok(session)
     }
 }
@@ -379,6 +431,7 @@ pub struct RingBufDataSource {
     pages: usize,
     enabled: bool,
     target_pids: Option<Vec<i32>>,
+    target_cpus: Option<Vec<u16>>,
     kernel_builder: Option<RingBufBuilder<Kernel>>,
     event_builder: Option<RingBufBuilder<Tracepoint>>,
     profiling_builder: Option<RingBufBuilder<Profiling>>,
@@ -394,6 +447,7 @@ impl RingBufDataSource {
     fn new(
         pages: usize,
         target_pids: Option<Vec<i32>>,
+        target_cpus: Option<Vec<u16>>,
         kernel_builder: Option<RingBufBuilder<Kernel>>,
         event_builder: Option<RingBufBuilder<Tracepoint>>,
         profiling_builder: Option<RingBufBuilder<Profiling>>,
@@ -409,6 +463,7 @@ impl RingBufDataSource {
             ring_bufs: HashMap::new(),
             pages,
             target_pids,
+            target_cpus,
             kernel_builder,
             event_builder,
             profiling_builder,
@@ -424,6 +479,7 @@ impl RingBufDataSource {
 
     fn add_cpu_bufs(
         target_pid: Option<i32>,
+        target_cpus: &Option<Vec<u16>>,
         leader_ids: &HashMap<u32, u64>,
         ring_bufs: &mut HashMap<u64, CpuRingBuf>,
         common_buf: &CommonRingBuf,
@@ -434,6 +490,13 @@ impl RingBufDataSource {
          * same CPU.
          */
         for i in 0..cpu_count() {
+            /* Only enable online/target CPUs */
+            if let Some(target_cpus) = target_cpus {
+                if !target_cpus.contains(&(i as u16)) {
+                    continue;
+                }
+            }
+
             let leader_id = leader_ids[&i];
             let leader = &ring_bufs[&leader_id];
             let mut cpu_buf = common_buf.for_cpu(i);
@@ -451,9 +514,18 @@ impl RingBufDataSource {
                                 cpu_buf.fd.unwrap()));
                     }
 
+                    debug!(
+                        "add_cpu_bufs: cpu={}, id={}, leader_id={}, target_pid={:?}",
+                        i, id, leader_id, target_pid
+                    );
+
                     ring_bufs.insert(id, cpu_buf);
                 },
                 None => {
+                    warn!(
+                        "add_cpu_bufs failed: no buffer ID returned, cpu={}, target_pid={:?}",
+                        i, target_pid
+                    );
                     return Err(io_error(
                         "Internal error getting buffer ID."));
                 }
@@ -482,6 +554,11 @@ impl RingBufDataSource {
     }
 
     fn build(&mut self) -> IOResult<()> {
+        debug!(
+            "RingBufDataSource::build: pages={}, target_pids={:?}",
+            self.pages, self.target_pids
+        );
+
         /* Always required */
         let common = self.kernel_builder
             .get_or_insert_with(RingBufBuilder::for_kernel)
@@ -490,11 +567,14 @@ impl RingBufDataSource {
         let empty_pids = Vec::new();
 
         let target_pids = &mut self.target_pids.as_mut();
+        let target_cpus = &self.target_cpus;
 
         let pids = match target_pids {
             Some(pids) => {
                 /* Populate current tasks for PIDs */
                 Self::tasks_for_pids(pids);
+
+                debug!("build: found {} task(s) for target PIDs", pids.len());
 
                 pids
             },
@@ -520,14 +600,22 @@ impl RingBufDataSource {
                     self.readers.push(reader);
                     self.cursors.push(CpuRingCursor::default());
 
+                    debug!("build: leader ring buffer created, cpu={}, id={}", i, id);
+
                     self.ring_bufs.insert(id, cpu_buf);
                 },
                 None => {
+                    warn!("build failed: no buffer ID returned for leader ring, cpu={}", i);
                     return Err(io_error(
                         "Internal error getting buffer ID."));
                 }
             }
         }
+
+        debug!(
+            "build: leader ring buffers created, cpu_count={}, ring_buf_count={}",
+            cpu_count(), self.ring_bufs.len()
+        );
 
         /* Redirect other kernel events for other PIDs */
         if !pids.is_empty() {
@@ -535,6 +623,7 @@ impl RingBufDataSource {
             for pid in &pids[1..] {
                 Self::add_cpu_bufs(
                     Some(*pid),
+                    &None, /* Kernel events are for all CPUs */
                     &self.leader_ids,
                     &mut self.ring_bufs,
                     &common,
@@ -544,11 +633,13 @@ impl RingBufDataSource {
 
         /* Add in profiling samples and redirect to kernel outputs */
         if let Some(profiling_builder) = self.profiling_builder.as_mut() {
+            debug!("build: adding profiling event buffers");
             let common = profiling_builder.build();
 
             if pids.is_empty() {
                 Self::add_cpu_bufs(
                     None,
+                    target_cpus,
                     &self.leader_ids,
                     &mut self.ring_bufs,
                     &common,
@@ -557,6 +648,7 @@ impl RingBufDataSource {
                 for pid in pids {
                     Self::add_cpu_bufs(
                         Some(*pid),
+                        target_cpus,
                         &self.leader_ids,
                         &mut self.ring_bufs,
                         &common,
@@ -567,11 +659,13 @@ impl RingBufDataSource {
 
         /* Add in cswitch samples and redirect to kernel outputs */
         if let Some(cswitch_builder) = self.cswitch_builder.as_mut() {
+            debug!("build: adding context switch event buffers");
             let common = cswitch_builder.build();
 
             if pids.is_empty() {
                 Self::add_cpu_bufs(
                     None,
+                    target_cpus,
                     &self.leader_ids,
                     &mut self.ring_bufs,
                     &common,
@@ -580,6 +674,7 @@ impl RingBufDataSource {
                 for pid in pids {
                     Self::add_cpu_bufs(
                         Some(*pid),
+                        target_cpus,
                         &self.leader_ids,
                         &mut self.ring_bufs,
                         &common,
@@ -590,11 +685,13 @@ impl RingBufDataSource {
 
         /* Add in page fault samples and redirect to kernel outputs */
         if let Some(faults_builder) = self.soft_page_faults_builder.as_mut() {
+            debug!("build: adding soft page faults event buffers");
             let common = faults_builder.build();
 
             if pids.is_empty() {
                 Self::add_cpu_bufs(
                     None,
+                    target_cpus,
                     &self.leader_ids,
                     &mut self.ring_bufs,
                     &common,
@@ -603,6 +700,7 @@ impl RingBufDataSource {
                 for pid in pids {
                     Self::add_cpu_bufs(
                         Some(*pid),
+                        target_cpus,
                         &self.leader_ids,
                         &mut self.ring_bufs,
                         &common,
@@ -612,11 +710,13 @@ impl RingBufDataSource {
         }
 
         if let Some(faults_builder) = self.hard_page_faults_builder.as_mut() {
+            debug!("build: adding hard page faults event buffers");
             let common = faults_builder.build();
 
             if pids.is_empty() {
                 Self::add_cpu_bufs(
                     None,
+                    target_cpus,
                     &self.leader_ids,
                     &mut self.ring_bufs,
                     &common,
@@ -625,6 +725,7 @@ impl RingBufDataSource {
                 for pid in pids {
                     Self::add_cpu_bufs(
                         Some(*pid),
+                        target_cpus,
                         &self.leader_ids,
                         &mut self.ring_bufs,
                         &common,
@@ -633,25 +734,38 @@ impl RingBufDataSource {
             }
         }
 
+        info!(
+            "RingBufDataSource built successfully: ring_buf_count={}, reader_count={}",
+            self.ring_bufs.len(), self.readers.len()
+        );
+
         Ok(())
     }
 
     fn enable(&mut self) -> IOResult<()> {
+        debug!("RingBufDataSource::enable: enabling {} ring buffers", self.ring_bufs.len());
+
         for rb in self.ring_bufs.values() {
             rb.enable()?;
         }
 
         self.enabled = true;
 
+        info!("RingBufDataSource enabled: ring_buf_count={}", self.ring_bufs.len());
+
         Ok(())
     }
 
     fn disable(&mut self) -> IOResult<()> {
+        debug!("RingBufDataSource::disable: disabling {} ring buffers", self.ring_bufs.len());
+
         for rb in self.ring_bufs.values() {
             rb.disable()?;
         }
 
         self.enabled = false;
+
+        info!("RingBufDataSource disabled: ring_buf_count={}", self.ring_bufs.len());
 
         Ok(())
     }
@@ -754,6 +868,11 @@ impl RingBufDataSource {
 
         self.oldest_cpu = oldest_cpu;
         self.next_time = next_time;
+
+        trace!(
+            "find_current_buffer: oldest_cpu={:?}, oldest_time={:?}, next_time={:?}",
+            oldest_cpu, oldest_time, next_time
+        );
     }
 }
 
@@ -779,11 +898,20 @@ impl PerfDataSource for RingBufDataSource {
         let mut files = Vec::new();
 
         if let Some(bpf_builder) = self.bpf_builder.as_mut() {
+            debug!("create_bpf_files: creating BPF event buffers");
+
             let mut common = bpf_builder.build();
+            let mut target_cpus = &None;
 
             if let Some(event) = &event {
+                debug!("create_bpf_files: event_name={}, event_id={}", event.name(), event.id());
                 if event.has_no_callstack_flag() {
+                    debug!("create_bpf_files: event has no_callstack flag, disabling callstack");
                     common = common.without_callstack();
+                }
+
+                if !event.has_no_cpu_mask_flag() {
+                    target_cpus = &self.target_cpus;
                 }
             }
 
@@ -791,6 +919,7 @@ impl PerfDataSource for RingBufDataSource {
                 None => {
                     Self::add_cpu_bufs(
                         None,
+                        target_cpus,
                         &self.leader_ids,
                         &mut self.ring_bufs,
                         &common,
@@ -800,6 +929,7 @@ impl PerfDataSource for RingBufDataSource {
                     for pid in pids {
                         Self::add_cpu_bufs(
                             Some(*pid),
+                            target_cpus,
                             &self.leader_ids,
                             &mut self.ring_bufs,
                             &common,
@@ -807,6 +937,10 @@ impl PerfDataSource for RingBufDataSource {
                     }
                 },
             }
+
+            info!("BPF files created: file_count={}", files.len());
+        } else {
+            warn!("create_bpf_files: no BPF builder configured");
         }
 
         Ok(files)
@@ -817,17 +951,26 @@ impl PerfDataSource for RingBufDataSource {
         event: &Event) -> IOResult<()> {
         /* Add in all the events and redirect to kernel outputs */
         if let Some(event_builder) = self.event_builder.as_mut() {
+            debug!("add_event: adding event_name={}, event_id={}", event.name(), event.id());
+
             let mut common = event_builder.build(event.id() as u64);
 
             /* Mutate attributes based on flags */
             if event.has_no_callstack_flag() {
+                debug!("add_event: event has no_callstack flag, disabling callstack");
                 common = common.without_callstack();
             }
+
+            let target_cpus = match event.has_no_cpu_mask_flag() {
+                true => { &None },
+                false => { &self.target_cpus },
+            };
 
             match &self.target_pids {
                 None => {
                     Self::add_cpu_bufs(
                         None,
+                        target_cpus,
                         &self.leader_ids,
                         &mut self.ring_bufs,
                         &common,
@@ -837,6 +980,7 @@ impl PerfDataSource for RingBufDataSource {
                     for pid in pids {
                         Self::add_cpu_bufs(
                             Some(*pid),
+                            target_cpus,
                             &self.leader_ids,
                             &mut self.ring_bufs,
                             &common,
@@ -844,12 +988,18 @@ impl PerfDataSource for RingBufDataSource {
                     }
                 },
             }
+
+            info!("Event added: event_name={}, event_id={}", event.name(), event.id());
+        } else {
+            warn!("add_event: no event builder configured");
         }
 
         Ok(())
     }
 
     fn begin_reading(&mut self) {
+        trace!("begin_reading: starting read cycle for {} readers", self.readers.len());
+
         for i in 0..self.readers.len() {
             let reader = &mut self.readers[i];
             let cursor = &mut self.cursors[i];
@@ -858,6 +1008,11 @@ impl PerfDataSource for RingBufDataSource {
         }
 
         self.find_current_buffer();
+
+        trace!(
+            "begin_reading: oldest_cpu={:?}, next_time={:?}",
+            self.oldest_cpu, self.next_time
+        );
     }
 
     fn read(
@@ -865,6 +1020,7 @@ impl PerfDataSource for RingBufDataSource {
         timeout: Duration) -> Option<PerfData<'_>> {
         /* Bail if we couldn't find a current buffer */
         if self.oldest_cpu.is_none() {
+            trace!("read: no data available, sleeping for {:?}", timeout);
             std::thread::sleep(timeout);
             return None;
         }
@@ -884,6 +1040,10 @@ impl PerfDataSource for RingBufDataSource {
                 if let Some(next_time) = self.next_time {
                     /* If older than next oldest, stop */
                     if time > next_time {
+                        trace!(
+                            "read: time {} exceeds next_time {}, switching buffers",
+                            time, next_time
+                        );
                         return None;
                     }
                 }
@@ -893,6 +1053,7 @@ impl PerfDataSource for RingBufDataSource {
             },
             /* No data left, stop */
             None => {
+                trace!("read: no more data in buffer for cpu={}", cpu);
                 return None;
             }
         }
@@ -902,6 +1063,8 @@ impl PerfDataSource for RingBufDataSource {
             cursor,
             &mut self.temp) {
             Ok(raw_data) => {
+                trace!("read: data read from cpu={}, size={}", cpu, raw_data.len());
+
                 let perf_data = PerfData {
                     ancillary,
                     raw_data,
@@ -909,12 +1072,17 @@ impl PerfDataSource for RingBufDataSource {
 
                 Some(perf_data)
             },
-            Err(_) => None,
+            Err(e) => {
+                warn!("read failed: cpu={}, error={}", cpu, e);
+                None
+            },
         }
     }
 
     fn end_reading(&mut self) {
         if let Some(oldest_cpu) = self.oldest_cpu {
+            trace!("end_reading: completing read for cpu={}", oldest_cpu);
+
             let reader = &mut self.readers[oldest_cpu];
             let cursor = &mut self.cursors[oldest_cpu];
 

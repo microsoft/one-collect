@@ -4,6 +4,7 @@
 use std::io::{Result, Error, BufRead, BufReader, ErrorKind, Write};
 use std::path::PathBuf;
 use std::fs::{File, OpenOptions};
+use tracing::{debug, info, warn};
 
 use crate::event::*;
 use crate::user_events::UserEventsFactory;
@@ -32,6 +33,7 @@ impl TraceFS {
                     if let Some(path) = parts.nth(1) {
                         if let Some(fstype) = parts.next() {
                             if fstype == "tracefs" {
+                                info!("TraceFS found and opened: path={}", path);
                                 return Self::open_at(path);
                             }
                         }
@@ -41,6 +43,7 @@ impl TraceFS {
             }
         }
 
+        warn!("TraceFS not mounted");
         Err(
             Error::new(
                 ErrorKind::Other,
@@ -67,6 +70,7 @@ impl TraceFS {
             root: path.into()
         };
 
+        info!("TraceFS opened at path: path={}", path);
         Ok(tracefs)
     }
 
@@ -81,6 +85,8 @@ impl TraceFS {
     /// A `Result` which is `Ok` if the line is successfully parsed, and `Err` otherwise.
     fn field_from_line(
         line: &str) -> Result<EventField> {
+        debug!("field_from_line: parsing field, line={}", line);
+
         /* Split upon ';' */
         let parts = line.split(';');
 
@@ -125,6 +131,7 @@ impl TraceFS {
                         fname = Some(name_part.into());
                         ftype = Some(type_part.into());
                     } else {
+                        warn!("field_from_line: field name has no type");
                         return Err(Error::new(
                             ErrorKind::Other,
                             "Field name has no type."));
@@ -153,9 +160,22 @@ impl TraceFS {
         /* Odd/incomplete field */
         if fname.is_none() || ftype.is_none() ||
            foffset.is_none() || fsize.is_none() {
+            warn!("field_from_line: field is missing one of: type, name, offset, size.");
             return Err(Error::new(
                 ErrorKind::Other,
                 "Field is missing one of: type, name, offset, size."));
+        }
+
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let field_name = fname.as_ref().unwrap();
+            let field_type = ftype.as_ref().unwrap();
+            let field_offset = foffset.unwrap();
+            let field_size = fsize.unwrap();
+
+            debug!(
+                "field_from_line: field parsed successfully, name={}, type={}, offset={}, size={}",
+                field_name, field_type, field_offset, field_size
+            );
         }
 
         Ok(EventField::new(
@@ -182,6 +202,8 @@ impl TraceFS {
         system: &str,
         name: &str,
         reader: &mut impl BufRead) -> Result<Event> {
+        debug!("event_from_format: parsing event format, system={}, name={}", system, name);
+
         let mut lines = reader.lines();
         let mut id: Option<usize> = None;
         let mut read_format = false;
@@ -193,7 +215,9 @@ impl TraceFS {
                     /* Read the ID and bail if it's not in the right format */
                     if let Ok(read_id) = line.split_at(4).1.parse::<usize>() {
                         id = Some(read_id);
+                        debug!("event_from_format: found event ID, id={}", read_id);
                     } else {
+                        warn!("event_from_format: ID is not an integer");
                         return Err(Error::new(
                             ErrorKind::Other,
                             "ID was not an integer."));
@@ -201,6 +225,7 @@ impl TraceFS {
                 } else if line.starts_with("format:") {
                     /* The rest of the lines are format lines */
                     read_format = true;
+                    debug!("event_from_format: found format section");
                     break;
                 }
             }
@@ -208,6 +233,7 @@ impl TraceFS {
 
         /* Ensure we read ID and format */
         if id.is_none() || !read_format {
+            warn!("event_from_format: format missing ID or format prefix");
             return Err(Error::new(
                 ErrorKind::Other,
                 "Format is missing ID or format prefix."));
@@ -218,6 +244,8 @@ impl TraceFS {
             format!("{}/{}", system, name));
 
         let format = event.format_mut();
+
+        let mut field_count = 0;
 
         /* Read in format lines */
         while let Some(line) = lines.next() {
@@ -234,8 +262,14 @@ impl TraceFS {
                 let field = Self::field_from_line(line)?;
 
                 format.add_field(field);
+                field_count += 1;
             }
         }
+
+        info!(
+            "event_from_format: event parsed successfully, system={}, name={}, id={}, field_count={}",
+            system, name, id.unwrap(), field_count
+        );
 
         Ok(event)
     }
@@ -278,13 +312,24 @@ impl TraceFS {
         path_buf.push(name);
         path_buf.push("format");
 
-        let format = File::open(path_buf)?;
-        let mut reader = BufReader::new(format);
-
-        Self::event_from_format(
-            system,
-            name,
-            &mut reader)
+        let format = File::open(&path_buf);
+        
+        match format {
+            Ok(file) => {
+                let mut reader = BufReader::new(file);
+                let event = Self::event_from_format(
+                    system,
+                    name,
+                    &mut reader)?;
+                
+                info!("Event found: system={}, name={}", system, name);
+                Ok(event)
+            },
+            Err(e) => {
+                warn!("Event not found: system={}, name={}, error={}", system, name, e);
+                Err(e)
+            }
+        }
     }
 
     /// Runs a command on the dynamic_events tracefs file.
@@ -374,6 +419,7 @@ impl TraceFS {
 
         file.write_all(command.as_bytes())?;
 
+        info!("Uprobe unregistered: system={}, name={}", system, name);
         Ok(())
     }
 

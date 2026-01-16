@@ -135,7 +135,9 @@ impl ElfModuleMetadata {
         debug_link: Option<String>,
         strings: &mut InternedStrings) {
         match debug_link {
-            Some(link) => { self.debug_link_id = strings.to_id(link.as_str()) },
+            Some(link) => { 
+                self.debug_link_id = strings.to_id(link.as_str());
+            },
             None => { self.debug_link_id = 0 }
         }
     }

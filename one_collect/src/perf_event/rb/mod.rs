@@ -8,6 +8,7 @@ use std::rc::Rc;
 #[cfg(target_os = "linux")]
 use libc::*;
 
+use tracing::{debug, info, trace, warn, error};
 use super::abi;
 use super::*;
 
@@ -145,8 +146,15 @@ fn perf_event_open(
             cpu as usize,
             group_fd as usize,
             flags) {
-            -1 => Err(std::io::Error::last_os_error()),
-            result => Ok(result as usize),
+            -1 => {
+                let err = std::io::Error::last_os_error();
+                error!("perf_event_open failed: pid={}, cpu={}, error={}", pid, cpu, err);
+                Err(err)
+            },
+            result => {
+                debug!("perf_event_open succeeded: pid={}, cpu={}, fd={}", pid, cpu, result);
+                Ok(result as usize)
+            },
         }
     }
 }
@@ -540,6 +548,11 @@ impl<'a> CpuRingReader {
         let data_size = u64::from_ne_bytes(
             slice[1048..1056].try_into().unwrap());
 
+        debug!(
+            "CpuRingReader initialized: data_offset={:#x}, data_size={:#x}, pages_len={}",
+            data_offset, data_size, pages_len
+        );
+
         Self {
             pages,
             pages_len,
@@ -569,6 +582,11 @@ impl<'a> CpuRingReader {
         let tail = self.tail();
 
         cursor.set(tail, head);
+
+        trace!(
+            "begin_reading: head={:#x}, tail={:#x}, data_available={}",
+            head, tail, head.saturating_sub(tail)
+        );
     }
 
     pub fn data_slice(
@@ -590,8 +608,12 @@ impl<'a> CpuRingReader {
 
         match abi::Header::from_slice(header_slice) {
             Ok(header) => Ok(header),
-            Err(_) => { Err(io_error(
-                "Header slice was not large enough."))
+            Err(_) => {
+                trace!(
+                    "peek_header failed: header slice too small, start={:#x}, end={:#x}",
+                    *start, end
+                );
+                Err(io_error("Header slice was not large enough."))
             }
         }
     }
@@ -626,9 +648,17 @@ impl<'a> CpuRingReader {
 
         if header_start + data_size <= self.data_size as usize {
             /* Fits within slice, no copy */
+            trace!(
+                "read: entry_type={}, size={}, header_start={:#x}, no_wrap",
+                header.entry_type, header.size, header_start
+            );
             Ok(&data_slice[header_start .. data_end])
         } else {
             /* Data wrapped, requires copy */
+            trace!(
+                "read: entry_type={}, size={}, header_start={:#x}, wrapped",
+                header.entry_type, header.size, header_start
+            );
             temp.clear();
             temp.extend_from_slice(&data_slice[header_start..]);
             let remaining = data_size - temp.len();
@@ -641,6 +671,7 @@ impl<'a> CpuRingReader {
     pub fn end_reading(
         &mut self,
         cursor: &CpuRingCursor) {
+        trace!("end_reading: updating tail to {:#x}", cursor.start());
         unsafe {
             mb();
             let tail: *mut u64 = self.pages.offset(1032) as *mut u64;
@@ -695,6 +726,11 @@ impl CpuRingBuf {
             sample_time_offset += 8;
         }
 
+        debug!(
+            "CpuRingBuf created: cpu={}, sample_time_offset={}",
+            cpu, sample_time_offset
+        );
+
         Self {
             cpu,
             attributes,
@@ -723,15 +759,20 @@ impl CpuRingBuf {
                         16);
 
                     if result == -1 {
-                        return Err(IOError::last_os_error());
+                        let err = IOError::last_os_error();
+                        warn!("read_id failed: cpu={}, fd={}, error={}", self.cpu, fd, err);
+                        return Err(err);
                     }
                 }
 
+                trace!("read_id succeeded: cpu={}, id={}", self.cpu, id.id);
                 Ok(id.id)
             },
 
-            None => Err(io_error(
-                "Ring buffer is not open."))
+            None => {
+                warn!("read_id failed: ring buffer not open, cpu={}", self.cpu);
+                Err(io_error("Ring buffer is not open."))
+            }
         }
     }
 
@@ -758,6 +799,11 @@ impl CpuRingBuf {
         self.fd = Some(fd as i32);
         self.id = Some(self.read_id()?);
 
+        info!(
+            "CpuRingBuf opened: cpu={}, pid={}, fd={}, id={}",
+            self.cpu, pid, fd, self.id.unwrap()
+        );
+
         Ok(())
     }
 
@@ -765,6 +811,7 @@ impl CpuRingBuf {
         &self,
         page_count: usize) -> IOResult<CpuRingReader> {
         if self.fd.is_none() {
+            warn!("create_reader failed: ring buffer not open, cpu={}", self.cpu);
             return Err(io_error(
                 "Ring buffer is not open."));
         }
@@ -784,8 +831,18 @@ impl CpuRingBuf {
                 0);
 
             if pages == MAP_FAILED {
-                return Err(IOError::last_os_error());
+                let err = IOError::last_os_error();
+                warn!(
+                    "create_reader mmap failed: cpu={}, page_count={}, pages_len={}, error={}",
+                    self.cpu, page_count, pages_len, err
+                );
+                return Err(err);
             }
+
+            debug!(
+                "CpuRingReader created: cpu={}, page_count={}, pages_len={}",
+                self.cpu, page_count, pages_len
+            );
 
             Ok(CpuRingReader::new(
                 pages as *mut u8,
@@ -796,6 +853,7 @@ impl CpuRingBuf {
     pub fn enable(
         &self) -> IOResult<()> {
         if self.fd.is_none() {
+            warn!("enable failed: ring buffer not open, cpu={}", self.cpu);
             return Err(io_error(
                 "Ring buffer is not open."));
         }
@@ -806,9 +864,13 @@ impl CpuRingBuf {
                 PERF_EVENT_IOC_ENABLE as _);
 
             if result != 0 {
-                return Err(IOError::last_os_error());
+                let err = IOError::last_os_error();
+                warn!("enable ioctl failed: cpu={}, fd={}, error={}", self.cpu, self.fd.unwrap(), err);
+                return Err(err);
             }
         };
+
+        debug!("CpuRingBuf enabled: cpu={}, id={:?}", self.cpu, self.id);
 
         Ok(())
     }
@@ -816,6 +878,7 @@ impl CpuRingBuf {
     pub fn disable(
         &self) -> IOResult<()> {
         if self.fd.is_none() {
+            warn!("disable failed: ring buffer not open, cpu={}", self.cpu);
             return Err(io_error(
                 "Ring buffer is not open."));
         }
@@ -826,9 +889,13 @@ impl CpuRingBuf {
                 PERF_EVENT_IOC_DISABLE as _);
 
             if result != 0 {
-                return Err(IOError::last_os_error());
+                let err = IOError::last_os_error();
+                warn!("disable ioctl failed: cpu={}, fd={}, error={}", self.cpu, self.fd.unwrap(), err);
+                return Err(err);
             }
         };
+
+        debug!("CpuRingBuf disabled: cpu={}, id={:?}", self.cpu, self.id);
 
         Ok(())
     }
@@ -837,6 +904,10 @@ impl CpuRingBuf {
         &self, 
         target: &Self) -> IOResult<()> {
         if self.fd.is_none() || target.fd.is_none() {
+            warn!(
+                "redirect_to failed: ring buffer or target not open, cpu={}, target_cpu={}",
+                self.cpu, target.cpu
+            );
             return Err(io_error(
                 "Ring buffer or target is not open."));
         }
@@ -848,8 +919,18 @@ impl CpuRingBuf {
                 target.fd.unwrap());
 
             if result == -1 {
-                return Err(IOError::last_os_error());
+                let err = IOError::last_os_error();
+                warn!(
+                    "redirect_to ioctl failed: cpu={}, target_cpu={}, error={}",
+                    self.cpu, target.cpu, err
+                );
+                return Err(err);
             }
+
+            debug!(
+                "CpuRingBuf redirected: cpu={}, id={:?}, target_cpu={}, target_id={:?}",
+                self.cpu, self.id, target.cpu, target.id
+            );
 
             Ok(())
         }

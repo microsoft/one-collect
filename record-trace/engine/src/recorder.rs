@@ -225,6 +225,14 @@ impl Recorder {
             }
         }
 
+        // Filter cpus.
+        if let Some(target_cpus) = self.args.target_cpus() {
+            info!("CPU filter enabled: cpus={:?}", target_cpus);
+            for target_cpu in target_cpus {
+                settings = settings.with_target_cpu(*target_cpu);
+            }
+        }
+
         let dotnet = UniversalDotNetHelper::default()
             .with_dynamic_symbols();
 

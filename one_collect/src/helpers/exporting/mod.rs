@@ -1016,6 +1016,7 @@ pub struct ExportSettings {
     events: Option<Vec<ExportEventCallback>>,
     sample_hooks: Option<Vec<Box<dyn Fn(&ExportSampleFilterContext) -> ExportFilterAction>>>,
     target_pids: Option<Vec<i32>>,
+    target_cpus: Option<Vec<u16>>,
     attribute_sources: Option<Vec<Box<dyn ExportAttributeSource>>>,
     proxy_id: usize,
 }
@@ -1045,6 +1046,7 @@ impl ExportSettings {
             events: None,
             sample_hooks: None,
             target_pids: None,
+            target_cpus: None,
             attribute_sources: None,
             proxy_id: 0,
         }
@@ -1196,6 +1198,20 @@ impl ExportSettings {
 
         clone
     }
+
+    pub fn with_target_cpu(
+        self,
+        cpu: u16) -> Self {
+        let mut clone = self;
+
+        match clone.target_cpus.as_mut() {
+            Some(cpus) => { cpus.push(cpu); },
+            None => { clone.target_cpus = Some(vec![cpu]); }
+        }
+
+        clone
+    }
+
     pub fn cpu_freq(&self) -> u64 { self.cpu_freq }
 }
 

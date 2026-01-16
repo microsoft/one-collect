@@ -1614,6 +1614,7 @@ impl EventFormat {
 
 const EVENT_FLAG_NO_CALLSTACK:u64 = 1u64 << 0;
 const EVENT_FLAG_PROXY:u64 = 1u64 << 1;
+const EVENT_FLAG_NO_CPU_MASK:u64 = 1u64 << 2;
 
 struct FieldSkip {
     loc_type: LocationType,
@@ -1723,6 +1724,17 @@ impl Event {
     /// Checks if the no_callstack flag is set for the event.
     pub fn has_no_callstack_flag(&self) -> bool {
         self.flags & EVENT_FLAG_NO_CALLSTACK != 0
+    }
+
+    /// Sets the no_cpu_mask flag for the event. Use this when events are expected
+    /// to always come through regardless of CPU that sent it.
+    pub fn set_no_cpu_mask_flag(&mut self) {
+        self.flags |= EVENT_FLAG_NO_CPU_MASK;
+    }
+
+    /// Checks if the no_cpu_mask flag is set for the event.
+    pub fn has_no_cpu_mask_flag(&self) -> bool {
+        self.flags & EVENT_FLAG_NO_CPU_MASK != 0
     }
 
     /// Sets the proxy ID and flag for the event. Use this when events are used for proxy

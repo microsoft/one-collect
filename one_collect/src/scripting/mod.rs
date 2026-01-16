@@ -4,6 +4,8 @@
 use std::cell::RefCell;
 use std::str::FromStr;
 
+use tracing::{debug, info, warn, error};
+
 use crate::event::*;
 
 use rhai::{Engine, CustomType, TypeBuilder};
@@ -138,6 +140,11 @@ impl ScriptEnvironment {
 
         let engine_patch = u16::from_str(engine_patch).unwrap_or(0);
 
+        info!(
+            "ScriptEnvironment::new: os_major={}, os_minor={}, engine_major={}, engine_minor={}, engine_patch={}",
+            os_major, os_minor, engine_major, engine_minor, engine_patch
+        );
+
         Self {
             os_major,
             os_minor,
@@ -213,9 +220,16 @@ impl ScriptEngine {
     pub fn eval<T: Clone + 'static>(
         &self,
         script: &str) -> anyhow::Result<T> {
+        info!("ScriptEngine::eval: start script");
+        info!("{}", script);
+        info!("ScriptEngine::eval: end script");
         match self.engine.eval(script) {
-            Ok(value) => { Ok(value) },
+            Ok(value) => {
+                debug!("ScriptEngine::eval: evaluation successful");
+                Ok(value)
+            },
             Err(err) => {
+                warn!("ScriptEngine::eval failed: error={}", err);
                 anyhow::bail!("Error: {}", err);
             }
         }
@@ -224,9 +238,14 @@ impl ScriptEngine {
     pub fn run(
         &self,
         script: &str) -> anyhow::Result<()> {
+        debug!("ScriptEngine::run: running script, length={}", script.len());
         match self.engine.run(script) {
-            Ok(()) => { Ok(()) },
+            Ok(()) => {
+                debug!("ScriptEngine::run: execution successful");
+                Ok(())
+            },
             Err(err) => {
+                error!("ScriptEngine::run failed: error={}", err);
                 anyhow::bail!("Error: {}", err);
             }
         }

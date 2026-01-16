@@ -5,6 +5,7 @@ use std::str::FromStr;
 use std::fs::{self, File};
 use std::path::{self, PathBuf};
 use std::io::{BufRead, BufReader};
+use tracing::{debug};
 
 use crate::PathBufInteger;
 
@@ -25,6 +26,7 @@ use crate::PathBufInteger;
 /// that the process's actual name is longer. In such a case, the function attempts to retreive the full process name.
 pub fn get_comm(
     path: &mut path::PathBuf) -> Option<String> {
+    debug!("Retrieving comm: path={:?}", path);
     path.push("comm");
     let result = fs::read_to_string(&path);
     path.pop();
@@ -39,14 +41,19 @@ pub fn get_comm(
                !comm.starts_with("kworker/") {
                 if let Some(long_comm) =
                     parse_long_comm(path) {
+                    debug!("Found long comm from cmdline: comm={}", long_comm);
                     return Some(long_comm);
                 }
             }
 
             /* Best comm */
+            debug!("Retrieved comm: comm={}", comm);
             Some(comm)
         },
-        Err(_) => None,
+        Err(_) => {
+            debug!("Failed to read comm from procfs");
+            None
+        },
     }
 }
 

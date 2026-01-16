@@ -31,6 +31,7 @@ pub fn comm(
     let mut len: usize;
 
     *event.extension_mut().provider_mut() = REAL_SYSTEM_PROCESS_PROVIDER;
+    event.set_no_cpu_mask_flag();
 
     let format = event.format_mut();
 
@@ -104,6 +105,7 @@ pub fn mmap(
     let mut len: usize;
 
     *event.extension_mut().provider_mut() = REAL_SYSTEM_IMAGE_PROVIDER;
+    event.set_no_cpu_mask_flag();
 
     let format = event.format_mut();
 
@@ -235,6 +237,7 @@ pub fn callstack(
     let mut len: usize;
 
     *event.extension_mut().provider_mut() = REAL_SYSTEM_CALLSTACK_PROVIDER;
+    event.set_no_cpu_mask_flag();
 
     let format = event.format_mut();
 

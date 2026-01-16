@@ -7,6 +7,7 @@ use std::os::fd::{FromRawFd, IntoRawFd, RawFd};
 use std::ops::DerefMut;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry::{self, Vacant};
+use tracing::{debug, warn};
 
 use super::*;
 use crate::PathBufInteger;
@@ -109,6 +110,7 @@ impl MachineState {
         self.machine.add_process(
             pid,
             Process::new());
+        debug!("Process added for callstack tracking: pid={}", pid);
     }
 
     fn fork(
@@ -116,12 +118,14 @@ impl MachineState {
         pid: u32,
         ppid: u32) {
         self.machine.fork_process(pid, ppid);
+        debug!("Process forked: pid={}, ppid={}", pid, ppid);
     }
 
     fn exit(
         &mut self,
         pid: u32) {
         self.machine.remove_process(pid);
+        debug!("Process removed from callstack tracking: pid={}", pid);
     }
 
     fn add_mmap_exec(
@@ -155,6 +159,8 @@ impl MachineState {
                 /* Only insert if we can actually open it */
                 if let Ok(file) = std::fs::File::open(&self.path) {
                     entry.insert(file.into_raw_fd());
+                } else {
+                    warn!("Failed to open module file: pid={}, filename={}", pid, filename);
                 }
             }
         }
@@ -318,13 +324,17 @@ impl CallstackReader {
 
                 /* Expected 3 registers on x64 */
                 if data.len() != 24 {
+                    debug!("Invalid register data length: expected=24, got={}", data.len());
                     return;
                 }
 
                 /* PID */
                 match state.pid_field.try_get_u32(full_data) {
                     Some(_pid) => { pid = _pid; },
-                    None => { return; },
+                    None => { 
+                        debug!("Failed to read PID from data");
+                        return; 
+                    },
                 }
 
                 let rbp = u64::from_ne_bytes(data[0..8].try_into().unwrap());

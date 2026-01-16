@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry::{Vacant, Occupied};
 use crate::helpers::exporting::graph::{Target, ExportGraph};
 
+use tracing::info;
+
 pub trait PerfViewXmlFormat {
     fn to_perf_view_xml(
         &self,
@@ -17,6 +19,8 @@ impl PerfViewXmlFormat for ExportGraph {
     fn to_perf_view_xml(
         &self,
         path: &str) -> anyhow::Result<()> {
+        info!("Starting PerfView XML export: path={}", path);
+        
         let resolvables = self.resolvables();
         let strings = self.strings();
         let nodes = self.nodes();
@@ -157,6 +161,9 @@ impl PerfViewXmlFormat for ExportGraph {
         write!(writer, "</Samples>\n")?;
         write!(writer, "</StackSource>\n")?;
         write!(writer, "</StackWindow>\n")?;
+
+        info!("PerfView XML export completed successfully: path={}, frames={}, samples={}", 
+            path, frames.len(), sample_count);
 
         Ok(())
     }

@@ -6,6 +6,7 @@ use crate::scripting::{ScriptEngine, ScriptEvent};
 use crate::event::*;
 
 use rhai::{CustomType, TypeBuilder, Engine, EvalAltResult};
+use tracing::{info, error};
 
 pub struct UniversalExporterSwapper {
     exporter: Option<UniversalExporter>,
@@ -78,10 +79,196 @@ struct FieldFilter {
 }
 
 #[derive(Default, Clone)]
-pub struct TimelineEventFlags {
-    flags: u8,
+pub struct RecordEventFlags {
     record_fields: Vec<String>,
     filter_fields: Vec<FieldFilter>,
+}
+
+impl CustomType for RecordEventFlags {
+    fn build(mut builder: TypeBuilder<Self>) {
+        builder
+            .with_fn("should_record_field", Self::should_record_field)
+            .with_fn("should_filter_field", Self::should_filter_field)
+            .with_fn("clear", Self::clear);
+    }
+}
+
+impl RecordEventFlags {
+    pub fn should_record_field(
+        &mut self,
+        field: String) {
+        self.record_fields.push(field);
+    }
+
+    pub fn should_filter_field(
+        &mut self,
+        field: String,
+        operation: String,
+        value: String) {
+        self.filter_fields.push(
+            FieldFilter {
+                field,
+                operation,
+                value,
+                });
+    }
+
+    pub fn clear(&mut self) {
+        self.record_fields.clear();
+        self.filter_fields.clear();
+    }
+
+    pub fn build_record_data_closure(
+        &self,
+        event: &Event,
+        record_format: &mut EventFormat) -> anyhow::Result<Option<Box<dyn FnMut(&ExportTraceContext, &mut Vec<u8>)>>> {
+        let mut record_closures = Vec::new();
+
+        struct RecordContext {
+            write_offset: usize,
+            closure: Box<dyn FnMut(&[u8]) -> &[u8]>,
+        }
+
+        for record_field in &self.record_fields {
+            if let Some(event_field) = event.format().get_field(record_field) {
+                if event_field.size == 0 ||
+                   event_field.location == LocationType::DynRelative ||
+                   event_field.location == LocationType::DynAbsolute {
+                    anyhow::bail!(
+                        "Record field \"{}\" on event \"{}\" must have a static size.",
+                        record_field, event.name());
+                }
+
+                let write_offset = match record_format.get_field(record_field) {
+                    Some(existing_field) => {
+                        if event_field.type_name != existing_field.type_name {
+                            anyhow::bail!(
+                                "Record field \"{}\" on event \"{}\" must all have the same type.",
+                                record_field, event.name());
+                        }
+
+                        if event_field.size != existing_field.size {
+                            anyhow::bail!(
+                                "Record field \"{}\" on event \"{}\" must all have the same size.",
+                                record_field, event.name());
+                        }
+
+                        if event_field.location != existing_field.location {
+                            anyhow::bail!(
+                                "Record field \"{}\" on event \"{}\" must all have the same location.",
+                                record_field, event.name());
+                        }
+
+                        existing_field.offset
+                    },
+                    None => {
+                        let mut new_field = event_field.clone();
+
+                        let offset = match record_format.fields().last() {
+                            Some(last_field) => { last_field.offset + last_field.size },
+                            None => { 0 },
+                        };
+
+                        new_field.offset = offset;
+
+                        record_format.add_field(new_field);
+
+                        offset
+                    }
+                };
+
+                match event.try_get_field_data_closure(record_field) {
+                    Some(closure) => {
+                        record_closures.push(
+                            RecordContext {
+                                write_offset,
+                                closure,
+                            });
+                    },
+                    None => {
+                        anyhow::bail!(
+                            "Unable to get record from \"{}\" for event \"{}\".",
+                            record_field, event.name());
+                    },
+                }
+            } else {
+                anyhow::bail!(
+                    "Record field \"{}\" does not exist for event \"{}\".",
+                    record_field, event.name());
+            }
+        }
+
+        if record_closures.is_empty() {
+            return Ok(None);
+        }
+
+        Ok(Some(Box::new(move |trace, record_data| {
+            let event_data = trace.data.event_data();
+
+            for closure in &mut record_closures {
+                let data = (closure.closure)(event_data);
+                let len = data.len();
+                let start = closure.write_offset;
+                let end = start + len;
+
+                /* Ensure enough space */
+                if record_data.len() < end {
+                    record_data.resize(end, 0);
+                }
+
+                /* Copy */
+                record_data[start..end].copy_from_slice(data);
+            }
+        })))
+    }
+
+    pub fn build_filter_closure(
+        &self,
+        event: &Event) -> anyhow::Result<Option<Box<dyn FnMut(&ExportTraceContext) -> bool>>> {
+        let mut filter_closures = Vec::new();
+
+        for filter in &self.filter_fields {
+            match event.try_get_field_filter_closure(
+                &filter.field,
+                &filter.operation,
+                &filter.value) {
+                Some(closure) => {
+                    filter_closures.push(closure);
+                },
+                None => {
+                    anyhow::bail!(
+                        "Unable to apply event filter \"{} {} {}\" on event \"{}\". \
+                        Check that the field exists and for type compatibility.",
+                        filter.field,
+                        filter.operation,
+                        filter.value,
+                        event.name());
+                }
+            }
+        }
+
+        if filter_closures.is_empty() {
+            return Ok(None);
+        }
+
+        Ok(Some(Box::new(move |trace| {
+            let event_data = trace.data.event_data();
+
+            for closure in &mut filter_closures {
+                if !closure(event_data) {
+                    return false;
+                }
+            }
+
+            true
+        })))
+    }
+}
+
+#[derive(Default, Clone)]
+pub struct TimelineEventFlags {
+    flags: u8,
+    record_flags: RecordEventFlags,
     filter_record_fields: Vec<FieldFilter>,
 }
 
@@ -113,7 +300,7 @@ impl TimelineEventFlags {
     pub fn should_record_field(
         &mut self,
         field: String) {
-        self.record_fields.push(field);
+        self.record_flags.should_record_field(field);
     }
 
     pub fn should_filter_field(
@@ -121,12 +308,7 @@ impl TimelineEventFlags {
         field: String,
         operation: String,
         value: String) {
-        self.filter_fields.push(
-            FieldFilter {
-                field,
-                operation,
-                value,
-                });
+        self.record_flags.should_filter_field(field, operation, value);
     }
 
     pub fn should_filter_record(
@@ -142,12 +324,9 @@ impl TimelineEventFlags {
                 });
     }
 
-    pub fn record_fields(&self) -> &[String] { &self.record_fields }
-
     pub fn clear(&mut self) {
         self.flags = Self::TIMELINE_EVENT_FLAG_NONE;
-        self.record_fields.clear();
-        self.filter_fields.clear();
+        self.record_flags.clear();
         self.filter_record_fields.clear();
     }
 }
@@ -631,142 +810,8 @@ impl ExporterTimeline {
             }
         });
 
-        struct RecordContext {
-            write_offset: usize,
-            closure: Box<dyn FnMut(&[u8]) -> &[u8]>,
-        }
-
-        let mut record_closures = Vec::new();
-
-        for record_field in flags.record_fields() {
-            if let Some(event_field) = event.format().get_field(record_field) {
-                if event_field.size == 0 ||
-                   event_field.location == LocationType::DynRelative ||
-                   event_field.location == LocationType::DynAbsolute {
-                    anyhow::bail!(
-                        "Record field \"{}\" on event \"{}\" must have a static size.",
-                        record_field, event.name());
-                }
-
-                let write_offset = match self.record_format.get_field(record_field) {
-                    Some(existing_field) => {
-                        if event_field.type_name != existing_field.type_name {
-                            anyhow::bail!(
-                                "Record field \"{}\" on event \"{}\" must all have the same type.",
-                                record_field, event.name());
-                        }
-
-                        if event_field.size != existing_field.size {
-                            anyhow::bail!(
-                                "Record field \"{}\" on event \"{}\" must all have the same size.",
-                                record_field, event.name());
-                        }
-
-                        if event_field.location != existing_field.location {
-                            anyhow::bail!(
-                                "Record field \"{}\" on event \"{}\" must all have the same location.",
-                                record_field, event.name());
-                        }
-
-                        existing_field.offset
-                    },
-                    None => {
-                        let mut new_field = event_field.clone();
-
-                        let offset = match self.record_format.fields().last() {
-                            Some(last_field) => { last_field.offset + last_field.size },
-                            None => { 0 },
-                        };
-
-                        new_field.offset = offset;
-
-                        self.record_format.add_field(new_field);
-
-                        offset
-                    }
-                };
-
-                match event.try_get_field_data_closure(record_field) {
-                    Some(closure) => {
-                        record_closures.push(
-                            RecordContext {
-                                write_offset,
-                                closure,
-                            });
-                    },
-                    None => {
-                        anyhow::bail!(
-                            "Unable to get record from \"{}\" for event \"{}\".",
-                            record_field, event.name());
-                    },
-                }
-            } else {
-                anyhow::bail!(
-                    "Record field \"{}\" does not exist for event \"{}\".",
-                    record_field, event.name());
-            }
-        }
-
-        let mut filter_closures = Vec::new();
-
-        for filter in &flags.filter_fields {
-            match event.try_get_field_filter_closure(
-                &filter.field,
-                &filter.operation,
-                &filter.value) {
-                Some(closure) => {
-                    filter_closures.push(closure);
-                },
-                None => {
-                    anyhow::bail!(
-                        "Unable to apply event filter \"{} {} {}\" on event \"{}\". \
-                        Check that the field exists and for type compatibility.",
-                        filter.field,
-                        filter.operation,
-                        filter.value,
-                        event.name());
-                }
-            }
-        }
-
-        let mut record_closure: Option<TimelineEventRecFn> = None;
-
-        if !record_closures.is_empty() {
-            record_closure = Some(Box::new(move |trace, record_data| {
-                let event_data = trace.data.event_data();
-
-                for closure in &mut record_closures {
-                    let data = (closure.closure)(event_data);
-                    let len = data.len();
-                    let start = closure.write_offset;
-                    let end = start + len;
-
-                    /* Ensure enough space */
-                    if record_data.len() < end {
-                        record_data.resize(end, 0);
-                    }
-
-                    /* Copy */
-                    record_data[start..end].copy_from_slice(data);
-                }
-            }));
-        }
-
-        let mut filter_closure: Option<TimelineEventFilterFn> = None;
-
-        if !filter_closures.is_empty() {
-            filter_closure  = Some(Box::new(move |trace| {
-                let event_data = trace.data.event_data();
-
-                for closure in &mut filter_closures {
-                    if !closure(event_data) {
-                        return false;
-                    }
-                }
-
-                true
-            }));
-        }
+        let record_closure = flags.record_flags.build_record_data_closure(&event, &mut self.record_format)?;
+        let filter_closure = flags.record_flags.build_filter_closure(&event)?;
 
         self.events.push(
             TimelineEvent {
@@ -860,11 +905,13 @@ impl ScriptedUniversalExporter {
     }
 
     fn init(&mut self) {
+        info!("Initializing script environment");
         let fn_exporter = self.export_swapper();
 
         self.rhai_engine().register_fn(
             "with_per_cpu_buffer_bytes",
             move |size: i64| {
+                info!("Setting per-CPU buffer size: bytes={}", size);
                 fn_exporter.borrow_mut().swap(|exporter| {
                     exporter.with_per_cpu_buffer_bytes(size as usize)
                 });
@@ -872,6 +919,13 @@ impl ScriptedUniversalExporter {
 
         self.rhai_engine().build_type::<ScriptTimeline>();
         self.rhai_engine().build_type::<TimelineEventFlags>();
+        self.rhai_engine().build_type::<RecordEventFlags>();
+
+        self.rhai_engine().register_fn(
+            "new_record_event_flags",
+            || -> Result<RecordEventFlags, Box<EvalAltResult>> {
+                Ok(RecordEventFlags::default())
+        });
 
         self.rhai_engine().register_fn(
             "new_timeline_event_flags",
@@ -882,8 +936,9 @@ impl ScriptedUniversalExporter {
         self.rhai_engine().register_fn(
             "new_timeline",
             |name: String| -> Result<ScriptTimeline, Box<EvalAltResult>> {
-            Ok(ScriptTimeline {
-                timeline: Writable::new(ExporterTimeline::new(name))
+                info!("Registered new_timeline: name={}", name);
+                Ok(ScriptTimeline {
+                    timeline: Writable::new(ExporterTimeline::new(name))
                 })
         });
 
@@ -892,7 +947,8 @@ impl ScriptedUniversalExporter {
         self.rhai_engine().register_fn(
             "use_timeline",
             move |timeline: ScriptTimeline| -> Result<(), Box<EvalAltResult>> {
-            timeline.apply(&mut fn_exporter.borrow_mut())
+                info!("Using timeline");
+                timeline.apply(&mut fn_exporter.borrow_mut())
         });
 
         let fn_exporter = self.export_swapper();
@@ -901,6 +957,8 @@ impl ScriptedUniversalExporter {
             "record_event",
             move |event: ScriptEvent| -> Result<(), Box<EvalAltResult>> {
             if let Some(event) = event.to_event() {
+                info!("Recording event: name={}", event.name());
+
                 fn_exporter.borrow_mut().add_event(
                     event,
                     move |built| {
@@ -927,11 +985,92 @@ impl ScriptedUniversalExporter {
         let fn_exporter = self.export_swapper();
 
         self.rhai_engine().register_fn(
+            "record_event",
+            move |event: ScriptEvent, flags: RecordEventFlags| -> Result<(), Box<EvalAltResult>> {
+            if let Some(event) = event.to_event() {
+                info!("Recording event: name={}", event.name());
+
+                let mut filter_closure = match flags.build_filter_closure(&event) {
+                    Ok(closure) => closure,
+                    Err(err) => { return Err(err.to_string().into()); }
+                };
+
+                let mut record_format = EventFormat::default();
+
+                let mut record_closure = match flags.build_record_data_closure(&event, &mut record_format) {
+                    Ok(closure) => closure,
+                    Err(err) => { return Err(err.to_string().into()); }
+                };
+
+                let default_format = record_format.fields().is_empty();
+                let name = event.name().to_owned();
+                let event_id = event.id();
+                let mut record_data = Vec::new();
+
+                fn_exporter.borrow_mut().add_event(
+                    event,
+                    move |built| {
+                        if default_format {
+                            built.use_event_for_kind(true);
+                        } else {
+                            let kind = built.set_sample_kind(&name);
+
+                            built.set_record_type(
+                                ExportRecordType::new(
+                                    kind,
+                                    event_id,
+                                    name.clone(),
+                                    record_format.clone()));
+                        }
+
+                        Ok(())
+                    },
+                    move |trace| {
+                        if let Some(filter_closure) = &mut filter_closure {
+                            if !filter_closure(trace) {
+                                return Ok(());
+                            }
+                        }
+
+                        let attributes = trace.default_attributes()?;
+
+                        if default_format {
+                            trace
+                                .sample_builder()
+                                .with_attributes(attributes)
+                                .with_record_all_event_data()
+                                .save_value(MetricValue::Count(1))
+                        } else {
+                            record_data.clear();
+
+                            if let Some(record_closure) = &mut record_closure {
+                                record_closure(trace, &mut record_data);
+                            }
+
+                            trace
+                                .sample_builder()
+                                .with_attributes(attributes)
+                                .with_record_data(&record_data)
+                                .save_value(MetricValue::Count(1))
+                        }
+                    });
+            } else {
+                return Err("Event has already been used.".into());
+            }
+
+            Ok(())
+        });
+
+        let fn_exporter = self.export_swapper();
+
+        self.rhai_engine().register_fn(
             "sample_event",
             move |event: ScriptEvent,
                 sample_field: String,
                 sample_type: String,
                 record_data: bool| -> Result<(), Box<EvalAltResult>> {
+                info!("Script called sample_event: sample_field={}, sample_type={}, record_data={}", 
+                      sample_field, sample_type, record_data);
                 if let Some(event) = event.to_event() {
                     let mut get_data = match event.try_get_field_data_closure(&sample_field) {
                         Some(closure) => { closure },
@@ -1000,9 +1139,14 @@ impl ScriptedUniversalExporter {
     pub fn from_script(
         self,
         script: &str) -> anyhow::Result<UniversalExporter> {
+        info!("Starting script execution:\n{}", script);
+        
         match self.engine.run(script) {
-            Ok(()) => {},
+            Ok(()) => {
+                info!("Script execution completed successfully");
+            },
             Err(err) => {
+                error!("Script execution failed: {:?}", err);
                 let mut exporter = self.exporter.borrow_mut().take()?;
 
                 exporter.cleanup();

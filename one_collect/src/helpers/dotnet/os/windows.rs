@@ -23,6 +23,8 @@ use crate::etw::{EtwSession, AncillaryData};
 use crate::helpers::dotnet::scripting::*;
 use crate::Guid;
 
+use tracing::{warn, info, debug};
+
 #[cfg(target_os = "windows")]
 use winreg::*;
 
@@ -182,6 +184,7 @@ impl OSDotNetEventFactory {
                 let fn_filter_args = filter_args.clone();
 
                 session.add_starting_callback(move |context| {
+                    debug!("Writing ETW filters: session_id={}", context.id());
                     Self::write_etw_filters(context.id(), &fn_filter_args);
                 });
 
@@ -189,6 +192,7 @@ impl OSDotNetEventFactory {
                 let fn_filter_args = filter_args.clone();
 
                 session.add_stopping_callback(move |context| {
+                    debug!("Clearing ETW filters: session_id={}", context.id());
                     Self::clear_etw_filters(context.id(), &fn_filter_args);
                 });
             }
@@ -217,15 +221,18 @@ impl OSDotNetEventFactory {
             Some(filter_lookup) => {
                 match filter_lookup.entry(provider) {
                     Vacant(entry) => {
+                        debug!("Set .NET filter args: provider={}", provider_name);
                         entry.insert(filter_args);
                         Ok(())
                     },
                     Occupied(_) => {
+                        warn!("Filter arguments already specified for provider: provider={}", provider_name);
                         anyhow::bail!("Filter arguments are already specified for this provider.");
                     },
                 }
             },
             None => {
+                warn!("Filter arguments no longer available for provider: provider={}", provider_name);
                 anyhow::bail!("Filter arguments are no longer available.");
             },
         }
@@ -241,13 +248,15 @@ impl OSDotNetEventFactory {
         let provider = guid_from_provider(provider_name)?;
         name = event_full_name(provider_name, provider, &name);
 
+        debug!("Creating new .NET event: provider={}, name={}, keyword={:#x}, level={}", provider_name, name, keyword, level);
+
         /* TODO: Windows TraceLogging Support */
         let mut event = Event::new(id.unwrap_or(0), name);
 
         *event.extension_mut().provider_mut() = provider;
         *event.extension_mut().level_mut() = level;
         *event.extension_mut().keyword_mut() = keyword;
-
+        
         Ok(event)
     }
 }

@@ -4,6 +4,7 @@
 use std::{fs::File, io::{BufRead, BufReader, Seek, SeekFrom}};
 use std::collections::HashSet;
 use ruwind::elf::{ElfLoadHeader, ElfSymbol, ElfSymbolIterator};
+use tracing::{info, trace, warn};
 
 use crate::helpers::exporting::ExportMachine;
 
@@ -304,6 +305,9 @@ impl ExportSymbolReader for KernelSymbolReader {
             self.reader = Some(BufReader::new(file));
             self.done = false;
             self.load_next();
+            info!("Kernel symbol reader initialized from /proc/kallsyms");
+        } else {
+            warn!("Failed to open /proc/kallsyms");
         }
     }
 
@@ -428,11 +432,15 @@ impl PerfMapSymbolReader {
 
             if let Ok(len) = self.reader.read_line(&mut self.buffer) {
                 if len == 0 {
+                    trace!("PerfMap load_next: end of file");
                     break;
                 }
             } else {
+                trace!("PerfMap load_next: read error");
                 break;
             }
+
+            trace!("PerfMap load_next: parsing line={}", self.buffer.trim());
 
             for (index, part) in self.buffer.splitn(3, ' ').enumerate() {
                 match index {
@@ -467,6 +475,7 @@ impl PerfMapSymbolReader {
 
             self.done = false;
 
+            trace!("PerfMap load_next: parsed symbol start_ip={:#x}, end_ip={:#x}, name={}", self.start_ip, self.end_ip, self.name);
             return;
         }
 

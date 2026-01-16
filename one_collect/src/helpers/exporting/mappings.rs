@@ -3,6 +3,8 @@
 
 use std::cmp::Ordering;
 
+use tracing::{info, trace};
+
 use ruwind::{CodeSection, ModuleKey, UnwindType};
 
 use super::*;
@@ -186,6 +188,7 @@ impl ExportMapping {
         unique_ips: &mut Vec<u64>,
         sym_reader: &mut impl ExportSymbolReader,
         strings: &mut InternedStrings) {
+        let initial_symbol_count = self.symbols.len();
         unique_ips.sort();
         sym_reader.reset();
 
@@ -224,9 +227,17 @@ impl ExportMapping {
                         start_ip,
                         end_ip);
 
+                    trace!("Adding symbol to mapping: mapping_id={}, name={}, start={:#x}, end={:#x}", 
+                        self.id, demangled_name, start_ip, end_ip);
                     self.add_symbol(symbol);
                 }
             }
+        }
+        
+        let added_symbols = self.symbols.len() - initial_symbol_count;
+        if added_symbols > 0 {
+            info!("Added symbols to mapping: mapping_id={}, start={:#x}, added_count={}", 
+                self.id, self.start, added_symbols);
         }
     }
 }

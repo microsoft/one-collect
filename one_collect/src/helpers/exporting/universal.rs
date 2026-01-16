@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
+use tracing::{info, debug};
+
 use super::*;
 
 pub type SessionBuilder = os::SessionBuilder;
@@ -129,6 +131,7 @@ impl UniversalExporter {
         self,
         name: &str,
         duration: std::time::Duration) -> anyhow::Result<Writable<ExportMachine>> {
+        info!("Starting export parse: name={}, duration={:?}", name, duration);
         let now = std::time::Instant::now();
 
         self.parse_until(
@@ -166,6 +169,7 @@ impl UniversalExporter {
     pub(crate) fn run_build_hooks(
         &mut self,
         mut builder: SessionBuilder) -> anyhow::Result<SessionBuilder> {
+        debug!("Running build hooks: count={}", self.build_hooks.len());
         let mut context = UniversalBuildSessionContext {
         };
 
@@ -179,6 +183,7 @@ impl UniversalExporter {
     pub(crate) fn run_export_hooks(
         &mut self,
         machine: &Writable<ExportMachine>) -> anyhow::Result<()> {
+        debug!("Running export hooks: count={}", self.export_hooks.len());
         for hook in &mut self.export_hooks {
             hook(machine)?;
         }

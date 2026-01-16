@@ -4,6 +4,7 @@
 use std::fs::File;
 use std::ffi::CString;
 use std::path::Path;
+use tracing::{warn, debug};
 
 #[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
@@ -87,23 +88,25 @@ impl OpenAt {
     pub fn open_file(
         &self,
         path: &Path) -> anyhow::Result<File> {
-        let path = CString::new(path.as_os_str().as_bytes())?;
-        let mut path = path.as_bytes_with_nul();
+        let path_cstring = CString::new(path.as_os_str().as_bytes())?;
+        let mut path_bytes = path_cstring.as_bytes_with_nul();
 
-        if path[0] == b'/' {
-            path = &path[1..]
+        if path_bytes[0] == b'/' {
+            path_bytes = &path_bytes[1..]
         }
 
         unsafe {
             let fd = libc::openat(
                 self.fd,
-                path.as_ptr() as *const libc::c_char,
+                path_bytes.as_ptr() as *const libc::c_char,
                 libc::O_RDONLY | libc::O_CLOEXEC);
 
             if fd == -1 {
+                warn!("Failed to open file with openat: path={:?}", path);
                 return Err(std::io::Error::last_os_error().into());
             }
 
+            debug!("File opened via openat: path={:?}, fd={}", path, fd);
             Ok(File::from_raw_fd(fd))
         }
     }
@@ -155,6 +158,7 @@ impl OpenAt {
         let file = self.open_file(path);
 
         if file.is_err() {
+            debug!("Failed to open directory for find operation: path={:?}, prefix={}", path, prefix);
             return None;
         }
 
@@ -167,6 +171,7 @@ impl OpenAt {
             let dir = libc::fdopendir(fd);
 
             if dir.is_null() {
+                debug!("Failed to open directory stream: path={:?}", path);
                 return None;
             }
 
@@ -198,9 +203,11 @@ impl OpenAt {
         }
 
         if paths.is_empty() {
+            debug!("No matching paths found: path={:?}, prefix={}", path, prefix);
             return None;
         }
 
+        debug!("Found matching paths: path={:?}, count={}, prefix={}", path, paths.len(), prefix);
         Some(paths)
     }
 }

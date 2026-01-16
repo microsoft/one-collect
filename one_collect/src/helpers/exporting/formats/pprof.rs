@@ -18,6 +18,8 @@ use protobuf::rt::{self, *};
 use flate2::write::GzEncoder;
 use flate2::Compression;
 
+use tracing::{debug, info};
+
 fn write_value_type(
     field_number: u32,
     buffer: &mut Vec<u8>,
@@ -312,6 +314,8 @@ pub trait PprofFormat {
         type_id: usize,
         unit_id: usize,
         path: &str) -> anyhow::Result<()> {
+        info!("Starting pprof export: path={}", path);
+        
         let file = File::create(path)?;
         let mut gzip = GzEncoder::new(file, Compression::default());
 
@@ -321,6 +325,8 @@ pub trait PprofFormat {
             &mut gzip)?;
 
         gzip.finish()?;
+        
+        info!("Pprof export completed successfully: path={}", path);
 
         Ok(())
     }
@@ -332,6 +338,8 @@ impl PprofFormat for ExportGraph {
         type_id: usize,
         unit_id: usize,
         writer: &mut impl Write) -> anyhow::Result<()> {
+        debug!("Writing pprof data: type_id={}, unit_id={}", type_id, unit_id);
+        
         let resolvables = self.resolvables();
         let strings = self.strings();
         let nodes = self.nodes();
@@ -382,6 +390,8 @@ impl PprofFormat for ExportGraph {
         /* Done */
         output.flush()?;
         drop(output);
+        
+        debug!("Pprof data written successfully");
 
         Ok(())
     }

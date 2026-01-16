@@ -19,6 +19,8 @@ pub fn lost() -> Event {
         "lost".into(), "u64".into(),
         LocationType::Static, offset, len));
 
+    event.set_no_cpu_mask_flag();
+
     event
 }
 
@@ -42,6 +44,8 @@ pub fn comm() -> Event {
     format.add_field(EventField::new(
         "comm[]".into(), "char".into(),
         LocationType::StaticString, offset, 0));
+
+    event.set_no_cpu_mask_flag();
 
     event
 }
@@ -78,6 +82,8 @@ pub fn exit() -> Event {
         "time".into(), "u64".into(),
         LocationType::Static, offset, len));
 
+    event.set_no_cpu_mask_flag();
+
     event
 }
 
@@ -112,6 +118,8 @@ pub fn fork() -> Event {
     format.add_field(EventField::new(
         "time".into(), "u64".into(),
         LocationType::Static, offset, len));
+
+    event.set_no_cpu_mask_flag();
 
     event
 }
@@ -186,6 +194,8 @@ pub fn mmap() -> Event {
         "filename[]".into(), "char".into(),
         LocationType::StaticString, offset, 0));
 
+    event.set_no_cpu_mask_flag();
+
     event
 }
 
@@ -199,6 +209,8 @@ pub fn lost_samples() -> Event {
     format.add_field(EventField::new(
         "lost".into(), "u64".into(),
         LocationType::Static, offset, len));
+
+    event.set_no_cpu_mask_flag();
 
     event
 }

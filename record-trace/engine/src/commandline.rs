@@ -39,6 +39,9 @@ struct Args {
     #[arg(long = "pid", help = "Capture data for the specified process ID.  Multiple pids can be specified, one per usage of --pid")]
     target_pids: Option<Vec<i32>>,
 
+    #[arg(long = "cpu", help = "Capture data for the specified CPU.  Multiple cpus can be specified, one per usage of --cpu")]
+    target_cpus: Option<Vec<u16>>,
+
     #[arg(long, help = "Script snippet to run to enable complex configurations")]
     script: Option<String>,
 
@@ -77,6 +80,7 @@ pub struct RecordArgs {
     hard_page_faults: bool,
     live: bool,
     target_pids: Option<Vec<i32>>,
+    target_cpus: Option<Vec<u16>>,
     script: Option<String>,
     log_filter: Option<String>,
     log_path: Option<String>,
@@ -131,6 +135,7 @@ impl RecordArgs {
             hard_page_faults: command_args.hard_page_faults,
             live: command_args.live,
             target_pids: command_args.target_pids,
+            target_cpus: command_args.target_cpus,
             script,
             log_filter: command_args.log_filter,
             log_path: command_args.log_path,
@@ -183,6 +188,10 @@ impl RecordArgs {
         &self.target_pids
     }
 
+    pub (crate) fn target_cpus(&self) -> &Option<Vec<u16>> {
+        &self.target_cpus
+    }
+
     pub (crate) fn script(&self) -> &Option<String> {
         &self.script
     }
@@ -205,6 +214,9 @@ impl RecordArgs {
         info!("Arguments parsed: live={}", self.live);
         if let Some(ref pids) = self.target_pids {
             info!("Arguments parsed: target_pids={:?}", pids);
+        }
+        if let Some(ref cpus) = self.target_cpus {
+            info!("Arguments parsed: target_cpus={:?}", cpus);
         }
         if let Some(ref filter) = self.log_filter {
             info!("Arguments parsed: log_filter={}", filter);

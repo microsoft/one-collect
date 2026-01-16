@@ -19,6 +19,7 @@ ruwind = { path = "../ruwind" }
 chrono = "0.4.39"
 rhai = "1.21.0"
 sha1 = "0.10.6"
+tracing = "0.1"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 winreg = "0.55.0"

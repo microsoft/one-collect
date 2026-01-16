@@ -269,6 +269,7 @@ pub struct EtwSession {
     /* Config */
     cpu_buf_kb: u32,
     target_pids: Option<Vec<i32>>,
+    target_cpus: Option<HashSet<u16>>,
 
     /* Callbacks */
     event_error_callback: Option<Box<dyn Fn(&Event, &anyhow::Error)>>,
@@ -328,6 +329,7 @@ impl EtwSession {
             /* Config */
             cpu_buf_kb: 64,
             target_pids: None,
+            target_cpus: None,
 
             /* Callbacks */
             event_error_callback: None,
@@ -358,6 +360,18 @@ impl EtwSession {
 
             self.target_pids = Some(pids);
         }
+
+        self
+    }
+
+    pub fn with_target_cpu(
+        mut self,
+        cpu: u16) -> Self {
+        let mut target_cpus = self.target_cpus.unwrap_or_default();
+
+        target_cpus.insert(cpu);
+
+        self.target_cpus = Some(target_cpus);
 
         self
     }
@@ -1017,6 +1031,7 @@ impl EtwSession {
         }
 
         let target_pids = self.target_pids.take();
+        let target_cpus = self.target_cpus.take();
         let enabled = self.take_enabled();
         let mut events = self.take_events();
 
@@ -1119,8 +1134,11 @@ impl EtwSession {
         let error_callback = self.event_error_callback.take();
         let mut errors = Vec::new();
         let has_pid_filter = !pid_lookup.is_empty();
+        let has_cpu_filter = target_cpus.is_some();
 
         let result = session.process(Box::new(move |event| {
+            let cpu_index = event.ProcessorIndex;
+
             /* Find events by provider ID */
             if let Some(events) = events.get_mut(&event.EventHeader.ProviderId) {
                 /* Determine which ID for lookup */
@@ -1153,6 +1171,15 @@ impl EtwSession {
                                 if pid != 0 && !pid_lookup.contains(&pid) {
                                     /* Ignore if not in the set */
                                     continue;
+                                }
+                            }
+                        }
+
+                        if has_cpu_filter && !event.has_no_cpu_mask_flag() {
+                            /* Skip events not on target CPUs */
+                            if let Some(target_cpus) = &target_cpus {
+                                if !target_cpus.contains(&cpu_index) {
+                                    return;
                                 }
                             }
                         }

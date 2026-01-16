@@ -1080,6 +1080,12 @@ impl UniversalExporterOSHooks for UniversalExporter {
             }
         }
 
+        if let Some(target_cpus) = &settings.target_cpus {
+            for cpu in target_cpus {
+                session = session.with_target_cpu(*cpu);
+            }
+        }
+
         session = self.run_build_hooks(session)?;
 
         let exporter = session.build_exporter(settings)?;

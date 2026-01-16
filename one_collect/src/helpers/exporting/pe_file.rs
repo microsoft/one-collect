@@ -6,6 +6,7 @@ use std::fs::File;
 use std::mem::{zeroed, size_of};
 use std::string::{FromUtf8Error, FromUtf16Error};
 use std::slice;
+use tracing::{debug};
 
 use crate::intern::InternedStrings;
 
@@ -113,7 +114,8 @@ impl PEModuleMetadata {
         let file = File::open(path)?;
         self.get_metadata_direct(
             file,
-            strings)
+            strings)?;
+        Ok(())
     }
 
     pub fn get_metadata_direct(
@@ -121,7 +123,6 @@ impl PEModuleMetadata {
         mut file: File,
         strings: &mut InternedStrings) -> anyhow::Result<()> {
         get_pe_info(&mut file, self, strings)?;
-
         Ok(())
     }
 
@@ -482,6 +483,7 @@ fn get_pe_header(
     /* Get offset to pe header */
     reader.seek(SeekFrom::Start(0x3C))?;
     *pe_offset = read_u32(reader)? as u64;
+    debug!("Reading PE header: pe_offset={:#x}", *pe_offset);
 
     /* Read PE header */
     reader.seek(SeekFrom::Start(*pe_offset))?;
@@ -648,15 +650,20 @@ fn get_pe_info(
     get_pe_header(reader, &mut pe_header, &mut pe_offset)?;
     module.machine = pe_header.machine;
     module.date_time = pe_header.date_time;
+    debug!("PE header parsed: machine={}, date_time={}, pe_offset={:#x}", pe_header.machine, pe_header.date_time, pe_offset);
 
     if let Some((virtual_address, file_offset)) = get_text_addresses(reader, &pe_header, pe_offset)? {
         module.text_loaded_layout_offset = virtual_address - file_offset;
+        debug!("Text section addresses found: virtual_address={:#x}, file_offset={:#x}", virtual_address, file_offset);
+    } else {
+        debug!("No text section addresses found");
     }
 
     (dbg_offset, dbg_size) = get_directory_data(
         reader, &pe_header, pe_offset, 6)?;
 
     if dbg_offset != 0 {
+        debug!("Processing debug directory: offset={:#x}, size={}", dbg_offset, dbg_size);
         let mut debug_dir: PEDebugDirectory = unsafe { zeroed() };
         reader.seek(SeekFrom::Start(dbg_offset))?;
         let debug_count = dbg_size / size_of::<PEDebugDirectory>() as u64;
@@ -679,6 +686,7 @@ fn get_pe_info(
                     let pdb_path_str = get_string(&cv.pdb_name)?;
                     let file_name = extract_filename(&pdb_path_str);
                     module.symbol_name_id = strings.to_id(file_name);
+                    debug!("Found CodeView NB10: pdb_name={}, age={}", file_name, cv.pdb_age);
                 } else if cv_type == 0x53445352 {
                     /* RSDS */
                     let mut cv: CodeViewRsds = unsafe { zeroed() };
@@ -688,6 +696,7 @@ fn get_pe_info(
                     let pdb_path_str = get_string(&cv.pdb_name)?;
                     let file_name = extract_filename(&pdb_path_str);
                     module.symbol_name_id = strings.to_id(file_name);
+                    debug!("Found CodeView RSDS: pdb_name={}, age={}", file_name, cv.pdb_age);
                 }
             }
             /* PerfMap */
@@ -700,9 +709,12 @@ fn get_pe_info(
                     module.perfmap_sig[0..16].clone_from_slice(&cv.perfmap_sig);
                     module.perfmap_version = cv.perfmap_ver;
                     module.perfmap_name_id = strings.to_id(get_string(&cv.perfmap_name)?.as_str());
+                    debug!("Found PerfMap: version={}", cv.perfmap_ver);
                 }
             }
         }
+    } else {
+        debug!("No debug directory found");
     }
 
     /* Get file version information */
@@ -822,15 +834,27 @@ fn get_pe_info(
                             module.version_name_id = strings.to_id(format!("{}, {}",
                                 product.unwrap(),
                                 file_desc.unwrap()).as_str());
+                            debug!("Version information found: using product version");
                         } else if file_ver.is_some() {
                             module.version_name_id = strings.to_id(format!("{}, {}",
                                 file_ver.unwrap(),
                                 file_desc.unwrap()).as_str());
+                            debug!("Version information found: using file version");
                         }
+                    } else {
+                        debug!("No file description found in version resources");
                     }
+                } else {
+                    debug!("Could not resolve resource data offset");
                 }
+            } else {
+                debug!("Resource entry not found at final level");
             }
+        } else {
+            debug!("Resource entry not found at intermediate level");
         }
+    } else {
+        debug!("No resource directory found");
     }
 
     Ok(())
