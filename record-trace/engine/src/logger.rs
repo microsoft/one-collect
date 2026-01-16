@@ -62,8 +62,8 @@ fn init_logging(filter: &Option<String>, path: &PathBuf, args: &RecordArgs) {
         DEFAULT_FILTER.to_string()
     };
     
-    let env_filter = EnvFilter::try_from_default_env()
-        .or_else(|_| EnvFilter::try_new(&filter_str))
+    let env_filter =
+        EnvFilter::try_new(&filter_str)
         .unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
 
     let filter_str = env_filter.to_string();
