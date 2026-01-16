@@ -44,10 +44,10 @@ fn init_logging(filter: &Option<String>, path: &PathBuf) {
     const DEFAULT_FILTER: &str = "info";
     
     let file = match std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(path)
+        .create(true)      // Create the file if it doesn't exist
+        .write(true)       // Open the file for writing
+        .truncate(true)    // Clear the file contents if it already exists
+        .open(path)        // Open the file at the specified path
     {
         Ok(file) => file,
         Err(e) => {
@@ -70,10 +70,10 @@ fn init_logging(filter: &Option<String>, path: &PathBuf) {
     let filter_str = env_filter.to_string();
 
     tracing_subscriber::fmt()
-        .with_writer(file)
-        .with_env_filter(env_filter)
-        .with_ansi(false)
-        .init();
+        .with_writer(file)                  // Write logs to the file instead of stdout
+        .with_env_filter(env_filter)        // Apply the configured filter to control log levels
+        .with_ansi(false)                   // Disable ANSI color codes in log output
+        .init();                            // Initialize the subscriber as the global default
     
     tracing::info!("Version: {}", env!("CARGO_PKG_VERSION"));
     tracing::info!("Log filter: {}", filter_str);
