@@ -53,6 +53,9 @@ struct Args {
 
     #[arg(long, help = "Log file path")]
     log_path: Option<String>,
+
+    #[arg(long, default_value_t = LogMode::File, help = "Log mode: 'disabled', 'console', or 'file'")]
+    log_mode: LogMode,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
@@ -66,6 +69,23 @@ impl fmt::Display for Format {
         match self {
             Format::Nettrace => write!(f, "nettrace"),
             Format::PerfviewXML => write!(f, "perfview-xml"),
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+pub enum LogMode {
+    Disabled,
+    Console,
+    File,
+}
+
+impl fmt::Display for LogMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LogMode::Disabled => write!(f, "disabled"),
+            LogMode::Console => write!(f, "console"),
+            LogMode::File => write!(f, "file"),
         }
     }
 }
@@ -84,6 +104,7 @@ pub struct RecordArgs {
     script: Option<String>,
     log_filter: Option<String>,
     log_path: Option<String>,
+    log_mode: LogMode,
 }
 
 impl RecordArgs {
@@ -139,6 +160,7 @@ impl RecordArgs {
             script,
             log_filter: command_args.log_filter,
             log_path: command_args.log_path,
+            log_mode: command_args.log_mode,
         };
 
         // Cross-argument validation.
@@ -204,6 +226,10 @@ impl RecordArgs {
         &self.log_path
     }
 
+    pub fn log_mode(&self) -> LogMode {
+        self.log_mode
+    }
+
     pub fn write_to_log(&self) {
         info!("Arguments parsed: output_path={}", self.output_path.display());
         info!("Arguments parsed: format={}", self.format);
@@ -224,6 +250,7 @@ impl RecordArgs {
         if let Some(ref path) = self.log_path {
             info!("Arguments parsed: log_path={}", path);
         }
+        info!("Arguments parsed: log_mode={}", self.log_mode);
         if let Some(ref script) = self.script {
             info!("Arguments parsed: script start");
             info!("{}", script);

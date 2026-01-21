@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-use crate::commandline::RecordArgs;
+use crate::commandline::{RecordArgs, LogMode};
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
@@ -38,22 +38,14 @@ fn resolve_log_path(log_path: &Option<String>, output_path: &PathBuf) -> PathBuf
         .join("trace.log")
 }
 
-/// Initialize tracing/logging with file output
-fn init_logging(filter: &Option<String>, path: &PathBuf, args: &RecordArgs) {
+/// Initialize tracing/logging
+fn init_logging(filter: &Option<String>, path: Option<PathBuf>, args: &RecordArgs) {
     const DEFAULT_FILTER: &str = "info";
     
-    let file = match std::fs::OpenOptions::new()
-        .create(true)      // Create the file if it doesn't exist
-        .write(true)       // Open the file for writing
-        .truncate(true)    // Clear the file contents if it already exists
-        .open(path)        // Open the file at the specified path
-    {
-        Ok(file) => file,
-        Err(e) => {
-            eprintln!("Failed to open log file at {}: {}", path.display(), e);
-            return;
-        }
-    };
+    // Check if logging is disabled
+    if args.log_mode() == LogMode::Disabled {
+        return;
+    }
 
     // Build filter with default "info" level plus any user-specified rules
     let filter_str = if let Some(user_filter) = filter {
@@ -68,11 +60,41 @@ fn init_logging(filter: &Option<String>, path: &PathBuf, args: &RecordArgs) {
 
     let filter_str = env_filter.to_string();
 
-    tracing_subscriber::fmt()
-        .with_writer(file)                  // Write logs to the file instead of stdout
-        .with_env_filter(env_filter)        // Apply the configured filter to control log levels
-        .with_ansi(false)                   // Disable ANSI color codes in log output
-        .init();                            // Initialize the subscriber as the global default
+    match args.log_mode() {
+        LogMode::Disabled => {
+            // Already returned above, but include to satisfy the compiler
+            return;
+        }
+        LogMode::Console => {
+            // Log to console (stdout)
+            tracing_subscriber::fmt()
+                .with_env_filter(env_filter)        // Apply the configured filter to control log levels
+                .with_ansi(true)                    // Enable ANSI color codes for console output
+                .init();                            // Initialize the subscriber as the global default
+        }
+        LogMode::File => {
+            // Log to file
+            let path = path.expect("Path must be provided for file logging");
+            let file = match std::fs::OpenOptions::new()
+                .create(true)      // Create the file if it doesn't exist
+                .write(true)       // Open the file for writing
+                .truncate(true)    // Clear the file contents if it already exists
+                .open(&path)       // Open the file at the specified path
+            {
+                Ok(file) => file,
+                Err(e) => {
+                    eprintln!("Failed to open log file at {}: {}", path.display(), e);
+                    return;
+                }
+            };
+
+            tracing_subscriber::fmt()
+                .with_writer(file)                  // Write logs to the file instead of stdout
+                .with_env_filter(env_filter)        // Apply the configured filter to control log levels
+                .with_ansi(false)                   // Disable ANSI color codes in log output
+                .init();                            // Initialize the subscriber as the global default
+        }
+    }
     
     tracing::info!("Version: {}", env!("CARGO_PKG_VERSION"));
     tracing::info!("Log filter: {}", filter_str);
@@ -81,8 +103,14 @@ fn init_logging(filter: &Option<String>, path: &PathBuf, args: &RecordArgs) {
 
 /// Common initialization logic for logging
 fn start(args: &RecordArgs) {
-    let path = resolve_log_path(args.log_path(), args.output_path());
-    init_logging(args.log_filter(), &path, args);
+    let path =
+        if args.log_mode() == LogMode::File {
+            Some(resolve_log_path(args.log_path(), args.output_path()))
+        } else {
+            None
+        };
+
+    init_logging(args.log_filter(), path, args);
 }
 
 /// Initialize logging for the executable (always logs)
