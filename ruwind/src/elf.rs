@@ -687,7 +687,7 @@ pub fn read_package_metadata(
         }
     }
 
-    error!("No package metadata found: section_count={}", sections.len());
+    info!("No package metadata found: section_count={}", sections.len());
     Err(Error::new(
         std::io::ErrorKind::Other,
         "No metadata found"))

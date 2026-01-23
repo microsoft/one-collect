@@ -102,7 +102,7 @@ impl OpenAt {
                 libc::O_RDONLY | libc::O_CLOEXEC);
 
             if fd == -1 {
-                warn!("Failed to open file with openat: path={:?}", path);
+                debug!("Failed to open file with openat: path={:?}", path);
                 return Err(std::io::Error::last_os_error().into());
             }
 

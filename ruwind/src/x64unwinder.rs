@@ -239,7 +239,7 @@ impl Unwinder {
                         self.registers[REG_RBP] = value;
                     },
                     None => {
-                        warn!("Bad stack RBP read");
+                        debug!("Bad stack RBP read");
                         result.error = Some("Bad stack RBP read");
                         return None;
                     },
@@ -260,7 +260,7 @@ impl Unwinder {
                     return Some(value);
                 },
                 None => {
-                    warn!("Bad stack IP read");
+                    debug!("Bad stack IP read");
                     result.error = Some("Bad stack IP read");
                     return None;
                 }

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::fs::File;
 use std::fmt::Write;
 use std::io::BufReader;
-use tracing::{debug};
+use tracing::{debug, info};
 
 use crate::{ReadOnly, Writable};
 use crate::event::DataFieldRef;
@@ -151,6 +151,8 @@ impl ExportProcessLinuxExt for ExportProcess {
                 Ok(str) => str,
                 Err(_) => continue
             };
+
+            info!("Resolving symbols for file: {}", filename);
 
             // Get the dev node or continue.
             let dev_node = match map.node() {
@@ -398,6 +400,7 @@ impl ExportProcessLinuxExt for ExportProcess {
         filename: &PathBuf) -> Option<(File, u32)> {
         let mut matching_sym_file = None;
         if let Ok(mut reader) = self.open_file(filename) {
+            info!("Checking candidate symbol file: {:?}", filename);
 
             let mut build_id_buf: [u8; 20] = [0; 20];
             if let Ok(sym_build_id) = get_build_id(&mut reader, &mut build_id_buf) {
@@ -409,16 +412,28 @@ impl ExportProcessLinuxExt for ExportProcess {
                         match binary_build_id {
                             Some(bin_id) => {
                                 if build_id_equals(bin_id, sym_id) {
+                                    info!("Symbol file accepted: {:?} (build_id matches)", filename);
                                     matching_sym_file = Some(reader);
+                                } else {
+                                    info!("Symbol file rejected: {:?} (build_id mismatch)", filename);
                                 }
                             }
-                            None => return None,
+                            None => {
+                                info!("Symbol file rejected: {:?} (symbol file has build_id but binary does not)", filename);
+                                return None;
+                            }
                         }
                     },
                     None => {
                         match binary_build_id {
-                            Some(_) => return None,
-                            None => matching_sym_file = Some(reader),
+                            Some(_) => {
+                                info!("Symbol file rejected: {:?} (binary has build_id but symbol file does not)", filename);
+                                return None;
+                            }
+                            None => {
+                                info!("Symbol file accepted: {:?} (neither has build_id)", filename);
+                                matching_sym_file = Some(reader);
+                            }
                         }
                     }
                 }
@@ -495,6 +510,8 @@ impl ExportProcessLinuxExt for ExportProcess {
                 Err(_) => continue
             };
 
+            info!("Resolving ReadyToRun symbols for file: {}", filename);
+
             // Get the dev node or continue.
             let dev_node = match map.node() {
                 Some(key) => key,
@@ -516,6 +533,8 @@ impl ExportProcessLinuxExt for ExportProcess {
                         &mut transform_sym_reader,
                         strings);
                 }
+            } else {
+                info!("Skipping ReadyToRun symbols for {}: not a PE file", filename);
             }
         }
     }
@@ -534,6 +553,7 @@ impl ExportProcessLinuxExt for ExportProcess {
         // Concatenate the r2rmap file name onto the binary directory to look for the file next to the binary.
         if let Some(filename) = metadata.perfmap_name(strings) {
             path_buf.push(filename);
+            info!("Checking ReadyToRun map file: {:?}", path_buf);
 
             if let Ok(file) = self.open_file(&path_buf) {
                 let mut reader = R2RMapSymbolReader::new(file);
@@ -541,8 +561,13 @@ impl ExportProcessLinuxExt for ExportProcess {
 
                 // The signature must be non-zero and match.
                 if *metadata.perfmap_sig() != [0; 16] && metadata.perfmap_sig() == reader.signature() {
+                    info!("ReadyToRun map file accepted: {:?} (signature matches)", path_buf);
                     return Some(reader);
+                } else {
+                    info!("ReadyToRun map file rejected: {:?} (signature mismatch or invalid)", path_buf);
                 }
+            } else {
+                info!("ReadyToRun map file rejected: {:?} (could not open file)", path_buf);
             }
         }
 
@@ -1170,13 +1195,16 @@ impl OSExportMachine {
             }
 
             path_buf.push(format!("perf-{}.map", ns_pid.unwrap()));
+            info!("Checking perf-map file: {:?}", path_buf);
             let file = proc.open_file(&path_buf);
             path_buf.pop();
 
             if file.is_err() {
+                info!("Perf-map file rejected: could not open file");
                 continue;
             }
 
+            info!("Perf-map file accepted: file opened successfully");
             let mut sym_reader = PerfMapSymbolReader::new(file.unwrap());
 
             proc.add_matching_anon_symbols(
@@ -1237,6 +1265,7 @@ impl OSExportMachine {
                     }
 
                     if let Ok(filename) = machine.strings.from_id(map.filename_id()) {
+                        info!("Loading ELF metadata from file: {}", filename);
                         if let Ok(file) = proc.open_file(Path::new(filename)) {
                             let mut reader = BufReader::new(file);
                             let mut sections = Vec::new();
