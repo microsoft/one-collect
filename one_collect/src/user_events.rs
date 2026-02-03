@@ -287,7 +287,7 @@ impl WithUserEventFD for UnixStream {
 
             // Initialize msghdr - on musl, this struct has private padding fields
             // and msg_controllen is u32, not usize
-            let mut msg: msghdr = unsafe { mem::zeroed() };
+            let mut msg: msghdr = mem::zeroed();
             msg.msg_name = std::ptr::null_mut();
             msg.msg_namelen = 0;
             msg.msg_iov = &mut iov;

@@ -1128,7 +1128,7 @@ impl PerfSession {
         let id_bytes = 0u64.to_ne_bytes();
         let mut comm_count = 0;
 
-        procfs::iter_processes(move |pid, path_buf| {
+        procfs::iter_processes(|pid, path_buf| {
             // Skip non-target PIDs if we have them
             if let Some(pid_lookup) = &pid_lookup {
                 if !pid_lookup.contains(&(pid as i32)) {
@@ -1208,7 +1208,7 @@ impl PerfSession {
         let id_bytes = 0u64.to_ne_bytes();
         let mut module_count = 0;
 
-        procfs::iter_modules(move |pid, module| {
+        procfs::iter_modules(|pid, module| {
             if !module.is_exec() || module.path.is_none() {
                 return;
             }

@@ -4,7 +4,7 @@
 use std::fs::File;
 use std::ffi::CString;
 use std::path::Path;
-use tracing::{warn, debug};
+use tracing::debug;
 
 #[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
