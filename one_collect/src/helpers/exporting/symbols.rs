@@ -766,7 +766,9 @@ impl ExportSymbolReader for R2RLoadedLayoutSymbolTransformer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
     use crate::os::system_page_size;
+    #[cfg(target_os = "linux")]
     use std::path::Path;
 
     #[test]

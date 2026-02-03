@@ -1,15 +1,13 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-use one_collect::Writable;
-
-use std::io::{Write, BufWriter};
-use std::fs::File;
-
 #[cfg(target_os = "linux")]
 fn main() {
     use std::collections::HashMap;
+    use std::io::{Write, BufWriter};
+    use std::fs::File;
 
+    use one_collect::Writable;
     use one_collect::perf_event::{
         self,
         RingBufBuilder,

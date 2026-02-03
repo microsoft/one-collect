@@ -9,13 +9,16 @@ use one_collect::perf_event::{
     RingBufSessionBuilder
 };
 
+#[cfg(target_os = "linux")]
 use one_collect::Writable;
 
+#[cfg(target_os = "linux")]
 struct Utilization {
     per_cpu: Vec<u64>,
     temp: String,
 }
 
+#[cfg(target_os = "linux")]
 impl Utilization {
     fn create() -> Self {
         #[cfg(target_os = "linux")]
