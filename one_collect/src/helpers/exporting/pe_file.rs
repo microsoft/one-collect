@@ -863,6 +863,8 @@ fn get_pe_info(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "windows")]
     use std::env;
 
     #[cfg(target_os = "windows")]
