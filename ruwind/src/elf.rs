@@ -1266,6 +1266,7 @@ mod tests {
     use crate::elf;
 
     use super::*;
+    #[cfg(target_os = "linux")]
     use std::fs::File;
 
     #[test]
