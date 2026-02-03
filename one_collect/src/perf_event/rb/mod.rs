@@ -601,7 +601,7 @@ impl<'a> CpuRingReader {
         &'a self,
         cursor: &CpuRingCursor,
         data_slice: &'a [u8],
-        start: &mut usize) -> IOResult<abi::Header> {
+        start: &mut usize) -> IOResult<abi::Header<'a>> {
         *start = (cursor.start() & self.data_mask) as usize;
         let end = *start + abi::Header::data_offset();
         let header_slice = &data_slice[*start .. end];
