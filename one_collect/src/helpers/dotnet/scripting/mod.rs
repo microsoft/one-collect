@@ -175,8 +175,10 @@ impl DotNetProviderFlags {
         self.callstack_keywords = keywords;
     }
 
+    #[allow(dead_code)]
     pub fn callstacks(&self) -> bool { self.callstacks }
 
+    #[allow(dead_code)]
     pub fn callstack_keywords(&self) -> u64 { self.callstack_keywords }
 }
 

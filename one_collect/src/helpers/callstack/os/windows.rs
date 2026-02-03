@@ -20,7 +20,7 @@ impl PartialThreadCallstacks {
         }
     }
 
-    fn flush(&mut self) -> Drain<u64, PartialCallstack> {
+    fn flush(&mut self) -> Drain<'_, u64, PartialCallstack> {
         self.partials.drain()
     }
 

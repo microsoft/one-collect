@@ -7,7 +7,7 @@ use crate::Guid;
 use crate::scripting::ScriptEvent;
 
 use rhai::{Engine, EvalAltResult};
-use tracing::{debug, info, warn, error};
+use tracing::{debug, warn};
 
 #[repr(C)]
 struct NtOsVersionInfo {
@@ -93,7 +93,7 @@ impl OSScriptEngine {
             return Err("Level must be 8-bit.".into());
         }
 
-        if id > u32::max as i64 {
+        if id > u32::MAX as i64 {
             warn!("event_from_parts: id out of range, id={}", id);
             return Err("Id must be 32-bit.".into());
         }

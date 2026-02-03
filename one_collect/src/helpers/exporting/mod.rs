@@ -91,6 +91,7 @@ pub use mappings::{
 };
 
 #[derive(Default)]
+#[allow(dead_code)]
 struct ExportCSwitch {
     start_time: u64,
     sample: Option<ExportProcessSample>,
@@ -658,7 +659,7 @@ impl<'a> ExportTraceContext<'a> {
         }
     }
 
-    pub fn data(&self) -> &'a EventData { self.data }
+    pub fn data(&self) -> &'a EventData<'_> { self.data }
 
     pub fn cpu(&self) -> anyhow::Result<u16> {
         self.sampler.borrow().os_event_cpu(self.data)
@@ -812,7 +813,7 @@ impl<'a> ExportTraceContext<'a> {
         Ok(attribute_id)
     }
 
-    pub fn sample_builder(&mut self) -> ExportSampleBuilder {
+    pub fn sample_builder(&mut self) -> ExportSampleBuilder<'_> {
         ExportSampleBuilder {
             context: self,
             tid: None,
@@ -913,7 +914,7 @@ impl<'a> ExportSampleFilterContext<'a> {
 
     pub fn pid(&self) -> u32 { self.proc.pid() }
 
-    pub fn sample_record_data(&self) -> Option<ExportRecordData> {
+    pub fn sample_record_data(&self) -> Option<ExportRecordData<'_>> {
         if self.record_data.is_none() {
             return None;
         }
@@ -1012,6 +1013,7 @@ pub struct ExportSettings {
     hard_page_faults: bool,
     soft_page_faults: bool,
     callstack_helper: Option<CallstackHelper>,
+    #[allow(dead_code)]
     os: OSExportSettings,
     events: Option<Vec<ExportEventCallback>>,
     sample_hooks: Option<Vec<Box<dyn Fn(&ExportSampleFilterContext) -> ExportFilterAction>>>,
@@ -1494,7 +1496,7 @@ impl ExportMachine {
 
     pub fn callstacks(&self) -> &InternedCallstacks { &self.callstacks }
 
-    pub fn processes(&self) -> Values<u32, ExportProcess> { self.procs.values() }
+    pub fn processes(&self) -> Values<'_, u32, ExportProcess> { self.procs.values() }
 
     pub fn attributes(
         &self,
@@ -1540,7 +1542,7 @@ impl ExportMachine {
 
     pub fn sample_record_data(
         &self,
-        sample: &ExportProcessSample) -> ExportRecordData {
+        sample: &ExportProcessSample) -> ExportRecordData<'_> {
         /* Lookup data via sample's record ID */
         let record = &self.records[sample.record_id()];
 
@@ -1611,7 +1613,7 @@ impl ExportMachine {
         map
     }
 
-    pub fn processes_mut(&mut self) -> ValuesMut<u32, ExportProcess> {
+    pub fn processes_mut(&mut self) -> ValuesMut<'_, u32, ExportProcess> {
         self.procs.values_mut()
     }
 

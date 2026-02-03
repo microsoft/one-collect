@@ -23,7 +23,7 @@ use crate::etw::{EtwSession, AncillaryData};
 use crate::helpers::dotnet::scripting::*;
 use crate::Guid;
 
-use tracing::{warn, info, debug};
+use tracing::{warn, debug};
 
 #[cfg(target_os = "windows")]
 use winreg::*;
@@ -203,10 +203,10 @@ impl OSDotNetEventFactory {
 
     pub fn record_provider(
         &mut self,
-        provider_name: &str,
-        keyword: u64,
-        level: u8,
-        flags: DotNetProviderFlags) -> anyhow::Result<()> {
+        _provider_name: &str,
+        _keyword: u64,
+        _level: u8,
+        _flags: DotNetProviderFlags) -> anyhow::Result<()> {
         /* TODO: Utilize ETW provider level callback */
         anyhow::bail!("Not yet supported.");
     }

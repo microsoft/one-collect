@@ -346,11 +346,11 @@ struct EVENT_TRACE_LOGFILE {
     pub ProcessTraceMode: u32,
     pub CurrentEvent: EVENT_TRACE,
     pub LogFileHeader: TRACE_LOGFILE_HEADER,
-    pub BufferCallback: extern fn(*const TRACE_LOGFILE_HEADER) -> u32,
+    pub BufferCallback: extern "C" fn(*const TRACE_LOGFILE_HEADER) -> u32,
     pub BufferSize: u32,
     pub Filled: u32,
     pub EventsLost: u32,
-    pub EventRecordCallback: extern fn (*const EVENT_RECORD),
+    pub EventRecordCallback: extern "C" fn (*const EVENT_RECORD),
     pub IsKernelTrace: u32,
     pub Context: *const std::ffi::c_void,
 }
@@ -749,11 +749,11 @@ pub struct TraceSession {
     handle: u64,
 }
 
-extern fn buffer_callback(_header: *const TRACE_LOGFILE_HEADER) -> u32 {
+extern "C" fn buffer_callback(_header: *const TRACE_LOGFILE_HEADER) -> u32 {
     1
 }
 
-extern fn event_callback(record: *const EVENT_RECORD) {
+extern "C" fn event_callback(record: *const EVENT_RECORD) {
     let record = unsafe { &*record };
 
     /* Get dyn-typed thin pointer */

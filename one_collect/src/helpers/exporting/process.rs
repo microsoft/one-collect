@@ -594,7 +594,7 @@ impl ExportProcess {
      * is a need to call this directly on a single process instead
      * of using ExportMachine::replay_by_time().
      */
-    pub(crate) fn to_replay(&self) -> ExportProcessReplay {
+    pub(crate) fn to_replay(&self) -> ExportProcessReplay<'_> {
         ExportProcessReplay::new(&self)
     }
 

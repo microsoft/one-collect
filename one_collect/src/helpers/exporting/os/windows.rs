@@ -2,7 +2,7 @@
 // Licensed under the MIT license.
 
 use std::collections::hash_map::Entry::Occupied;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use std::fs::File;
 
@@ -353,7 +353,7 @@ impl OSExportMachine {
                 Ok(())
             });
         } else {
-            event.add_callback(move |data| {
+            event.add_callback(move |_data| {
                 let tid = ancillary.borrow().tid();
                 let cpu = ancillary.borrow().cpu();
                 let time = ancillary.borrow().time();
