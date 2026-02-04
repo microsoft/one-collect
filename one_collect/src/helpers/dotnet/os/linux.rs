@@ -1418,11 +1418,23 @@ impl DotNetHelp for RingBufSessionBuilder {
         };
 
         self.with_hooks(
-            move |_builder| {
-                /* Nothing to build */
+            move |builder| {
+                /* Enable all mmap records (including non-executable) for dotnet helper
+                 * to capture dotnet processes that emit the /memfd:dotnet_ipc_created mapping. */
+                let kernel = builder
+                    .take_kernel_events()
+                    .unwrap_or_else(RingBufBuilder::for_kernel)
+                    .with_all_mmap_records();
+
+                builder.replace_kernel_events(kernel);
             },
 
             move |session| {
+                /* Enable capture of all mmap records (including non-executable) during environment
+                 * capture to discover dotnet processes that have created the /memfd:dotnet_ipc_created mapping. */
+                session.capture_env_options_mut()
+                    .with_all_mmaps();
+
                 if perf_maps {
                     /* Perf map support */
                     let event = session.mmap_event();

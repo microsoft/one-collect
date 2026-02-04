@@ -533,7 +533,7 @@ impl CallstackHelp for RingBufSessionBuilder {
                 let events = builder
                     .take_kernel_events()
                     .unwrap_or_else(RingBufBuilder::for_kernel)
-                    .with_mmap_records()
+                    .with_executable_mmap_records()
                     .with_comm_records()
                     .with_task_records();
 

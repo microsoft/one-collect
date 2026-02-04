@@ -29,6 +29,22 @@ pub use rb::source::RingBufSessionBuilder;
 pub use rb::{RingBufOptions, RingBufBuilder};
 pub use rb::cpu_count;
 
+#[derive(Default)]
+pub(crate) struct CaptureEnvironmentOptions {
+    all_mmaps: bool,
+}
+
+impl CaptureEnvironmentOptions {
+    pub fn with_all_mmaps(&mut self) -> &mut Self {
+        self.all_mmaps = true;
+        self
+    }
+
+    pub fn all_mmaps(&self) -> bool {
+        self.all_mmaps
+    }
+}
+
 static EMPTY: &[u8] = &[];
 
 #[derive(Default)]
@@ -230,6 +246,7 @@ pub struct PerfSession {
 
     /* Options */
     read_timeout: Duration,
+    capture_env_options: CaptureEnvironmentOptions,
 
     /* Events */
     cpu_profile_event: Event,
@@ -331,6 +348,7 @@ impl PerfSession {
 
             /* Options */
             read_timeout: Duration::from_millis(15),
+            capture_env_options: CaptureEnvironmentOptions::default(),
 
             /* Events */
             cpu_profile_event: Event::new(0, "__cpu_profile".into()),
@@ -491,6 +509,10 @@ impl PerfSession {
         &mut self,
         timeout: Duration) {
         self.read_timeout = timeout;
+    }
+
+    pub(crate) fn capture_env_options_mut(&mut self) -> &mut CaptureEnvironmentOptions {
+        &mut self.capture_env_options
     }
 
     pub fn create_bpf_files(
@@ -1198,6 +1220,7 @@ impl PerfSession {
 
         let attributes = RingBufBuilder::common_attributes();
         let enabled = self.source_enabled;
+        let captures_all = self.capture_env_options.all_mmaps();
         let mut event_data: Vec<u8> = Vec::new();
         let mut full_data: Vec<u8> = Vec::new();
 
@@ -1209,7 +1232,13 @@ impl PerfSession {
         let mut module_count = 0;
 
         procfs::iter_modules(move |pid, module| {
-            if !module.is_exec() || module.path.is_none() {
+            // Skip modules without paths
+            if module.path.is_none() {
+                return;
+            }
+
+            // Filter non-executable mappings unless capturing all mmaps
+            if !captures_all && !module.is_exec() {
                 return;
             }
 

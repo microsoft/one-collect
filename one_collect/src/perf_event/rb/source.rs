@@ -1109,7 +1109,7 @@ mod tests {
     #[test]
     fn config() {
         let kernel = RingBufBuilder::for_kernel()
-            .with_mmap_records()
+            .with_executable_mmap_records()
             .with_comm_records()
             .with_task_records()
             .with_cswitch_records();
