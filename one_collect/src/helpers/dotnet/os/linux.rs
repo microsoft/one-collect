@@ -1279,7 +1279,6 @@ impl OSDotNetEventFactory {
                     let event = session.mmap_event();
                     let fmt = event.format();
                     let pid = fmt.get_field_ref_unchecked("pid");
-                    let prot = fmt.get_field_ref_unchecked("prot");
                     let filename = fmt.get_field_ref_unchecked("filename[]");
 
                     let tracker = Writable::new(
@@ -1429,7 +1428,6 @@ impl DotNetHelp for RingBufSessionBuilder {
                     let event = session.mmap_event();
                     let fmt = event.format();
                     let pid = fmt.get_field_ref_unchecked("pid");
-                    let prot = fmt.get_field_ref_unchecked("prot");
                     let filename = fmt.get_field_ref_unchecked("filename[]");
 
                     /* SAFETY: We always have this for perf_maps_procs */
