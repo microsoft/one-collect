@@ -394,10 +394,21 @@ impl RingBufBuilder<Bpf> {
 }
 
 impl RingBufBuilder<Kernel> {
-    pub fn with_mmap_records(&self) -> Self {
+    pub fn with_executable_mmap_records(&self) -> Self {
         let mut attributes = self.attributes;
 
         attributes.flags |= FLAG_MMAP | FLAG_MMAP2;
+
+        Self {
+            attributes,
+            _type: self._type,
+        }
+    }
+
+    pub fn with_all_mmap_records(&self) -> Self {
+        let mut attributes = self.attributes;
+
+        attributes.flags |= FLAG_MMAP | FLAG_MMAP2 | FLAG_MMAP_DATA;
 
         Self {
             attributes,
@@ -1117,7 +1128,7 @@ mod tests {
         rb_head.open(pid).unwrap();
 
         let kernel = RingBufBuilder::for_kernel()
-            .with_mmap_records();
+            .with_executable_mmap_records();
 
         let page_count = 1;
         let _reader = rb_head.create_reader(page_count).unwrap();

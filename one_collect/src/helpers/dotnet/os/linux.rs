@@ -36,11 +36,16 @@ use crate::helpers::dotnet::nettrace;
 
 use tracing::{warn, info, debug};
 
-#[cfg(target_os = "linux")]
-use libc::PROT_EXEC;
-
-#[cfg(not(target_os = "linux"))]
-const PROT_EXEC: i32 = 0;
+/* Checks if the given filename indicates a .NET runtime memfd mapping.
+ *
+ * .NET 10+ create a read-execute memfd mapping called dotnet_ipc_created to notify
+ * consumers that the IPC channel is available.
+ * Looking for "doublemapper" is a best-effort approach since it's an
+ * implementation detail of the R^X implementation in CoreCLR and is configurable. */
+fn is_dotnet_memfd_mapping(filename: &str) -> bool {
+    filename.starts_with("/memfd:dotnet_ipc_created") ||
+    filename.starts_with("/memfd:doublemapper")
+}
 
 struct PerfMapContext {
     tmp: OpenAt,
@@ -1274,7 +1279,6 @@ impl OSDotNetEventFactory {
                     let event = session.mmap_event();
                     let fmt = event.format();
                     let pid = fmt.get_field_ref_unchecked("pid");
-                    let prot = fmt.get_field_ref_unchecked("prot");
                     let filename = fmt.get_field_ref_unchecked("filename[]");
 
                     let tracker = Writable::new(
@@ -1286,18 +1290,12 @@ impl OSDotNetEventFactory {
                         let fmt = data.format();
                         let data = data.event_data();
 
-                        let prot = fmt.get_u32(prot, data)? as i32;
-
-                        /* Skip non-executable mmaps */
-                        if prot & PROT_EXEC != PROT_EXEC {
-                            return Ok(());
-                        }
-
                         let pid = fmt.get_u32(pid, data)?;
                         let filename = fmt.get_str(filename, data)?;
 
                         /* Check if dotnet process */
-                        if filename.starts_with("/memfd:doublemapper") {
+                        if is_dotnet_memfd_mapping(filename) {
+                            debug!("Found dotnet process {} via mapping {}", pid, filename);
                             /* Attempt to track, will check diag sock, etc */
                             tracker.borrow_mut().track(pid)?;
                         }
@@ -1420,17 +1418,28 @@ impl DotNetHelp for RingBufSessionBuilder {
         };
 
         self.with_hooks(
-            move |_builder| {
-                /* Nothing to build */
+            move |builder| {
+                /* Enable all mmap records (including non-executable) for dotnet helper
+                 * to capture dotnet processes that emit the /memfd:dotnet_ipc_created mapping. */
+                let kernel = builder
+                    .take_kernel_events()
+                    .unwrap_or_else(RingBufBuilder::for_kernel)
+                    .with_all_mmap_records();
+
+                builder.replace_kernel_events(kernel);
             },
 
             move |session| {
+                /* Enable capture of all mmap records (including non-executable) during environment
+                 * capture to discover dotnet processes that have created the /memfd:dotnet_ipc_created mapping. */
+                session.capture_env_options_mut()
+                    .with_all_mmaps();
+
                 if perf_maps {
                     /* Perf map support */
                     let event = session.mmap_event();
                     let fmt = event.format();
                     let pid = fmt.get_field_ref_unchecked("pid");
-                    let prot = fmt.get_field_ref_unchecked("prot");
                     let filename = fmt.get_field_ref_unchecked("filename[]");
 
                     /* SAFETY: We always have this for perf_maps_procs */
@@ -1442,18 +1451,12 @@ impl DotNetHelp for RingBufSessionBuilder {
                         let fmt = data.format();
                         let data = data.event_data();
 
-                        let prot = fmt.get_u32(prot, data)? as i32;
-
-                        /* Skip non-executable mmaps */
-                        if prot & PROT_EXEC != PROT_EXEC {
-                            return Ok(());
-                        }
-
                         let pid = fmt.get_u32(pid, data)?;
                         let filename = fmt.get_str(filename, data)?;
 
                         /* Check if dotnet process */
-                        if filename.starts_with("/memfd:doublemapper") {
+                        if is_dotnet_memfd_mapping(filename) {
+                            debug!("Found dotnet process {} via mapping {}", pid, filename);
                             /* Attempt to track, will check diag sock, etc */
                             perfmap.borrow_mut().track(pid)?;
                         }
