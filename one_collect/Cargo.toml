@@ -41,3 +41,7 @@ harness = false
 [[bench]]
 name = "export"
 harness = false
+
+[[bench]]
+name = "kallsyms"
+harness = false
