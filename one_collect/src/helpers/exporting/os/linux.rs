@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::fs::File;
 use std::fmt::Write;
 use std::io::BufReader;
-use tracing::{debug, info};
+use tracing::{debug, info, trace};
 
 use crate::{ReadOnly, Writable};
 use crate::event::DataFieldRef;
@@ -1367,8 +1367,64 @@ impl ExportMachineOSHooks for ExportMachine {
     fn os_add_kernel_mappings_with(
         &mut self,
         kernel_symbols: &mut impl ExportSymbolReader) {
+
+        // Cached kernel symbol for in-memory matching.
+        struct CachedKernelSymbol {
+            start: u64,
+            end: u64,
+            name: String,
+        }
+
         let mut frames = Vec::new();
         let mut addrs = HashSet::new();
+
+        // Phase 1: Collect all unique kernel IPs across all processes.
+        let mut all_addrs_set: HashSet<u64> = HashSet::new();
+
+        for proc in self.procs.values() {
+            proc.get_unique_kernel_ips(
+                &mut addrs,
+                &mut frames,
+                &self.callstacks);
+
+            for addr in &addrs {
+                all_addrs_set.insert(*addr);
+            }
+        }
+
+        if all_addrs_set.is_empty() {
+            return;
+        }
+
+        let mut all_addrs: Vec<u64> = all_addrs_set.into_iter().collect();
+        all_addrs.sort();
+
+        // Phase 2: Read kernel symbols once, keeping only those that match
+        // a collected IP. This avoids re-reading /proc/kallsyms per-process.
+        kernel_symbols.reset();
+        let mut matched_symbols: Vec<CachedKernelSymbol> = Vec::new();
+
+        while kernel_symbols.next() {
+            let start = kernel_symbols.start();
+            let end = kernel_symbols.end();
+
+            let has_match = match all_addrs.binary_search(&start) {
+                Ok(_) => true,
+                Err(i) => i < all_addrs.len() && all_addrs[i] < end,
+            };
+
+            if has_match {
+                matched_symbols.push(CachedKernelSymbol {
+                    start,
+                    end,
+                    name: kernel_symbols.name().to_string(),
+                });
+            }
+        }
+        // matched_symbols is sorted by start (kallsyms is sorted).
+
+        // Phase 3: For each process, assign symbols from the matched set.
+        let mut seen = vec![false; matched_symbols.len()];
 
         for proc in self.procs.values_mut() {
             proc.get_unique_kernel_ips(
@@ -1391,17 +1447,36 @@ impl ExportMachineOSHooks for ExportMachine {
                 UnwindType::DWARF);
 
             self.map_index += 1;
+            seen.fill(false);
 
-            frames.clear();
+            let mut added = 0usize;
 
             for addr in &addrs {
-                frames.push(*addr);
+                // Binary search for the symbol whose start is <= addr.
+                let idx = match matched_symbols.binary_search_by_key(addr, |s| s.start) {
+                    Ok(i) => i,
+                    Err(0) => continue,
+                    Err(i) => i - 1,
+                };
+
+                let sym = &matched_symbols[idx];
+                if *addr >= sym.start && *addr < sym.end && !seen[idx] {
+                    seen[idx] = true;
+                    added += 1;
+
+                    let name_id = self.strings.to_id(&sym.name);
+                    let symbol = ExportSymbol::new(name_id, sym.start, sym.end);
+
+                    trace!("Adding symbol to mapping: mapping_id={}, name={}, start={:#x}, end={:#x}",
+                        kernel.id(), &sym.name, sym.start, sym.end);
+                    kernel.add_symbol(symbol);
+                }
             }
 
-            kernel.add_matching_symbols(
-                &mut frames,
-                kernel_symbols,
-                &mut self.strings);
+            if added > 0 {
+                info!("Added symbols to mapping: mapping_id={}, start={:#x}, added_count={}",
+                    kernel.id(), kernel.start(), added);
+            }
 
             proc.add_mapping(kernel);
         }
