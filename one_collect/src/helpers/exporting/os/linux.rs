@@ -1697,10 +1697,9 @@ impl UniversalExporterOSHooks for UniversalExporter {
         let os_parse_loop = || {
             self.run_export_hooks(&exporter)?;
 
-            session.capture_environment();
-
             exporter.borrow_mut().mark_start();
             session.enable()?;
+            session.capture_environment();
             session.parse_until(until)?;
             session.disable()?;
             exporter.borrow_mut().mark_end();
