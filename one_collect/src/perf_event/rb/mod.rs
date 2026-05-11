@@ -647,7 +647,20 @@ impl<'a> CpuRingReader {
         let end = start + 8;
 
         let data_slice = self.data_slice();
-        u64::from_ne_bytes(data_slice[start..end].try_into().unwrap())
+
+        if end <= self.data_size as usize {
+            u64::from_ne_bytes(data_slice[start..end].try_into().unwrap())
+        } else {
+            // Data wrapped, so copy to a buffer before parsing.
+            let mut bytes = [0u8; 8];
+
+            let first_part = self.data_size as usize - start;
+            bytes[..first_part].copy_from_slice(&data_slice[start..]);
+            let remaining = 8 - first_part;
+            bytes[first_part..].copy_from_slice(&data_slice[..remaining]);
+
+            u64::from_ne_bytes(bytes)
+        }
     }
 
     pub fn read(
@@ -1790,6 +1803,36 @@ mod tests {
         assert_eq!(1, u64::from_ne_bytes(read[8..16].try_into().unwrap()));
 
         assert!(!cursor.more());
+        reader.end_reading(&cursor);
+    }
+
+    #[test]
+    fn peek_u64_wraps_around() {
+        let data_size: usize = 4096;
+        let data_offset: usize = 4096;
+        let mut data = vec![0u8; data_offset + data_size];
+        let slice = data.as_mut_slice();
+
+        slice[1040..1048].copy_from_slice(&(data_offset as u64).to_ne_bytes());
+        slice[1048..1056].copy_from_slice(&(data_size as u64).to_ne_bytes());
+
+        // Place a u64 straddling the boundary: 3 bytes at end, 5 at start
+        let expected: u64 = 42;
+        let bytes = expected.to_ne_bytes();
+        slice[data_offset + data_size - 3..data_offset + data_size].copy_from_slice(&bytes[..3]);
+        slice[data_offset..data_offset + 5].copy_from_slice(&bytes[3..]);
+
+        // Tail at data_size - 3, head at tail + 8
+        let tail: u64 = (data_size as u64) - 3;
+        slice[1024..1032].copy_from_slice(&(tail + 8).to_ne_bytes());
+        slice[1032..1040].copy_from_slice(&tail.to_ne_bytes());
+
+        let mut reader = CpuRingReader::new_unowned(data.as_mut_ptr(), data.len());
+        let mut cursor = CpuRingCursor::default();
+        reader.begin_reading(&mut cursor);
+
+        assert_eq!(expected, reader.peek_u64(&cursor, 0));
+
         reader.end_reading(&cursor);
     }
 }
