@@ -17,6 +17,7 @@ pub struct ExportMapping {
     start: u64,
     end: u64,
     file_offset: u64,
+    va_offset: u64,
     anon: bool,
     id: usize,
     unwind_type: UnwindType,
@@ -54,7 +55,15 @@ impl CodeSection for ExportMapping {
     fn rva(
         &self,
         ip: u64) -> u64 {
-        (ip - self.start) + self.file_offset
+        // Convert a runtime IP to the ELF virtual address used by
+        // .eh_frame_hdr lookups: subtract the mapping's load address to
+        // get the in-mapping offset, add the file offset to land in the
+        // ELF file, then apply va_offset (p_vaddr - p_offset of the
+        // executable PT_LOAD) to handle binaries whose executable LOAD
+        // segment is not file-offset aligned with its virtual address.
+        // For other binary types and anonymous mappings va_offset is 0,
+        // so the final term is a no-op.
+        (ip - self.start) + self.file_offset + self.va_offset
     }
 
     fn key(&self) -> ModuleKey {
@@ -89,12 +98,19 @@ impl ExportMapping {
             start,
             end,
             file_offset,
+            va_offset: 0,
             anon,
             id,
             unwind_type,
             node: None,
             symbols: Vec::new(),
         }
+    }
+
+    pub fn va_offset(&self) -> u64 { self.va_offset }
+
+    pub fn set_va_offset(&mut self, va_offset: u64) {
+        self.va_offset = va_offset;
     }
 
     pub fn set_node(

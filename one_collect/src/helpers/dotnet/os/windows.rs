@@ -12,7 +12,9 @@ use crate::helpers::dotnet::universal::UniversalDotNetHelperOSHooks;
 #[cfg(feature = "scripting")]
 use crate::helpers::exporting::UniversalExporter;
 
+use crate::helpers::exporting::record::*;
 use crate::helpers::exporting::symbols::*;
+use crate::helpers::exporting::process::*;
 
 use crate::ReadOnly;
 use crate::event::*;
@@ -40,6 +42,11 @@ impl OSDotNetHelper {
     }
 }
 
+struct ProviderRecordEvent {
+    event: Event,
+    flags: DotNetProviderFlags,
+}
+
 pub trait DotNetHelperWindowsExt {
     fn with_jit_symbols(self) -> Self;
 }
@@ -54,6 +61,7 @@ impl DotNetHelperWindowsExt for DotNetHelper {
 
 pub(crate) struct OSDotNetEventFactory {
     filter_args: Writable<Option<HashMap<Guid, String>>>,
+    record_events: Writable<Option<Vec<ProviderRecordEvent>>>,
 }
 
 impl OSDotNetEventFactory {
@@ -62,6 +70,7 @@ impl OSDotNetEventFactory {
     pub fn new(_proxy: impl FnMut(String, usize) -> Option<Event> + 'static) -> Self {
         Self {
             filter_args: Writable::new(Some(HashMap::new())),
+            record_events: Writable::new(Some(Vec::new())),
         }
     }
 
@@ -156,8 +165,88 @@ impl OSDotNetEventFactory {
         &mut self,
         exporter: UniversalExporter) -> UniversalExporter {
         let filter_args = self.filter_args.clone();
+        let record_events = self.record_events.clone();
+        let callstack_keywords = Writable::new(Vec::new());
+        let fn_callstack_keywords = callstack_keywords.clone();
 
-        exporter.with_build_hook(move |mut session, _context| {
+        #[derive(Copy, Clone)]
+        struct DotNetRecordType {
+            kind: u16,
+            record_type: u16,
+        }
+
+        exporter
+        .with_settings_hook(move |mut settings| {
+            let mut record_events = record_events
+                .borrow_mut()
+                .take()
+                .unwrap_or_default();
+
+            for record_event in record_events.drain(..) {
+                let keyword = record_event.flags.callstack_keywords();
+
+                /* Add callstack keywords to list for session configuration */
+                if keyword != u64::MAX {
+                    fn_callstack_keywords.borrow_mut().push(
+                        (*record_event.event.extension().provider(),
+                        keyword));
+                }
+
+                let full_name = record_event.event.name().to_owned();
+                let mut static_formats = HashMap::new();
+
+                /* Add event for recording */
+                settings = settings.with_event(
+                    record_event.event,
+                    |_built| {
+                        Ok(())
+                    },
+                    move |trace| {
+                        let event_id = trace.id()?.unwrap_or(0);
+                        let attributes = trace.default_attributes()?;
+
+                        /* TODO: TraceLogging / Dynamic Formats */
+
+                        /* Static Format Lookup */
+                        let record_type = match static_formats.entry(event_id) {
+                            Occupied(entry) => { *entry.get() },
+                            Vacant(entry) => {
+                                let format = EventFormat::default();
+                                let kind = trace.kind(&full_name);
+
+                                let mut record_type = ExportRecordType::new(
+                                    kind,
+                                    event_id,
+                                    full_name.clone(),
+                                    format);
+
+                                record_type.set_original_data_flag();
+
+                                let record_type = trace.record_type(record_type);
+
+                                let record_type = DotNetRecordType {
+                                    kind,
+                                    record_type,
+                                };
+
+                                *entry.insert(record_type)
+                            }
+                        };
+
+                        /* Record */
+                        trace
+                            .sample_builder()
+                            .with_kind(record_type.kind)
+                            .with_record_type(record_type.record_type)
+                            .with_attributes(attributes)
+                            .with_record_all_event_data()
+                            .save_value(MetricValue::Count(1))
+                    });
+            }
+
+            Ok(settings)
+        })
+        .with_build_hook(move |mut session, _context| {
             let filter_args = filter_args
                 .borrow_mut()
                 .take()
@@ -197,18 +286,45 @@ impl OSDotNetEventFactory {
                 });
             }
 
+            for (provider, callstack_kw) in callstack_keywords.borrow_mut().drain(..) {
+                session.enable_provider(provider).ensure_callstack_keyword(callstack_kw);
+            }
+
             Ok(session)
         })
     }
 
     pub fn record_provider(
         &mut self,
-        _provider_name: &str,
-        _keyword: u64,
-        _level: u8,
-        _flags: DotNetProviderFlags) -> anyhow::Result<()> {
-        /* TODO: Utilize ETW provider level callback */
-        anyhow::bail!("Not yet supported.");
+        provider_name: &str,
+        keyword: u64,
+        level: u8,
+        flags: DotNetProviderFlags) -> anyhow::Result<()> {
+        let provider = guid_from_provider(provider_name)?;
+        let name = event_full_name(provider_name, provider, "Record");
+
+        let mut event = Event::new(0, name);
+        event.set_id_wild_card_flag();
+
+        *event.extension_mut().provider_mut() = provider;
+        *event.extension_mut().level_mut() = level;
+        *event.extension_mut().keyword_mut() = keyword;
+
+        match self.record_events.borrow_mut().as_mut() {
+            Some(record_events) => {
+                record_events.push(
+                    ProviderRecordEvent {
+                        event,
+                        flags,
+                    });
+            },
+            None => {
+                warn!("Record events no longer available for provider: provider={}", provider_name);
+                anyhow::bail!("Record events are no longer available.");
+            },
+        }
+
+        Ok(())
     }
 
     pub fn set_filter_args(

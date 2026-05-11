@@ -103,6 +103,7 @@ const PROCESS_TRACE_MODE_EVENT_RECORD: u32 = 268435456;
 const EVENT_FILTER_TYPE_PID: u32 = 0x80000004;
 const EVENT_FILTER_TYPE_EVENT_ID: u32 = 0x80000200;
 const EVENT_FILTER_TYPE_STACKWALK: u32 = 0x80001000;
+const EVENT_FILTER_TYPE_STACKWALK_LEVEL_KW: u32 = 0x80004000;
 
 pub const EVENT_ENABLE_PROPERTY_ENABLE_KEYWORD_0: u32 = 64u32;
 pub const EVENT_ENABLE_PROPERTY_ENABLE_SILOS: u32 = 1024u32;
@@ -162,6 +163,16 @@ pub fn wide_string(
 
 const SE_PRIVILEGE_ENABLED: u32 = 2;
 const TOKEN_ADJUST_PRIVILEGES: u32 = 32;
+
+#[repr(C)]
+#[allow(non_snake_case)]
+#[derive(Default)]
+struct EVENT_FILTER_LEVEL_KW {
+    pub MatchAnyKeyword: u64,
+    pub MatchAllKeyword: u64,
+    pub Level: u8,
+    pub FilterIn: u8,
+}
 
 #[repr(C, packed)]
 #[allow(non_snake_case)]
@@ -529,6 +540,7 @@ pub struct TraceEnable {
     keyword: u64,
     events: Vec<u16>,
     callstacks: Vec<u16>,
+    callstack_keyword: Option<u64>,
     custom_filter: Option<TraceFilter>,
 }
 
@@ -545,6 +557,7 @@ impl TraceEnable {
             keyword: 0,
             events: Vec::new(),
             callstacks: Vec::new(),
+            callstack_keyword: None,
             custom_filter: None,
         }
     }
@@ -562,6 +575,12 @@ impl TraceEnable {
     pub fn needs_rundown(&self) -> bool { self.rundown }
 
     pub fn ensure_rundown(&mut self) { self.rundown = true; }
+
+    pub fn ensure_callstack_keyword(
+        &mut self,
+        keyword: u64) {
+        self.callstack_keyword = Some(keyword);
+    }
 
     pub fn ensure_no_filtering(
         &mut self) {
@@ -674,6 +693,12 @@ impl TraceEnable {
             let mut pids = EVENT_FILTER_DESCRIPTOR::default();
             pids.Type = EVENT_FILTER_TYPE_PID;
 
+            let mut callstack_kw_filter = EVENT_FILTER_LEVEL_KW::default();
+            let mut callstack_kw = EVENT_FILTER_DESCRIPTOR::default();
+            callstack_kw.Type = EVENT_FILTER_TYPE_STACKWALK_LEVEL_KW;
+            callstack_kw.Filter = &callstack_kw_filter as *const EVENT_FILTER_LEVEL_KW as *const u8;
+            callstack_kw.Size = std::mem::size_of::<EVENT_FILTER_LEVEL_KW>() as u32;
+
             let mut filters = Vec::new();
 
             if let Some(custom) = &self.custom_filter {
@@ -704,6 +729,13 @@ impl TraceEnable {
 
                     filters.push(pids);
                 }
+            }
+
+            if let Some(callstack_keyword) = self.callstack_keyword {
+                callstack_kw_filter.FilterIn = 1;
+                callstack_kw_filter.MatchAnyKeyword = callstack_keyword;
+
+                filters.push(callstack_kw);
             }
 
             params.EnableProperty |= self.properties;

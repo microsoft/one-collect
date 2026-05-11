@@ -1615,6 +1615,7 @@ impl EventFormat {
 const EVENT_FLAG_NO_CALLSTACK:u64 = 1u64 << 0;
 const EVENT_FLAG_PROXY:u64 = 1u64 << 1;
 const EVENT_FLAG_NO_CPU_MASK:u64 = 1u64 << 2;
+const EVENT_FLAG_ID_WILD_CARD:u64 = 1u64 << 3;
 
 struct FieldSkip {
     loc_type: LocationType,
@@ -1724,6 +1725,17 @@ impl Event {
     /// Checks if the no_callstack flag is set for the event.
     pub fn has_no_callstack_flag(&self) -> bool {
         self.flags & EVENT_FLAG_NO_CALLSTACK != 0
+    }
+
+    /// Sets the id wild card flag for the event. Use this when the event should run
+    /// for any ID within it's scope. Scope is OS dependent.
+    pub fn set_id_wild_card_flag(&mut self) {
+        self.flags |= EVENT_FLAG_ID_WILD_CARD;
+    }
+
+    /// Checks if the id wild card flag is set for the event.
+    pub fn has_id_wild_card_flag(&self) -> bool {
+        self.flags & EVENT_FLAG_ID_WILD_CARD != 0
     }
 
     /// Sets the no_cpu_mask flag for the event. Use this when events are expected

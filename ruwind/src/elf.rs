@@ -719,6 +719,11 @@ pub fn get_load_header(
     reader: &mut (impl Read + Seek)) -> Result<ElfLoadHeader, Error> {
     reader.seek(SeekFrom::Start(0))?;
     let slice = get_ident(reader)?;
+    if slice[..4] != ELF_MAGIC {
+        return Err(Error::new(
+            std::io::ErrorKind::InvalidData,
+            "not an ELF file"));
+    }
     let class = slice[EI_CLASS];
     match class {
         ELFCLASS32 => {

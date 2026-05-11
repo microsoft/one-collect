@@ -143,6 +143,12 @@ impl ExportSamplerOSHooks for ExportSampler {
         Ok(Some(self.os.ancillary.borrow().version() as u16))
     }
 
+    fn os_event_id(
+        &self,
+        _data: &EventData) -> anyhow::Result<Option<usize>> {
+        Ok(Some(self.os.ancillary.borrow().id() as usize))
+    }
+
     fn os_event_op_code(
         &self,
         _data: &EventData) -> anyhow::Result<Option<u16>> {

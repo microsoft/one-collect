@@ -1148,6 +1148,24 @@ impl OSDotNetEventFactory {
         let settings_tracker_events = tracker_events.clone();
 
         exporter.with_settings_hook(move |mut settings| {
+            /*
+             * If no .NET providers were subscribed by the script (or
+             * embedder), keep the default user-stack capture and skip the
+             * tracefs/user_events wiring entirely — this hook only has work
+             * to do when .NET events are in use.
+             */
+            if fn_providers.borrow().is_empty() {
+                return Ok(settings);
+            }
+
+            /*
+             * .NET stacks (managed → runtime → JIT → host) are deeper than
+             * typical native stacks; the default DWARF user-stack capture
+             * is too small to cover them. Now that we know .NET events are
+             * subscribed, raise the capture size.
+             */
+            settings = settings.with_callstack_stack_size(32 * 1024);
+
             let tracefs = match tracefs.as_ref() {
                 Ok(tracefs) => { tracefs },
                 Err(err)  => { anyhow::bail!("Tracefs is not accessible: {}", err); },

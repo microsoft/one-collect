@@ -172,6 +172,7 @@ impl FrameOptions {
 pub struct FrameOffset {
     pub rva: u64,
     pub fde: u64,
+    pub pc_size: u64,
     state: u8,
     ret_reg: u8,
     frame_states: Vec<FrameState>,
@@ -184,6 +185,7 @@ impl FrameOffset {
         Self {
             rva,
             fde,
+            pc_size: 0,
             state: STATE_UNPARSED,
             ret_reg: 0,
             frame_states: Vec::new(),
@@ -405,7 +407,8 @@ impl FrameOffset {
 
         let mut cursor: usize = 8;
         let pc_start = read_value(options.enc, self.fde as i64, fde_slice, &mut cursor)?;
-        let _pc_size = read_value(options.enc, -12, fde_slice, &mut cursor)?;
+        let pc_size = read_value(options.enc, -12, fde_slice, &mut cursor)?;
+        self.pc_size = pc_size as u64;
 
         if options.has_aug_data {
             /* Skip augmentation data */
