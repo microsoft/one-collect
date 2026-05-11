@@ -23,7 +23,7 @@ use crate::PathBufInteger;
 /// # Remarks
 ///
 /// If the `comm` value is exactly 15 characters long (the maximum length for this field), this can be an indication
-/// that the process's actual name is longer. In such a case, the function attempts to retreive the full process name.
+/// that the process's actual name is longer. In such a case, the function attempts to retrieve the full process name.
 pub fn get_comm(
     path: &mut path::PathBuf) -> Option<String> {
     debug!("Retrieving comm: path={:?}", path);

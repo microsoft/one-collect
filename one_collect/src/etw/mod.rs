@@ -129,6 +129,15 @@ impl AncillaryData {
         None
     }
 
+    pub fn id(&self) -> u16 {
+        match self.event {
+            Some(event) => {
+                unsafe { (*event).EventHeader.EventDescriptor.Id }
+            },
+            None => { 0 },
+        }
+    }
+
     pub fn op_code(&self) -> u8 {
         match self.event {
             Some(event) => {
@@ -228,6 +237,7 @@ type EventLookup = HashMap<usize, Vec<Event>, BuildHasherDefault<XxHash64>>;
 struct ProviderEvents {
     use_op_id: bool,
     events: EventLookup,
+    wide_events: Vec<Event>,
 }
 
 impl ProviderEvents {
@@ -235,6 +245,7 @@ impl ProviderEvents {
         Self {
             use_op_id: false,
             events: HashMap::default(),
+            wide_events: Vec::new(),
         }
     }
 
@@ -253,6 +264,8 @@ impl ProviderEvents {
         id: usize) -> Option<&mut Vec<Event>> {
         self.events.get_mut(&id)
     }
+
+    fn wide_events_mut(&mut self) -> &mut Vec<Event> { &mut self.wide_events }
 }
 
 pub struct SessionCallbackContext {
@@ -584,14 +597,29 @@ impl EtwSession {
 
         let callstacks = !event.has_no_callstack_flag();
 
-        let events = self.provider_events_mut(
-            provider,
-            lookup_provider,
-            ensure_provider,
-            event.id(),
-            callstacks);
+        if event.has_id_wild_card_flag() {
+            if provider != EMPTY_PROVIDER {
+                let enabler = self.enable_provider(provider);
 
-        events.push(event);
+                ensure_provider(enabler);
+
+                let events = self
+                    .providers
+                    .entry(provider)
+                    .or_insert_with(|| ProviderEvents::new());
+
+                events.wide_events_mut().push(event);
+            }
+        } else {
+            let events = self.provider_events_mut(
+                provider,
+                lookup_provider,
+                ensure_provider,
+                event.id(),
+                callstacks);
+
+            events.push(event);
+        }
     }
 
     pub fn add_kernel_callstack(
@@ -1160,68 +1188,76 @@ impl EtwSession {
             let cpu_index = event.ProcessorIndex;
 
             /* Find events by provider ID */
-            if let Some(events) = events.get_mut(&event.EventHeader.ProviderId) {
+            if let Some(provider_events) = events.get_mut(&event.EventHeader.ProviderId) {
                 /* Determine which ID for lookup */
-                let id: usize = match events.use_op_id() {
+                let id: usize = match provider_events.use_op_id() {
                     true => { event.EventHeader.EventDescriptor.Opcode.into() },
                     false => { event.EventHeader.EventDescriptor.Id.into() },
                 };
 
-                /* Find any registered closures for the event */
-                if let Some(events) = events.get_events_mut_if_exist(id) {
-                    /* Update ancillary data */
-                    ancillary.borrow_mut().event = Some(event);
+                let slice = event.user_data_slice();
 
-                    /* Process Event Data via Closures */
-                    let slice = event.user_data_slice();
+                let mut process_event = |event: &mut Event| {
+                    errors.clear();
 
-                    for event in events {
-                        errors.clear();
-
-                        if has_pid_filter {
-                            /*
-                             * Skip PID events via soft_pid filters:
-                             * Legacy Kernel ETW events do not have a stable
-                             * pid field. Events can register a software pid
-                             * reader to allow for this. These read the pid
-                             * from the actual event data vs the ancillary data.
-                             */
-                            if let Some(pid) = event.soft_pid(slice) {
-                                /* If we have a legacy PID, filter it */
-                                if pid != 0 && !pid_lookup.contains(&pid) {
-                                    /* Ignore if not in the set */
-                                    continue;
-                                }
-                            }
-                        }
-
-                        if has_cpu_filter && !event.has_no_cpu_mask_flag() {
-                            /* Skip events not on target CPUs */
-                            if let Some(target_cpus) = &target_cpus {
-                                if !target_cpus.contains(&cpu_index) {
-                                    return;
-                                }
-                            }
-                        }
-
-                        event.process(
-                            slice,
-                            slice,
-                            &mut errors);
-
-                        /* Log errors, if any */
-                        for error in &errors {
-                            if let Some(callback) = &error_callback {
-                                callback(event, error);
-                            } else {
-                                eprintln!("Error: Event '{}': {}", event.name(), error);
+                    if has_pid_filter {
+                        /*
+                         * Skip PID events via soft_pid filters:
+                         * Legacy Kernel ETW events do not have a stable
+                         * pid field. Events can register a software pid
+                         * reader to allow for this. These read the pid
+                         * from the actual event data vs the ancillary data.
+                         */
+                        if let Some(pid) = event.soft_pid(slice) {
+                            /* If we have a legacy PID, filter it */
+                            if pid != 0 && !pid_lookup.contains(&pid) {
+                                /* Ignore if not in the set */
+                                return;
                             }
                         }
                     }
 
-                    /* Clear ancillary data */
-                    ancillary.borrow_mut().event = None;
+                    if has_cpu_filter && !event.has_no_cpu_mask_flag() {
+                        /* Skip events not on target CPUs */
+                        if let Some(target_cpus) = &target_cpus {
+                            if !target_cpus.contains(&cpu_index) {
+                                return;
+                            }
+                        }
+                    }
+
+                    /* Process Event Data via Closures */
+                    event.process(
+                        slice,
+                        slice,
+                        &mut errors);
+
+                    /* Log errors, if any */
+                    for error in &errors {
+                        if let Some(callback) = &error_callback {
+                            callback(event, error);
+                        } else {
+                            eprintln!("Error: Event '{}': {}", event.name(), error);
+                        }
+                    }
+                };
+
+                /* Update ancillary data */
+                ancillary.borrow_mut().event = Some(event);
+
+                /* Find any registered closures for the event */
+                if let Some(events) = provider_events.get_events_mut_if_exist(id) {
+                    for event in events {
+                        process_event(event);
+                    }
                 }
+
+                for event in provider_events.wide_events_mut() {
+                    process_event(event);
+                }
+
+                /* Clear ancillary data */
+                ancillary.borrow_mut().event = None;
             }
         }));
 

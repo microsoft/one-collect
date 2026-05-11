@@ -3,7 +3,6 @@
 
 use std::fs::File;
 use std::path::PathBuf;
-use std::os::fd::{FromRawFd, IntoRawFd, RawFd};
 use std::ops::DerefMut;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry::{self, Vacant};
@@ -13,10 +12,11 @@ use super::*;
 use crate::PathBufInteger;
 use crate::perf_event::*;
 use crate::event::DataFieldRef;
+use crate::openat::DupFd;
 use crate::Writable;
 
-use libc::*;
 use ruwind::*;
+use libc::PROT_EXEC;
 
 pub struct CallstackReader {
     state: Writable<MachineState>,
@@ -31,20 +31,55 @@ impl Clone for CallstackReader {
 }
 
 struct ModuleLookup {
-    fds: HashMap<ModuleKey, RawFd>,
+    fds: HashMap<ModuleKey, DupFd>,
+    va_offsets: HashMap<ModuleKey, u64>,
 }
 
 impl ModuleLookup {
     fn new() -> Self {
         Self {
             fds: HashMap::new(),
+            va_offsets: HashMap::new(),
         }
     }
 
     fn entry(
         &mut self,
-        key: ModuleKey) -> Entry<'_, ModuleKey, RawFd> {
+        key: ModuleKey) -> Entry<'_, ModuleKey, DupFd> {
         self.fds.entry(key)
+    }
+
+    fn va_offset(
+        &mut self,
+        key: ModuleKey) -> u64 {
+        if let Some(value) = self.va_offsets.get(&key) {
+            return *value;
+        }
+
+        let mut value = 0u64;
+        /*
+         * Read the load header from the cached FD rather than re-opening
+         * by path so we cannot race with a file that has been replaced
+         * out from under us between the original open and now.
+         */
+        if let Some(fd) = self.fds.get(&key) {
+            match fd.open() {
+                Some(file) => {
+                    let mut reader = std::io::BufReader::new(file);
+                    if let Ok(load_header) = ruwind::elf::get_load_header(&mut reader) {
+                        value = load_header
+                            .p_vaddr()
+                            .saturating_sub(load_header.p_offset());
+                    }
+                },
+                None => {
+                    warn!("Failed to dup module FD for va_offset lookup: dev={}, ino={}", key.dev(), key.ino());
+                },
+            }
+        }
+
+        self.va_offsets.insert(key, value);
+        value
     }
 }
 
@@ -52,14 +87,8 @@ impl ModuleAccessor for ModuleLookup {
     fn open(
         &self,
         key: &ModuleKey) -> Option<File> {
-        match self.fds.get(&key) {
-            Some(fd) => {
-                /* Clone it and return for caller */
-                unsafe {
-                    let cloned_fd = dup(*fd);
-                    Some(File::from_raw_fd(cloned_fd))
-                }
-            },
+        match self.fds.get(key) {
+            Some(fd) => { fd.open() },
             None => { None },
         }
     }
@@ -144,21 +173,27 @@ impl MachineState {
            filename.starts_with("/memfd:") ||
            filename.starts_with("//anon");
 
-        if !mem_backed {
-            /* File backed */
-            let key = ModuleKey::new(dev, ino);
+        let key = if !mem_backed {
+            Some(ModuleKey::new(dev, ino))
+        } else {
+            None
+        };
+
+        if let Some(key) = key {
+            /* File backed - build the /proc/<pid>/root/<filename> path
+             * once and share it between the FD cache and the va_offset
+             * lookup so we don't construct it twice. */
+            self.path.clear();
+            self.path.push("/proc");
+            self.path.push_u32(pid);
+            self.path.push("root");
+            self.path.push(filename);
 
             if let Vacant(entry) = self.modules.entry(key) {
                 /* Try to open and keep a single FD for that file */
-                self.path.clear();
-                self.path.push("/proc");
-                self.path.push_u32(pid);
-                self.path.push("root");
-                self.path.push(filename);
-
                 /* Only insert if we can actually open it */
                 if let Ok(file) = std::fs::File::open(&self.path) {
-                    entry.insert(file.into_raw_fd());
+                    entry.insert(DupFd::new(file));
                 } else {
                     warn!("Failed to open module file: pid={}, filename={}", pid, filename);
                 }
@@ -175,23 +210,25 @@ impl MachineState {
 
         /* Always add to the process for unwinding info */
         if let Some(process) = self.machine.find_process(pid) {
-            let module: Module;
             let start = addr;
             let end = start + len;
 
-            if !mem_backed {
-                module = Module::new(
+            let module = if let Some(key) = key {
+                let va_offset = self.modules.va_offset(key);
+
+                Module::new(
                     start,
                     end,
                     offset,
+                    va_offset,
                     dev,
                     ino,
-                    unwind_type);
+                    unwind_type)
             } else {
-                module = Module::new_anon(
+                Module::new_anon(
                     start,
-                    end);
-            }
+                    end)
+            };
 
             process.add_module(module);
         }

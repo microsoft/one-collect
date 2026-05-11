@@ -991,7 +991,7 @@ impl NetTraceWriter {
         for record_type in record_types {
             record_fields.clear();
 
-            /* Original data does not change it's format */
+            /* Original data does not change its format */
             if record_type.is_original_data() {
                 self.original_meta_event_ids.insert(meta_id);
             } else {

@@ -65,7 +65,10 @@ impl CodeSection for Module {
     fn rva(
         &self,
         ip: u64) -> u64 {
-        (ip - self.start) + self.offset
+        // ip - start: in-mapping offset; + offset: position in the ELF
+        // file; + va_offset: ELF VA correction (p_vaddr - p_offset of
+        // the executable PT_LOAD) used for .eh_frame_hdr lookups.
+        (ip - self.start) + self.offset + self.va_offset
     }
 
     fn key(&self) -> ModuleKey { self.key }
@@ -76,17 +79,19 @@ impl Module {
         start: u64,
         end: u64,
         offset: u64,
+        va_offset: u64,
         dev: u64,
         ino: u64,
         unwind_type: UnwindType) -> Self {
         debug!(
-            "Module created: start={:#x}, end={:#x}, offset={:#x}, dev={}, ino={}, unwind_type={:?}",
-            start, end, offset, dev, ino, unwind_type
+            "Module created: start={:#x}, end={:#x}, offset={:#x}, va_offset={:#x}, dev={}, ino={}, unwind_type={:?}",
+            start, end, offset, va_offset, dev, ino, unwind_type
         );
         Self {
             start,
             end,
             offset,
+            va_offset,
             key: ModuleKey::new(
                 dev,
                 ino),
@@ -103,6 +108,7 @@ impl Module {
             start,
             end,
             offset: 0,
+            va_offset: 0,
             key: ModuleKey::new(
                 0,
                 0),

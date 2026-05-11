@@ -299,7 +299,7 @@ impl Recorder {
         self.output.end("Recording stopped.");
         let mut exporter = exporter.borrow_mut();
 
-        // Capture binary metdata and resolve symbols.
+        // Capture binary metadata and resolve symbols.
         info!("Resolving symbols");
         self.output.normal("Resolving symbols.");
         exporter.capture_and_resolve_symbols();

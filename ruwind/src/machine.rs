@@ -111,7 +111,7 @@ impl Machine {
             None => {
                 /* Process not mapped */
                 error!("Process not found for unwinding: pid={}", pid);
-                result.error = Some("Process not mapped");
+                result.error = Some(UnwindError::ProcessNotMapped);
             },
         }
 

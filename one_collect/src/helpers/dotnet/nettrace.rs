@@ -408,7 +408,7 @@ impl FieldsParserV5 {
                                     "object" | "array" => {
                                         /*
                                          * Currently don't support complex array types:
-                                         * Allowing a field to have it's own format would
+                                         * Allowing a field to have its own format would
                                          * allow for this. We would then parse a new
                                          * format via parse_object and add it to the field.
                                          */

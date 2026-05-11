@@ -769,7 +769,7 @@ impl PerfSession {
                 let mut offset: usize = abi::Header::data_offset();
                 let mut id: Option<usize> = None;
 
-                /* PERF_SAMPLE_IDENTIFER */
+                /* PERF_SAMPLE_IDENTIFIER */
                 if perf_data.has_format(abi::PERF_SAMPLE_IDENTIFIER) {
                     offset += self.id_field.update(offset, 8);
                 } else {

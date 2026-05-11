@@ -706,6 +706,12 @@ impl ExportSamplerOSHooks for ExportSampler {
         Ok(None)
     }
 
+    fn os_event_id(
+        &self,
+        _data: &EventData) -> anyhow::Result<Option<usize>> {
+        Ok(None)
+    }
+
     fn os_event_op_code(
         &self,
         _data: &EventData) -> anyhow::Result<Option<u16>> {
@@ -748,6 +754,7 @@ impl ExportSamplerOSHooks for ExportSampler {
 pub(crate) struct OSExportMachine {
     cswitches: HashMap<u32, ExportCSwitch>,
     dev_nodes: ExportDevNodeLookup,
+    va_offsets: HashMap<ExportDevNode, u64>,
     path_buf: Writable<PathBuf>,
 }
 
@@ -756,6 +763,7 @@ impl OSExportMachine {
         Self {
             cswitches: HashMap::new(),
             dev_nodes: ExportDevNodeLookup::new(),
+            va_offsets: HashMap::new(),
             path_buf: Writable::new(PathBuf::new()),
         }
     }
@@ -1265,7 +1273,7 @@ impl OSExportMachine {
             for map in proc.mappings() {
                 if let Some(key) = map.node() {
 
-                    // Handle each binary exactly once, regardless of of it's loaded into multiple processes.
+                    // Handle each binary exactly once, regardless of whether it's loaded into multiple processes.
                     if machine.module_metadata.contains(key) {
                         continue;
                     }
@@ -1516,14 +1524,31 @@ impl ExportMachineOSHooks for ExportMachine {
         filename: &str) -> anyhow::Result<()> {
         match mapping.node() {
             Some(node) => {
-                if !self.os.dev_nodes.contains(node) {
+                let node = *node;
+
+                if !self.os.dev_nodes.contains(&node) {
+                    let mut va_offset = 0u64;
                     if let Some(process) = self.find_process(pid) {
                         if let Ok(file) = process.open_file(Path::new(filename)) {
-                            if let Vacant(entry) = self.os.dev_nodes.entry(*node) {
-                                entry.insert(DupFd::new(file));
+                            if let Vacant(entry) = self.os.dev_nodes.entry(node) {
+                                let dup_fd = entry.insert(DupFd::new(file));
+                                if let Some(file) = dup_fd.open() {
+                                    let mut reader = BufReader::new(file);
+                                    if let Ok(load_header) = get_load_header(&mut reader) {
+                                        va_offset = load_header
+                                            .p_vaddr()
+                                            .saturating_sub(load_header.p_offset());
+                                    }
+                                }
                             }
                         }
                     }
+                    self.os.va_offsets.insert(node, va_offset);
+                }
+
+                let va_offset = *self.os.va_offsets.get(&node).unwrap_or(&0);
+                if va_offset != 0 {
+                    mapping.set_va_offset(va_offset);
                 }
             },
             None => {}

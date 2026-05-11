@@ -57,6 +57,21 @@ impl FrameOffsets {
 
             /* Ensure valid */
             if offset.is_valid() {
+                /*
+                 * The .eh_frame_hdr index only stores the FDE start RVAs;
+                 * partition_point above can return an FDE whose PC range
+                 * ends before the queried RVA (which then sits in a code
+                 * gap with no FDE coverage — common for hand-written
+                 * assembly thunks and JIT helpers in libcoreclr.so).
+                 * Apply the FDE only when the RVA is actually inside its
+                 * declared PC range so we don't compute a garbage CFA.
+                 */
+                if offset.pc_size != 0 && rva >= offset.rva + offset.pc_size {
+                    trace!(
+                        "FDE found but rva {:#x} is outside FDE range {:#x}..{:#x}",
+                        rva, offset.rva, offset.rva + offset.pc_size);
+                    return None;
+                }
                 trace!("Frame offset found and valid: rva={:#x}", rva);
                 return Some(offset);
             } else {
@@ -227,7 +242,7 @@ impl Unwinder {
         }
 
         warn!("Prolog scan exhausted: scan_count={}", count);
-        result.error = Some("Anon prolog not found");
+        result.error = Some(UnwindError::AnonPrologNotFound);
 
         None
     }
@@ -256,7 +271,7 @@ impl Unwinder {
 
             if cfa_data.reg as usize > REG_RA {
                 error!("Register out of range: reg={}", cfa_data.reg);
-                result.error = Some("Register out of range");
+                result.error = Some(UnwindError::RegisterOutOfRange);
                 return None;
             }
                 
@@ -266,14 +281,14 @@ impl Unwinder {
             /* No return address, unexpected */
             if cfa_data.off_mask & REG_RA_BIT == 0 {
                 warn!("No return address register in frame");
-                result.error = Some("No return address register");
+                result.error = Some(UnwindError::NoReturnAddressRegister);
                 return None;
             }
 
             /* Unexpected backwards access */
             if self.registers[REG_RSP] >= cfa {
                 warn!("CFA would go backwards: rsp={:#x}, cfa={:#x}", self.registers[REG_RSP], cfa);
-                result.error = Some("CFA would go backwards");
+                result.error = Some(UnwindError::CfaWouldGoBackwards);
                 return None;
             }
 
@@ -290,7 +305,7 @@ impl Unwinder {
                     },
                     None => {
                         debug!("Bad stack RBP read");
-                        result.error = Some("Bad stack RBP read");
+                        result.error = Some(UnwindError::BadStackRbpRead);
                         return None;
                     },
                 }
@@ -311,14 +326,14 @@ impl Unwinder {
                 },
                 None => {
                     debug!("Bad stack IP read");
-                    result.error = Some("Bad stack IP read");
+                    result.error = Some(UnwindError::BadStackIpRead);
                     return None;
                 }
             }
         }
 
         debug!("No frame offset found for module");
-        result.error = Some("No module found");
+        result.error = Some(UnwindError::NoModuleFound);
         None
     }
 }
@@ -363,9 +378,12 @@ impl MachineUnwinder for Unwinder {
         stack_frames: &mut Vec<u64>,
         result: &mut UnwindResult) {
         trace!("Starting stack unwind loop");
-        
+
         while let Some(module) = process.find(self.rip) {
-            let ip = if module.unwind_type() == UnwindType::Prolog {
+            let saved_rsp = self.registers[REG_RSP];
+            let saved_rbp = self.registers[REG_RBP];
+
+            let mut ip = if module.unwind_type() == UnwindType::Prolog {
                 /* Anonymous and PE */
                 trace!("Using prolog unwinder for ip={:#x}", self.rip);
                 self.unwind_prolog(
@@ -385,9 +403,65 @@ impl MachineUnwinder for Unwinder {
                     result)
             };
 
+            /*
+             * DWARF FDE lookup can return None for code regions inside an
+             * ELF that don't have .eh_frame entries — for example PLT
+             * stubs and small hand-written assembly thunks in libcoreclr.so.
+             * In that case fall back to a frame-pointer / stack-scan walk
+             * which can usually skip over the stub and continue unwinding.
+             */
+            if ip.is_none()
+                && module.unwind_type() != UnwindType::Prolog
+                && result.error == Some(UnwindError::NoModuleFound)
+            {
+                trace!(
+                    "DWARF lookup missing for ip={:#x}, falling back to prolog walk",
+                    self.rip);
+                result.error = None;
+                ip = self.unwind_prolog(
+                    process,
+                    stack_data,
+                    result);
+            }
+
             /* Add ip to stack or stop */
             match ip {
                 Some(next_ip) => {
+                    /*
+                     * DWARF can compute a bogus return address at the
+                     * boundary between two ABIs — for example, libcoreclr.so
+                     * code calling into JIT'd managed code through a
+                     * helper thunk that doesn't expose a normal return
+                     * address slot. Detect the case where the unwound IP
+                     * doesn't belong to any known module and try a
+                     * scan-based recovery (frame-pointer chain walk +
+                     * linear stack scan) before giving up.
+                     */
+                    let mut next_ip = next_ip;
+                    if next_ip != 0 && process.find(next_ip).is_none() {
+                        trace!(
+                            "Unwound IP {:#x} not in any module, attempting scan recovery",
+                            next_ip);
+                        /*
+                         * Restore RSP/RBP to their values before the bogus
+                         * DWARF unwind so the prolog scan starts from a
+                         * known-good stack location, not from whatever
+                         * (possibly out-of-range) CFA the FDE produced.
+                         */
+                        self.registers[REG_RSP] = saved_rsp;
+                        self.registers[REG_RBP] = saved_rbp;
+                        if let Some(recovered) = self.unwind_prolog(
+                            process,
+                            stack_data,
+                            result) {
+                            trace!(
+                                "Scan recovery succeeded: bogus_ip={:#x}, recovered_ip={:#x}",
+                                next_ip, recovered);
+                            result.error = None;
+                            next_ip = recovered;
+                        }
+                    }
+
                     self.rip = next_ip;
 
                     stack_frames.push(self.rip);
