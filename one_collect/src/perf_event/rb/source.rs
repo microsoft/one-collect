@@ -809,6 +809,14 @@ impl RingBufDataSource {
                 slice,
                 &mut start) {
                 Ok(header) => {
+                    if header.size < 16 {
+                        warn!(
+                            "read_time: invalid header size={}, stopping read",
+                            header.size
+                        );
+                        return None;
+                    }
+
                     let id_offset: u16;
                     let mut time_offset: Option<u16> = None;
 
@@ -1193,6 +1201,8 @@ mod tests {
 
     #[test]
     fn read_time_skips_unknown_ring_buffer_id() {
+        const TEST_RECORD_TYPE: u32 = 1024;
+
         let mut ring_buf = InProcessRingBuf::new(1);
         let mut writer = ring_buf.writer();
         let reader = ring_buf.create_reader();
@@ -1205,7 +1215,7 @@ mod tests {
         let unknown_id = 99u64;
         payload.extend_from_slice(&unknown_time.to_ne_bytes());
         payload.extend_from_slice(&unknown_id.to_ne_bytes());
-        abi::Header::write(1024, 0, &payload, &mut record);
+        abi::Header::write(TEST_RECORD_TYPE, 0, &payload, &mut record);
         writer.write(&record);
 
         record.clear();
@@ -1215,7 +1225,7 @@ mod tests {
         let known_id = 7u64;
         payload.extend_from_slice(&known_time.to_ne_bytes());
         payload.extend_from_slice(&known_id.to_ne_bytes());
-        abi::Header::write(1024, 0, &payload, &mut record);
+        abi::Header::write(TEST_RECORD_TYPE, 0, &payload, &mut record);
         writer.write(&record);
 
         reader.begin_reading(&mut cursor);
