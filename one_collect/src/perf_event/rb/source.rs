@@ -799,70 +799,83 @@ impl RingBufDataSource {
         reader: &'a CpuRingReader,
         cursor: &'a mut CpuRingCursor,
         ring_bufs: &'a HashMap<u64, CpuRingBuf>) -> Option<(u64, &'a CpuRingBuf)> {
+        let mut start = 0;
         let slice = reader.data_slice();
 
-        while cursor.more() {
-            let mut start = 0;
-
-            match reader.peek_header(
-                cursor,
-                slice,
-                &mut start) {
-                Ok(header) => {
-                    if header.size < 16 {
-                        warn!(
-                            "read_time: invalid header size={}, stopping read",
-                            header.size
-                        );
-                        return None;
-                    }
-
-                    let id_offset: u16;
-                    let mut time_offset: Option<u16> = None;
-
-                    if header.entry_type == abi::PERF_RECORD_SAMPLE {
-                        /* Sample records have a static id offset only */
-                        id_offset = abi::Header::data_offset() as u16;
-                    } else {
-                        /* Non-Sample records have both static offsets */
-                        time_offset = Some(header.size - 16);
-                        id_offset = header.size - 8;
-                    }
-
-                    /* All cases require to fetch the id */
-                    let id = reader.peek_u64(
-                        cursor,
-                        id_offset as u64);
-
-                    /* Fetch the buffer */
-                    let Some(buf) = ring_bufs.get(&id) else {
-                        warn!(
-                            "read_time: no ring buffer found for id={}, skipping record",
-                            id
-                        );
-                        cursor.advance(header.size);
-                        continue;
-                    };
-
-                    /* Time offset is not set, must be a sample */
-                    if time_offset.is_none() {
-                        /* Fetch per-buffer time offset */
-                        time_offset = Some(buf.sample_time_offset());
-                    }
-
-                    /* Peek time */
-                    let time = reader.peek_u64(
-                        cursor,
-                        time_offset.unwrap() as u64);
-
-                    /* Give back time and sample format to use */
-                    return Some((time, buf));
-                },
-                Err(_) => return None,
-            }
+        /* No more data means no time */
+        if !cursor.more() {
+            return None;
         }
 
-        None
+        match reader.peek_header(
+            cursor,
+            slice,
+            &mut start) {
+            Ok(header) => {
+                /* A valid record must be large enough to hold the header plus
+                 * the trailing id (and time, for non-sample records). If the
+                 * size is smaller we cannot safely decode time/id; advance by
+                 * at least the header size so the ring drains and return None
+                 * so the caller can retry on the next pass. */
+                let min_size = abi::Header::data_offset() + 16;
+                if (header.size as usize) < min_size {
+                    warn!(
+                        "read_time: invalid header size={}, skipping record",
+                        header.size
+                    );
+                    let skip = std::cmp::max(
+                        header.size as usize,
+                        abi::Header::data_offset(),
+                    ) as u16;
+                    cursor.advance(skip);
+                    return None;
+                }
+
+                let id_offset: u16;
+                let mut time_offset: Option<u16> = None;
+
+                if header.entry_type == abi::PERF_RECORD_SAMPLE {
+                    /* Sample records have a static id offset only */
+                    id_offset = abi::Header::data_offset() as u16;
+                } else {
+                    /* Non-Sample records have both static offsets */
+                    time_offset = Some(header.size - 16);
+                    id_offset = header.size - 8;
+                }
+
+                /* All cases require to fetch the id */
+                let id = reader.peek_u64(
+                    cursor,
+                    id_offset as u64);
+
+                /* Fetch the buffer; if we don't know this id, skip just this
+                 * record so we make forward progress without silently
+                 * consuming any subsequent records on this CPU. */
+                let Some(buf) = ring_bufs.get(&id) else {
+                    warn!(
+                        "read_time: no ring buffer found for id={}, skipping record",
+                        id
+                    );
+                    cursor.advance(header.size);
+                    return None;
+                };
+
+                /* Time offset is not set, must be a sample */
+                if time_offset.is_none() {
+                    /* Fetch per-buffer time offset */
+                    time_offset = Some(buf.sample_time_offset());
+                }
+
+                /* Peek time */
+                let time = reader.peek_u64(
+                    cursor,
+                    time_offset.unwrap() as u64);
+
+                /* Give back time and sample format to use */
+                Some((time, buf))
+            },
+            Err(_) => None,
+        }
     }
 
     fn find_current_buffer(
@@ -1234,6 +1247,16 @@ mod tests {
         let common_attrs = std::rc::Rc::new(RingBufBuilder::common_attributes());
         ring_bufs.insert(known_id, CpuRingBuf::new(0, common_attrs));
 
+        /* First call: encounters the unknown id, advances past just that one
+         * record and returns None so the caller can retry. */
+        let first = RingBufDataSource::read_time(
+            &reader,
+            &mut cursor,
+            &ring_bufs);
+        assert!(first.is_none());
+        assert_eq!(24, cursor.start());
+
+        /* Second call: now positioned on the known record, returns its time. */
         let (time, _buf) = RingBufDataSource::read_time(
             &reader,
             &mut cursor,
