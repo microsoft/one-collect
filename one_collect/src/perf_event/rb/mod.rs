@@ -1104,8 +1104,9 @@ impl InProcessRingBufWriter {
     /// Maximum time to spin-wait for space to become available (100 ms).
     const WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
 
-    /// Size of a PERF_RECORD_LOST record: 8-byte header + 8-byte id + 8-byte lost count.
-    const LOST_RECORD_SIZE: usize = 24;
+    /// Size of a PERF_RECORD_LOST record with sample_id_all fields:
+    /// 8-byte header + (id + lost) + (pid/tid + time + id).
+    const LOST_RECORD_SIZE: usize = 48;
 
     /// Read the current tail value written by the reader.
     fn tail(&self) -> usize {
@@ -1207,10 +1208,15 @@ impl InProcessRingBufWriter {
 
         let mut record = Vec::new();
 
-        /* Payload: id (u64) + lost count (u64) */
+        /* Payload: id + lost count + sample_id_all(pid/tid,time,id) */
         let mut payload = Vec::new();
         payload.extend_from_slice(&0u64.to_ne_bytes());
         payload.extend_from_slice(&self.lost_count.to_ne_bytes());
+        payload.extend_from_slice(&0u64.to_ne_bytes()); /* pid/tid */
+        payload.extend_from_slice(
+            &perf_timestamp(&RingBufBuilder::common_attributes()).to_ne_bytes()
+        );
+        payload.extend_from_slice(&0u64.to_ne_bytes()); /* id */
 
         abi::Header::write(
             abi::PERF_RECORD_LOST,
@@ -1696,11 +1702,13 @@ mod tests {
         let read = reader.read(&mut cursor, &mut temp).unwrap();
         let header = abi::Header::from_slice(read).unwrap();
         assert_eq!(abi::PERF_RECORD_LOST, header.entry_type);
-        assert_eq!(24, header.size);
+        assert_eq!(48, header.size);
         let lost_id = u64::from_ne_bytes(read[8..16].try_into().unwrap());
         let lost_count = u64::from_ne_bytes(read[16..24].try_into().unwrap());
+        let sample_id = u64::from_ne_bytes(read[40..48].try_into().unwrap());
         assert_eq!(0, lost_id);
         assert_eq!(1, lost_count);
+        assert_eq!(0, sample_id);
 
         /* Second record should be the actual data */
         let read = reader.read(&mut cursor, &mut temp).unwrap();
@@ -1754,8 +1762,11 @@ mod tests {
         let read = reader.read(&mut cursor, &mut temp).unwrap();
         let header = abi::Header::from_slice(read).unwrap();
         assert_eq!(abi::PERF_RECORD_LOST, header.entry_type);
+        assert_eq!(48, header.size);
         let lost_count = u64::from_ne_bytes(read[16..24].try_into().unwrap());
+        let sample_id = u64::from_ne_bytes(read[40..48].try_into().unwrap());
         assert_eq!(3, lost_count);
+        assert_eq!(0, sample_id);
 
         /* Followed by the actual data record */
         let read = reader.read(&mut cursor, &mut temp).unwrap();
@@ -1807,9 +1818,11 @@ mod tests {
         let read = reader.read(&mut cursor, &mut temp).unwrap();
         let header = abi::Header::from_slice(read).unwrap();
         assert_eq!(abi::PERF_RECORD_LOST, header.entry_type);
-        assert_eq!(24, header.size);
+        assert_eq!(48, header.size);
         let lost_count = u64::from_ne_bytes(read[16..24].try_into().unwrap());
+        let sample_id = u64::from_ne_bytes(read[40..48].try_into().unwrap());
         assert_eq!(2, lost_count);
+        assert_eq!(0, sample_id);
 
         assert!(!cursor.more());
         reader.end_reading(&cursor);
