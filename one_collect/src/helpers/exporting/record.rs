@@ -93,7 +93,7 @@ pub(crate) struct ExportRecord {
 }
 
 impl ExportRecord {
-    pub fn new(
+    pub(crate) fn new(
         record_type: u16,
         offset: usize,
         length: u32) -> Self {
@@ -104,9 +104,9 @@ impl ExportRecord {
         }
     }
 
-    pub fn record_type(&self) -> u16 { self.record_type }
+    pub(crate) fn record_type(&self) -> u16 { self.record_type }
 
-    pub fn start(&self) -> usize { self.offset }
+    pub(crate) fn start(&self) -> usize { self.offset }
 
-    pub fn end(&self) -> usize { self.offset + self.length as usize }
+    pub(crate) fn end(&self) -> usize { self.offset + self.length as usize }
 }

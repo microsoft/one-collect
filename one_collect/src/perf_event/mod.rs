@@ -35,12 +35,12 @@ pub(crate) struct CaptureEnvironmentOptions {
 }
 
 impl CaptureEnvironmentOptions {
-    pub fn with_all_mmaps(&mut self) -> &mut Self {
+    pub(crate) fn with_all_mmaps(&mut self) -> &mut Self {
         self.all_mmaps = true;
         self
     }
 
-    pub fn all_mmaps(&self) -> bool {
+    pub(crate) fn all_mmaps(&self) -> bool {
         self.all_mmaps
     }
 }
@@ -1299,7 +1299,7 @@ mod tests {
     }
 
     impl MockData {
-        pub fn new(
+        pub(crate) fn new(
             sample_type: u64,
             read_format: u64) -> Self {
             let mut attr = perf_event_attr::default();
@@ -1315,7 +1315,7 @@ mod tests {
             }
         }
 
-        pub fn push(
+        pub(crate) fn push(
             &mut self,
             slice: &[u8]) {
             let entry: (usize, usize) = (self.data.len(), slice.len());

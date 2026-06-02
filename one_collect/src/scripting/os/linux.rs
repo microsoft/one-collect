@@ -31,7 +31,7 @@ pub(crate) fn version() -> (u16, u16) {
     (major, minor)
 }
 
-pub struct OSScriptEngine {
+pub(crate) struct OSScriptEngine {
     probe_cleanups: Writable<Vec<String>>,
 }
 
@@ -127,7 +127,7 @@ impl OSScriptEngine {
         }
     }
 
-    pub fn enable(
+    pub(crate) fn enable(
         &mut self,
         engine: &mut Engine) {
         /* Use single tracefs for all function invocations */
@@ -343,7 +343,7 @@ impl OSScriptEngine {
         info!("OSScriptEngine::enable: Linux script functions registered successfully");
     }
 
-    pub fn cleanup_task(&mut self) -> Box<dyn FnMut()> {
+    pub(crate) fn cleanup_task(&mut self) -> Box<dyn FnMut()> {
         let probe_cleanups = self.probe_cleanups.clone();
 
         Box::new(move || {

@@ -14,7 +14,7 @@ struct RingBufSessionHook {
 }
 
 impl RingBufSessionHook {
-    pub fn new(
+    pub(crate) fn new(
         builder_hook: impl FnOnce(&mut RingBufSessionBuilder) + 'static,
         session_hook: impl FnOnce(&mut PerfSession) + 'static) -> Self {
         Self {
@@ -23,11 +23,11 @@ impl RingBufSessionHook {
         }
     }
 
-    pub fn builder_hook(&mut self) -> Option<BoxedBuilderHook> {
+    pub(crate) fn builder_hook(&mut self) -> Option<BoxedBuilderHook> {
         self.builder_hook.take()
     }
 
-    pub fn session_hook(&mut self) -> Option<BoxedSessionHook> {
+    pub(crate) fn session_hook(&mut self) -> Option<BoxedSessionHook> {
         self.session_hook.take()
     }
 }

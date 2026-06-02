@@ -558,7 +558,7 @@ pub(crate) struct OSDotNetHelper {
 }
 
 impl OSDotNetHelper {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             perf_maps: false,
             perf_map_procs: None,
@@ -697,15 +697,15 @@ impl Default for LinuxDotNetProvider {
 }
 
 impl LinuxDotNetProvider {
-    pub fn has_named_events(&self) -> bool {
+    pub(crate) fn has_named_events(&self) -> bool {
         !self.named_events.is_empty()
     }
 
-    pub fn has_callbacks(&self) -> bool {
+    pub(crate) fn has_callbacks(&self) -> bool {
         !self.callbacks.is_empty()
     }
 
-    pub fn set_filter_args(
+    pub(crate) fn set_filter_args(
         &mut self,
         filter_args: String) -> anyhow::Result<()> {
         if self.filter_args.is_some() {
@@ -717,7 +717,7 @@ impl LinuxDotNetProvider {
         Ok(())
     }
 
-    pub fn record_provider(
+    pub(crate) fn record_provider(
         &mut self,
         provider_name: &str,
         keyword: u64,
@@ -842,7 +842,7 @@ impl LinuxDotNetProvider {
         }
     }
 
-    pub fn add_named_event(
+    pub(crate) fn add_named_event(
         &mut self,
         name: String,
         event: LinuxDotNetEvent,
@@ -866,7 +866,7 @@ impl LinuxDotNetProvider {
             .push(event);
     }
 
-    pub fn add_event(
+    pub(crate) fn add_event(
         &mut self,
         dotnet_id: usize,
         event: LinuxDotNetEvent) {
@@ -878,7 +878,7 @@ impl LinuxDotNetProvider {
             .push(event);
     }
 
-    pub fn proxy_id_to_events(
+    pub(crate) fn proxy_id_to_events(
         &self,
         proxy_id_set: &HashSet<usize>,
         dotnet_id_set: &mut HashSet<usize>) {
@@ -905,7 +905,7 @@ struct DotNetEventDesc {
 }
 
 impl DotNetEventDesc {
-    pub fn new(name: &str) -> Self {
+    pub(crate) fn new(name: &str) -> Self {
         Self {
             name: name.to_string(),
         }
@@ -1118,14 +1118,14 @@ pub(crate) struct OSDotNetEventFactory {
 }
 
 impl OSDotNetEventFactory {
-    pub fn new(proxy: impl FnMut(String, usize) -> Option<Event> + 'static) -> Self {
+    pub(crate) fn new(proxy: impl FnMut(String, usize) -> Option<Event> + 'static) -> Self {
         Self {
             proxy: Box::new(proxy),
             providers: Writable::new(HashMap::new()),
         }
     }
 
-    pub fn hook_to_exporter(
+    pub(crate) fn hook_to_exporter(
         &mut self,
         exporter: UniversalExporter) -> UniversalExporter {
         let fn_providers = self.providers.clone();
@@ -1356,7 +1356,7 @@ impl OSDotNetEventFactory {
         })
     }
 
-    pub fn record_provider(
+    pub(crate) fn record_provider(
         &mut self,
         provider_name: &str,
         keyword: u64,
@@ -1370,7 +1370,7 @@ impl OSDotNetEventFactory {
             .record_provider(provider_name, keyword, level, flags)
     }
 
-    pub fn set_filter_args(
+    pub(crate) fn set_filter_args(
         &mut self,
         provider_name: &str,
         filter_args: String) -> anyhow::Result<()> {
@@ -1382,7 +1382,7 @@ impl OSDotNetEventFactory {
             .set_filter_args(filter_args)
     }
 
-    pub fn new_event(
+    pub(crate) fn new_event(
         &mut self,
         provider_name: &str,
         keyword: u64,

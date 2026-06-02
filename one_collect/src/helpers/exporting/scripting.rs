@@ -366,31 +366,31 @@ impl ScriptTimeline {
         }
     }
 
-    pub fn with_min_ns(
+    pub(crate) fn with_min_ns(
         &mut self,
         nanos: i64) {
         self.timeline.borrow_mut().set_min_duration(Duration::from_nanos(nanos as u64));
     }
 
-    pub fn with_min_us(
+    pub(crate) fn with_min_us(
         &mut self,
         micros: i64) {
         self.timeline.borrow_mut().set_min_duration(Duration::from_micros(micros as u64));
     }
 
-    pub fn with_min_ms(
+    pub(crate) fn with_min_ms(
         &mut self,
         millis: i64) {
         self.timeline.borrow_mut().set_min_duration(Duration::from_millis(millis as u64));
     }
 
-    pub fn with_min_secs(
+    pub(crate) fn with_min_secs(
         &mut self,
         secs: i64) {
         self.timeline.borrow_mut().set_min_duration(Duration::from_secs(secs as u64));
     }
 
-    pub fn apply(
+    pub(crate) fn apply(
         self,
         exporter: &mut UniversalExporterSwapper) -> Result<(), Box<EvalAltResult>> {
         match self.timeline.borrow_mut().apply(exporter) {
@@ -399,7 +399,7 @@ impl ScriptTimeline {
         }
     }
 
-    pub fn with_event_one(
+    pub(crate) fn with_event_one(
         &mut self,
         event: ScriptEvent,
         id_field: String,
@@ -410,7 +410,7 @@ impl ScriptTimeline {
         self.with_event(event, &fields, flags)
     }
 
-    pub fn with_event_two(
+    pub(crate) fn with_event_two(
         &mut self,
         event: ScriptEvent,
         id_field_one: String,
@@ -423,7 +423,7 @@ impl ScriptTimeline {
         self.with_event(event, &fields, flags)
     }
 
-    pub fn with_event_three(
+    pub(crate) fn with_event_three(
         &mut self,
         event: ScriptEvent,
         id_field_one: String,
@@ -438,7 +438,7 @@ impl ScriptTimeline {
         self.with_event(event, &fields, flags)
     }
 
-    pub fn with_event_four(
+    pub(crate) fn with_event_four(
         &mut self,
         event: ScriptEvent,
         id_field_one: String,

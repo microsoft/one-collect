@@ -86,7 +86,7 @@ impl FrameOffsets {
 }
 
 #[derive(Default)]
-pub struct Unwinder {
+pub(crate) struct Unwinder {
     frame_cache: HashMap<ModuleKey, FrameOffsets>,
     frame_table: FrameHeaderTable,
     registers: Vec<u64>,
@@ -96,7 +96,7 @@ pub struct Unwinder {
 }
 
 impl Unwinder {
-    pub fn new() -> Self { Self::default() }
+    pub(crate) fn new() -> Self { Self::default() }
 
     fn stack_value(
         rsp: u64,

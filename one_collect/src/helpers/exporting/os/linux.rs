@@ -43,7 +43,7 @@ pub(crate) struct OSExportProcess {
 }
 
 impl OSExportProcess {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             root_fs: None,
         }
@@ -633,7 +633,7 @@ pub(crate) struct OSExportSettings {
 }
 
 impl OSExportSettings {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             process_fs: true,
         }
@@ -759,7 +759,7 @@ pub(crate) struct OSExportMachine {
 }
 
 impl OSExportMachine {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             cswitches: HashMap::new(),
             dev_nodes: ExportDevNodeLookup::new(),
@@ -1345,7 +1345,7 @@ struct ExportDevNodeLookup {
 }
 
 impl ExportDevNodeLookup {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             fds: HashMap::new(),
         }
@@ -1363,7 +1363,7 @@ impl ExportDevNodeLookup {
         self.fds.entry(key)
     }
 
-    pub fn open(
+    pub(crate) fn open(
         &self,
         node: &ExportDevNode) -> Option<File> {
         match self.fds.get(node) {

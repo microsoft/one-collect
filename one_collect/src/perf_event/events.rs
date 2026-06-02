@@ -3,7 +3,7 @@
 
 use super::{EventField, Event, LocationType};
 
-pub fn lost() -> Event {
+pub(crate) fn lost() -> Event {
     let mut event = Event::new(0, "__lost".into());
     let mut offset: usize = 0;
     let len: usize;
@@ -24,7 +24,7 @@ pub fn lost() -> Event {
     event
 }
 
-pub fn comm() -> Event {
+pub(crate) fn comm() -> Event {
     let mut event = Event::new(0, "__comm".into());
     let mut offset: usize = 0;
     let len: usize;
@@ -50,7 +50,7 @@ pub fn comm() -> Event {
     event
 }
 
-pub fn exit() -> Event {
+pub(crate) fn exit() -> Event {
     let mut event = Event::new(0, "__exit".into());
     let mut offset: usize = 0;
     let mut len: usize;
@@ -87,7 +87,7 @@ pub fn exit() -> Event {
     event
 }
 
-pub fn fork() -> Event {
+pub(crate) fn fork() -> Event {
     let mut event = Event::new(0, "__fork".into());
     let mut offset: usize = 0;
     let mut len: usize;
@@ -124,7 +124,7 @@ pub fn fork() -> Event {
     event
 }
 
-pub fn mmap() -> Event {
+pub(crate) fn mmap() -> Event {
     let mut event = Event::new(0, "__mmap".into());
     let mut offset: usize = 0;
     let mut len: usize;
@@ -199,7 +199,7 @@ pub fn mmap() -> Event {
     event
 }
 
-pub fn lost_samples() -> Event {
+pub(crate) fn lost_samples() -> Event {
     let mut event = Event::new(0, "__lost_samples".into());
     let offset: usize = 0;
     let len: usize;
@@ -215,7 +215,7 @@ pub fn lost_samples() -> Event {
     event
 }
 
-pub fn cswitch() -> Event {
+pub(crate) fn cswitch() -> Event {
     let mut event = Event::new(0, "__cswitch".into());
     let mut offset: usize = 0;
     let len: usize;

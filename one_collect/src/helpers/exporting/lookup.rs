@@ -10,7 +10,7 @@ pub(crate) struct AddressLookupItem {
 }
 
 impl AddressLookupItem {
-    pub fn new(
+    pub(crate) fn new(
         address: u64,
         index: u32,
         valid: bool) -> Self {
@@ -29,11 +29,11 @@ pub(crate) struct AddressLookup {
 }
 
 impl AddressLookup {
-    pub fn is_empty(&self) -> bool { self.lookup.is_empty() }
+    pub(crate) fn is_empty(&self) -> bool { self.lookup.is_empty() }
 
-    pub fn clear(&mut self) { self.lookup.clear(); }
+    pub(crate) fn clear(&mut self) { self.lookup.clear(); }
 
-    pub fn find(
+    pub(crate) fn find(
         &mut self,
         address: u64) -> &[u32] {
         let mut index = self.lookup.partition_point(
@@ -59,7 +59,7 @@ impl AddressLookup {
         &self.index
     }
 
-    pub fn update(
+    pub(crate) fn update(
         &mut self,
         items: &mut Vec<AddressLookupItem>) {
         let mut index_set = HashSet::new();

@@ -10,7 +10,7 @@ pub use windows::*;
 
 /* Linux */
 #[cfg(any(doc, target_os = "linux"))]
-pub mod linux;
+pub(crate) mod linux;
 
 #[cfg(target_os = "linux")]
-pub use linux::*;
+pub(crate) use linux::*;

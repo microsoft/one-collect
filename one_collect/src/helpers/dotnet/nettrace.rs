@@ -6,9 +6,9 @@
 
 const EMPTY: &[u8] = &[];
 
-pub const LABEL_META: u8 = 1;
-pub const LABEL_ACTIVITY: u8 = 2;
-pub const LABEL_RELATED_ACTIVITY: u8 = 3;
+pub(crate) const LABEL_META: u8 = 1;
+pub(crate) const LABEL_ACTIVITY: u8 = 2;
+pub(crate) const LABEL_RELATED_ACTIVITY: u8 = 3;
 
 const U32_LEN: usize = 4;
 const U64_LEN: usize = 8;
@@ -16,7 +16,7 @@ const GUID_LEN: usize = 16;
 
 use crate::event::{LocationType, EventFormat, EventField};
 
-pub fn parse_event_extension_v1(
+pub(crate) fn parse_event_extension_v1(
     data: &[u8],
     mut output: impl FnMut(u8, &[u8])) {
     let mut extension = data;
@@ -92,7 +92,7 @@ pub fn parse_event_extension_v1(
     }
 }
 
-pub struct FieldsParserV5 {
+pub(crate) struct FieldsParserV5 {
 }
 
 struct FieldType {
@@ -451,7 +451,7 @@ impl FieldsParserV5 {
         fields
     }
 
-    pub fn parse(mut fields: &[u8]) -> EventFormat {
+    pub(crate) fn parse(mut fields: &[u8]) -> EventFormat {
         let mut format = EventFormat::default();
 
         Self::parse_object(fields, &mut format, 1);
@@ -460,7 +460,7 @@ impl FieldsParserV5 {
     }
 }
 
-pub struct MetaParserV5<'a> {
+pub(crate) struct MetaParserV5<'a> {
     provider_name: &'a [u8],
     event_id: &'a [u8],
     event_name: &'a [u8],
@@ -471,11 +471,11 @@ pub struct MetaParserV5<'a> {
 }
 
 impl<'a> MetaParserV5<'a> {
-    pub fn event_id(&self) -> Option<u32> {
+    pub(crate) fn event_id(&self) -> Option<u32> {
         Self::read_int(self.event_id)
     }
 
-    pub fn provider_name(
+    pub(crate) fn provider_name(
         &self,
         output: &mut String) {
         output.clear();
@@ -485,7 +485,7 @@ impl<'a> MetaParserV5<'a> {
             output);
     }
 
-    pub fn event_name(
+    pub(crate) fn event_name(
         &self,
         output: &mut String) {
         output.clear();
@@ -495,19 +495,19 @@ impl<'a> MetaParserV5<'a> {
             output);
     }
 
-    pub fn keywords(&self) -> Option<u64> {
+    pub(crate) fn keywords(&self) -> Option<u64> {
         Self::read_long(self.keywords)
     }
 
-    pub fn version(&self) -> Option<u32> {
+    pub(crate) fn version(&self) -> Option<u32> {
         Self::read_int(self.version)
     }
 
-    pub fn level(&self) -> Option<u32> {
+    pub(crate) fn level(&self) -> Option<u32> {
         Self::read_int(self.level)
     }
 
-    pub fn fields(&self) -> &'a [u8] { self.fields }
+    pub(crate) fn fields(&self) -> &'a [u8] { self.fields }
 
     fn push_unicode_string(
         data: &[u8],
@@ -563,7 +563,7 @@ impl<'a> MetaParserV5<'a> {
         }
     }
 
-    pub fn parse(data: &'a [u8]) -> Self {
+    pub(crate) fn parse(data: &'a [u8]) -> Self {
         let mut buffer = data;
 
         /* ProviderName */

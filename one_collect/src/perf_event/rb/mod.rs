@@ -494,14 +494,14 @@ pub(crate) struct CommonRingBuf {
 }
 
 impl CommonRingBuf {
-    pub fn new(
+    pub(crate) fn new(
         attributes: perf_event_attr) -> Self {
         Self {
             attributes: Rc::new(attributes),
         }
     }
 
-    pub fn without_callstack(
+    pub(crate) fn without_callstack(
         self) -> Self {
         /* If no callchain/stack, then don't do anything */
         if !self.attributes.has_format(PERF_SAMPLE_CALLCHAIN) &&
@@ -524,7 +524,7 @@ impl CommonRingBuf {
         clone
     }
 
-    pub fn for_cpu(
+    pub(crate) fn for_cpu(
         &self,
         cpu: u32) -> CpuRingBuf {
         CpuRingBuf::new(
@@ -540,7 +540,7 @@ pub(crate) struct CpuRingCursor {
 }
 
 impl CpuRingCursor {
-    pub fn set(
+    pub(crate) fn set(
         &mut self,
         start: u64,
         end: u64) {
@@ -548,17 +548,17 @@ impl CpuRingCursor {
         self.end = end;
     }
 
-    pub fn advance(
+    pub(crate) fn advance(
         &mut self,
         len: u16) {
         self.start += len as u64;
     }
 
-    pub fn more(&self) -> bool {
+    pub(crate) fn more(&self) -> bool {
         self.start < self.end
     }
 
-    pub fn start(&self) -> u64 {
+    pub(crate) fn start(&self) -> u64 {
         self.start
     }
 }
@@ -573,7 +573,7 @@ pub(crate) struct CpuRingReader {
 }
 
 impl<'a> CpuRingReader {
-    pub fn new(
+    pub(crate) fn new(
         pages: *mut u8,
         pages_len: usize) -> Self {
         let slice = unsafe {
@@ -603,7 +603,7 @@ impl<'a> CpuRingReader {
         }
     }
 
-    pub fn new_unowned(
+    pub(crate) fn new_unowned(
         pages: *mut u8,
         pages_len: usize) -> Self {
         let mut reader = Self::new(pages, pages_len);
@@ -619,7 +619,7 @@ impl<'a> CpuRingReader {
         }
     }
 
-    pub fn begin_reading(
+    pub(crate) fn begin_reading(
         &self,
         cursor: &mut CpuRingCursor) {
         let head = self.head();
@@ -638,7 +638,7 @@ impl<'a> CpuRingReader {
         );
     }
 
-    pub fn data_slice(
+    pub(crate) fn data_slice(
         &'a self) -> &'a [u8] {
         let slice = self.slice();
         let data_start = self.data_offset as usize;
@@ -646,7 +646,7 @@ impl<'a> CpuRingReader {
         &slice[data_start..data_end]
     }
 
-    pub fn peek_header(
+    pub(crate) fn peek_header(
         &'a self,
         cursor: &CpuRingCursor,
         data_slice: &'a [u8],
@@ -667,7 +667,7 @@ impl<'a> CpuRingReader {
         }
     }
 
-    pub fn peek_u64(
+    pub(crate) fn peek_u64(
         &self,
         cursor: &CpuRingCursor,
         offset: u64) -> u64 {
@@ -678,7 +678,7 @@ impl<'a> CpuRingReader {
         u64::from_ne_bytes(data_slice[start..end].try_into().unwrap())
     }
 
-    pub fn read(
+    pub(crate) fn read(
         &'a self,
         cursor: &mut CpuRingCursor,
         temp: &'a mut Vec<u8>) -> IOResult<&'a [u8]> {
@@ -717,7 +717,7 @@ impl<'a> CpuRingReader {
         }
     }
 
-    pub fn end_reading(
+    pub(crate) fn end_reading(
         &mut self,
         cursor: &CpuRingCursor) {
         trace!("end_reading: updating tail to {:#x}", cursor.start());
@@ -760,7 +760,7 @@ pub(crate) struct CpuRingBuf {
 }
 
 impl CpuRingBuf {
-    pub fn new(
+    pub(crate) fn new(
         cpu: u32,
         attributes: Rc<perf_event_attr>) -> Self {
         let mut sample_time_offset = abi::Header::data_offset() as u16;
@@ -791,7 +791,7 @@ impl CpuRingBuf {
         }
     }
 
-    pub fn ancillary(&self) -> AncillaryData {
+    pub(crate) fn ancillary(&self) -> AncillaryData {
         AncillaryData {
             cpu: self.cpu,
             attributes: self.attributes.clone(),
@@ -827,19 +827,19 @@ impl CpuRingBuf {
         }
     }
 
-    pub fn sample_time_offset(&self) -> u16 {
+    pub(crate) fn sample_time_offset(&self) -> u16 {
         self.sample_time_offset
     }
 
-    pub fn id(&self) -> Option<u64> {
+    pub(crate) fn id(&self) -> Option<u64> {
         self.id
     }
 
-    pub fn is_open(&self) -> bool {
+    pub(crate) fn is_open(&self) -> bool {
         self.fd.is_some()
     }
 
-    pub fn open(
+    pub(crate) fn open(
         &mut self,
         target_pid: Option<i32>) -> IOResult<()> {
         let pid = target_pid.unwrap_or(-1);
@@ -862,7 +862,7 @@ impl CpuRingBuf {
         Ok(())
     }
 
-    pub fn create_reader(
+    pub(crate) fn create_reader(
         &self,
         page_count: usize) -> IOResult<CpuRingReader> {
         if self.fd.is_none() {
@@ -905,7 +905,7 @@ impl CpuRingBuf {
         }
     }
 
-    pub fn enable(
+    pub(crate) fn enable(
         &self) -> IOResult<()> {
         if self.fd.is_none() {
             warn!("enable failed: ring buffer not open, cpu={}", self.cpu);
@@ -930,7 +930,7 @@ impl CpuRingBuf {
         Ok(())
     }
 
-    pub fn disable(
+    pub(crate) fn disable(
         &self) -> IOResult<()> {
         if self.fd.is_none() {
             warn!("disable failed: ring buffer not open, cpu={}", self.cpu);
@@ -955,7 +955,7 @@ impl CpuRingBuf {
         Ok(())
     }
 
-    pub fn redirect_to(
+    pub(crate) fn redirect_to(
         &self, 
         target: &Self) -> IOResult<()> {
         if self.fd.is_none() || target.fd.is_none() {
@@ -991,7 +991,7 @@ impl CpuRingBuf {
         }
     }
 
-    pub fn set_filter(&self, filter: &std::ffi::CStr) -> IOResult<()> {
+    pub(crate) fn set_filter(&self, filter: &std::ffi::CStr) -> IOResult<()> {
         if self.fd.is_none() {
             warn!("set_filter failed: ring buffer not open, cpu={}", self.cpu);
             return Err(io_error("Ring buffer is not open."));
@@ -1070,7 +1070,7 @@ unsafe impl Send for InProcessRingBufWriter {}
 impl InProcessRingBuf {
     /// Create a new in-process ring buffer with the given number of data pages.
     /// The data_pages value will be rounded up to the next power of two.
-    pub fn new(data_pages: usize) -> Self {
+    pub(crate) fn new(data_pages: usize) -> Self {
         let page_size = unsafe { sysconf(_SC_PAGE_SIZE) as usize };
         let data_pages = data_pages.next_power_of_two();
         let data_size = data_pages * page_size;
@@ -1103,7 +1103,7 @@ impl InProcessRingBuf {
 
     /// Create a `CpuRingReader` that reads from this buffer's memory.
     /// The reader does NOT own the memory.
-    pub fn create_reader(&mut self) -> CpuRingReader {
+    pub(crate) fn create_reader(&mut self) -> CpuRingReader {
         CpuRingReader::new_unowned(
             self.data.as_mut_ptr(),
             self.data.len())
@@ -1116,7 +1116,7 @@ impl InProcessRingBuf {
     /// The returned `InProcessRingBufWriter` holds a raw pointer into
     /// `self.data`. The caller must ensure that `self` outlives both the
     /// writer and the reader.
-    pub fn writer(&mut self) -> InProcessRingBufWriter {
+    pub(crate) fn writer(&mut self) -> InProcessRingBufWriter {
         InProcessRingBufWriter {
             data: self.data.as_mut_ptr(),
             data_offset: self.data_offset,

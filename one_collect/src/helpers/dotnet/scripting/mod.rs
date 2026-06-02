@@ -115,9 +115,9 @@ pub (crate) struct DotNetSample {
 }
 
 impl DotNetSample {
-    pub fn record(&self) -> bool { self.record }
+    pub(crate) fn record(&self) -> bool { self.record }
 
-    pub fn take(self) -> (Event, Box<dyn FnMut(&[u8]) -> anyhow::Result<MetricValue>>) {
+    pub(crate) fn take(self) -> (Event, Box<dyn FnMut(&[u8]) -> anyhow::Result<MetricValue>>) {
         (self.event, self.sample_value)
     }
 }
@@ -130,11 +130,11 @@ pub (crate) struct DotNetEventGroup {
 }
 
 impl DotNetEventGroup {
-    pub fn events(&self) -> &Vec<DotNetEvent> { &self.events }
+    pub(crate) fn events(&self) -> &Vec<DotNetEvent> { &self.events }
 
-    pub fn keyword(&self) -> u64 { self.keyword }
+    pub(crate) fn keyword(&self) -> u64 { self.keyword }
 
-    pub fn level(&self) -> u8 { self.level }
+    pub(crate) fn level(&self) -> u8 { self.level }
 
     const fn update_keyword(
         &mut self,
@@ -176,10 +176,10 @@ impl DotNetProviderFlags {
     }
 
     #[allow(dead_code)]
-    pub fn callstacks(&self) -> bool { self.callstacks }
+    pub(crate) fn callstacks(&self) -> bool { self.callstacks }
 
     #[allow(dead_code)]
-    pub fn callstack_keywords(&self) -> u64 { self.callstack_keywords }
+    pub(crate) fn callstack_keywords(&self) -> u64 { self.callstack_keywords }
 }
 
 impl CustomType for DotNetProviderFlags {

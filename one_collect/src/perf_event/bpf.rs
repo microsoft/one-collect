@@ -36,7 +36,7 @@ struct bpf_element {
     flags: u64,
 }
 
-pub fn bpf_get_map_fd_by_path(
+pub(crate) fn bpf_get_map_fd_by_path(
     path: &std::ffi::CStr) -> IOResult<i32> {
     let mut obj = bpf_obj::default();
     obj.pathname = path.as_ptr() as u64;
@@ -53,7 +53,7 @@ pub fn bpf_get_map_fd_by_path(
     }
 }
 
-pub fn bpf_get_map_fd(
+pub(crate) fn bpf_get_map_fd(
     id: u32) -> IOResult<i32> {
     let mut get = bpf_get_id::default();
     get.start_id = id;
@@ -70,7 +70,7 @@ pub fn bpf_get_map_fd(
     }
 }
 
-pub fn bpf_set_map_element(
+pub(crate) fn bpf_set_map_element(
     fd: i32,
     key: u64,
     value: u64) -> IOResult<()> {

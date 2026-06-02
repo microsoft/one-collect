@@ -5,7 +5,7 @@ use super::*;
 use crate::event::*;
 
 impl DotNetScenario {
-    pub fn build_runtime(builder: &mut TypeBuilder<Self>) {
+    pub(crate) fn build_runtime(builder: &mut TypeBuilder<Self>) {
         builder
             .with_fn("with_exceptions", Self::with_exceptions)
             .with_fn("with_gc_times", Self::with_gc_times)
@@ -24,7 +24,7 @@ impl DotNetScenario {
             .with_fn("with_arm_allocs", Self::with_arm_allocs);
     }
 
-    pub fn add_runtime_samples(
+    pub(crate) fn add_runtime_samples(
         &self,
         factory: &mut OSDotNetEventFactory,
         mut add_sample: impl FnMut(DotNetSample)) {
@@ -1209,7 +1209,7 @@ impl DotNetScenario {
         }
     }
 
-    pub fn with_arm_threads(&mut self) {
+    pub(crate) fn with_arm_threads(&mut self) {
         /* Created */
         self.runtime.add(
             DotNetEvent {
@@ -1235,7 +1235,7 @@ impl DotNetScenario {
             });
     }
 
-    pub fn with_arm_allocs(&mut self) {
+    pub(crate) fn with_arm_allocs(&mut self) {
         /* Alloc */
         self.runtime.add(
             DotNetEvent {
@@ -1253,7 +1253,7 @@ impl DotNetScenario {
             });
     }
 
-    pub fn with_tp_worker_threads(&mut self) {
+    pub(crate) fn with_tp_worker_threads(&mut self) {
         /* Start */
         self.runtime.add(
             DotNetEvent {
@@ -1287,7 +1287,7 @@ impl DotNetScenario {
             });
     }
 
-    pub fn with_tp_worker_thread_adjustments(&mut self) {
+    pub(crate) fn with_tp_worker_thread_adjustments(&mut self) {
         /* Sample */
         self.runtime.add(
             DotNetEvent {
@@ -1313,7 +1313,7 @@ impl DotNetScenario {
             });
     }
 
-    pub fn with_tp_io_threads(&mut self) {
+    pub(crate) fn with_tp_io_threads(&mut self) {
         /* Retire */
         self.runtime.add(
             DotNetEvent {
@@ -1339,7 +1339,7 @@ impl DotNetScenario {
             });
     }
 
-    pub fn with_contentions(&mut self) {
+    pub(crate) fn with_contentions(&mut self) {
         /* Start */
         self.runtime.add(
             DotNetEvent {
@@ -1357,7 +1357,7 @@ impl DotNetScenario {
             });
     }
 
-    pub fn with_exceptions(&mut self) {
+    pub(crate) fn with_exceptions(&mut self) {
         self.runtime.add(
             DotNetEvent {
                 id: 80,
@@ -1366,7 +1366,7 @@ impl DotNetScenario {
             });
     }
 
-    pub fn with_gc_finalizers(&mut self) {
+    pub(crate) fn with_gc_finalizers(&mut self) {
         /* Start */
         self.runtime.add(
             DotNetEvent {
@@ -1384,7 +1384,7 @@ impl DotNetScenario {
             });
     }
 
-    pub fn with_gc_suspends(&mut self) {
+    pub(crate) fn with_gc_suspends(&mut self) {
         /* Start */
         self.runtime.add(
             DotNetEvent {
@@ -1402,7 +1402,7 @@ impl DotNetScenario {
             });
     }
 
-    pub fn with_gc_restarts(&mut self) {
+    pub(crate) fn with_gc_restarts(&mut self) {
         /* Start */
         self.runtime.add(
             DotNetEvent {
@@ -1420,7 +1420,7 @@ impl DotNetScenario {
             });
     }
 
-    pub fn with_gc_concurrent_threads(&mut self) {
+    pub(crate) fn with_gc_concurrent_threads(&mut self) {
         /* Create */
         self.runtime.add(
             DotNetEvent {
@@ -1438,7 +1438,7 @@ impl DotNetScenario {
             });
     }
 
-    pub fn with_gc_segments(&mut self) {
+    pub(crate) fn with_gc_segments(&mut self) {
         /* Create */
         self.runtime.add(
             DotNetEvent {
@@ -1456,7 +1456,7 @@ impl DotNetScenario {
             });
     }
 
-    pub fn with_gc_allocs(&mut self) {
+    pub(crate) fn with_gc_allocs(&mut self) {
         self.runtime.add(
             DotNetEvent {
                 id: 10,
@@ -1465,7 +1465,7 @@ impl DotNetScenario {
             });
     }
 
-    pub fn with_gc_stats(&mut self) {
+    pub(crate) fn with_gc_stats(&mut self) {
         self.runtime.add(
             DotNetEvent {
                 id: 4,
@@ -1474,7 +1474,7 @@ impl DotNetScenario {
             });
     }
 
-    pub fn with_gc_times(&mut self) {
+    pub(crate) fn with_gc_times(&mut self) {
         self.runtime.add(
             DotNetEvent {
                 id: 1,

@@ -384,34 +384,34 @@ impl ExportSampler {
         Ok(self.exporter.borrow_mut().span_to_value(span))
     }
 
-    pub fn label_attribute(
+    pub(crate) fn label_attribute(
         &mut self,
         name: &str,
         label: &str) -> ExportAttributePair {
         self.exporter.borrow_mut().label_attribute(name, label)
     }
 
-    pub fn value_attribute(
+    pub(crate) fn value_attribute(
         &mut self,
         name: &str,
         value: u64) -> ExportAttributePair {
         self.exporter.borrow_mut().value_attribute(name, value)
     }
 
-    pub fn record_type(
+    pub(crate) fn record_type(
         &mut self,
         record_type: ExportRecordType) -> u16 {
         self.exporter.borrow_mut().record_type(record_type)
     }
 
-    pub fn record_data(
+    pub(crate) fn record_data(
         &mut self,
         record_type_id: u16,
         data: &[u8]) ->usize {
         self.exporter.borrow_mut().record_data(record_type_id, data)
     }
 
-    pub fn kind(
+    pub(crate) fn kind(
         &mut self,
         kind: &str) -> u16 {
         self.exporter.borrow_mut().sample_kind(kind)
