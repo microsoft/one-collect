@@ -566,15 +566,24 @@ impl EventFormat {
 
                 let slice = &data[offset..];
 
-                if slice.len() <= 2 {
-                    /* Out of bounds */
+                if slice.len() < 2 {
+                    /* Not enough data for the u16 length prefix */
                     return EMPTY;
                 }
 
                 let len = u16::from_ne_bytes(
                     slice[0..2].try_into().unwrap()) as usize;
 
-                let bytes = len * size;
+                /* When size is 0, default to byte-counted (element_size=1).
+                 * This handles counted string fields where the u16 prefix
+                 * is a byte count. */
+                let element_size = if size == 0 { 1 } else { size };
+                let bytes = len * element_size;
+
+                if 2 + bytes > slice.len() {
+                    /* Out of bounds */
+                    return EMPTY;
+                }
 
                 &slice[2..2+bytes]
             },
@@ -1080,9 +1089,11 @@ impl EventFormat {
                             }
                         }));
                     },
-                    "char" | "unsigned char" | "string" | "wstring" => {
+                    "char" | "unsigned char" | "string" | "wstring" | "counted_string" | "counted_wstring" => {
                         if field.location == LocationType::StaticUTF16String ||
-                            &field.type_name == "wstring" {
+                            &field.type_name == "wstring" ||
+                            &field.type_name == "counted_string" ||
+                            &field.type_name == "counted_wstring" {
                             return Some(Box::new(move |write, data| {
                                 let field_data = data_closure(data);
                                 let chunks = field_data.chunks_exact(2);
@@ -1156,10 +1167,15 @@ impl EventFormat {
                 }
 
                 match type_name {
-                    "u8" | "s8" | "char" => Some(1),
-                    "u16" | "s16" | "short" => Some(2),
-                    "u32" | "s32" | "int" => Some(4),
-                    "u64" | "s64" | "long" => Some(8),
+                    // Element size = 1 byte for all string variants.
+                    // The u16 length prefix in StaticLenPrefixArray is a
+                    // *byte* count (not a code-unit count), so even UTF-16
+                    // counted strings use element_size = 1 here.
+                    "u8" | "s8" | "char" | "counted_string" | "counted_wstring"
+                    | "string" | "wstring"                   => Some(1),
+                    "u16" | "s16" | "short"                  => Some(2),
+                    "u32" | "s32" | "int"                    => Some(4),
+                    "u64" | "s64" | "long"                   => Some(8),
                     _ => { None },
                 }
             },
@@ -2756,5 +2772,180 @@ mod tests {
 
         let range = format.get_rel_loc(rel_data, &data).unwrap();
         assert_eq!(data[8..12], data[range]);
+    }
+
+    // ── StaticLenPrefixArray (counted string) tests ─────────────
+
+    #[test]
+    fn counted_string_data_closure_single_field() {
+        // A single counted_string field at offset 0.
+        // Wire format: [u16 byte_count] [payload bytes]
+        let mut format = EventFormat::new();
+        format.add_field(EventField::new(
+            "Msg".into(), "counted_string".into(),
+            LocationType::StaticLenPrefixArray, 0, 0,
+        ));
+
+        // "Hello" as counted ANSI: len=5, then 5 ASCII bytes
+        let mut data = Vec::new();
+        data.extend_from_slice(&5u16.to_ne_bytes()); // byte count
+        data.extend_from_slice(b"Hello");
+
+        let mut closure = format.try_get_field_data_closure("Msg")
+            .expect("closure for counted_string");
+        assert_eq!(closure(&data), b"Hello");
+    }
+
+    #[test]
+    fn counted_string_data_closure_empty_string() {
+        let mut format = EventFormat::new();
+        format.add_field(EventField::new(
+            "Msg".into(), "counted_string".into(),
+            LocationType::StaticLenPrefixArray, 0, 0,
+        ));
+
+        // Empty counted string: len=0, no payload
+        let data = 0u16.to_ne_bytes().to_vec();
+
+        let mut closure = format.try_get_field_data_closure("Msg")
+            .expect("closure for empty counted_string");
+        assert_eq!(closure(&data), b"");
+    }
+
+    #[test]
+    fn counted_string_data_closure_out_of_bounds() {
+        let mut format = EventFormat::new();
+        format.add_field(EventField::new(
+            "Msg".into(), "counted_string".into(),
+            LocationType::StaticLenPrefixArray, 0, 0,
+        ));
+
+        // byte_count says 10 but only 3 bytes of payload
+        let mut data = Vec::new();
+        data.extend_from_slice(&10u16.to_ne_bytes());
+        data.extend_from_slice(b"abc");
+
+        let mut closure = format.try_get_field_data_closure("Msg")
+            .expect("closure for truncated counted_string");
+        // Should return EMPTY (safe, no panic)
+        assert_eq!(closure(&data), EMPTY);
+    }
+
+    #[test]
+    fn counted_string_followed_by_scalar() {
+        // counted_string + u32: tests the skip chain.
+        // The u32 field's offset must be resolved dynamically
+        // by skipping past the counted string's length-prefix + payload.
+        let mut format = EventFormat::new();
+        format.add_field(EventField::new(
+            "Name".into(), "counted_string".into(),
+            LocationType::StaticLenPrefixArray, 0, 0,
+        ));
+        format.add_field(EventField::new(
+            "Code".into(), "u32".into(),
+            LocationType::Static, 0, 4,
+        ));
+
+        // "Hi" (2 bytes) + u32(42)
+        let mut data = Vec::new();
+        data.extend_from_slice(&2u16.to_ne_bytes()); // byte count
+        data.extend_from_slice(b"Hi");
+        data.extend_from_slice(&42u32.to_ne_bytes());
+
+        let mut name_closure = format.try_get_field_data_closure("Name")
+            .expect("closure for Name");
+        assert_eq!(name_closure(&data), b"Hi");
+
+        let mut code_closure = format.try_get_field_data_closure("Code")
+            .expect("closure for Code after counted_string");
+        assert_eq!(code_closure(&data), &42u32.to_ne_bytes());
+    }
+
+    #[test]
+    fn two_counted_strings_followed_by_scalar() {
+        // Two consecutive counted_string fields + u64.
+        let mut format = EventFormat::new();
+        format.add_field(EventField::new(
+            "First".into(), "counted_string".into(),
+            LocationType::StaticLenPrefixArray, 0, 0,
+        ));
+        format.add_field(EventField::new(
+            "Second".into(), "counted_string".into(),
+            LocationType::StaticLenPrefixArray, 0, 0,
+        ));
+        format.add_field(EventField::new(
+            "Val".into(), "u64".into(),
+            LocationType::Static, 0, 8,
+        ));
+
+        // "ABC" (3 bytes) + "DE" (2 bytes) + u64(99)
+        let mut data = Vec::new();
+        data.extend_from_slice(&3u16.to_ne_bytes());
+        data.extend_from_slice(b"ABC");
+        data.extend_from_slice(&2u16.to_ne_bytes());
+        data.extend_from_slice(b"DE");
+        data.extend_from_slice(&99u64.to_ne_bytes());
+
+        let mut first = format.try_get_field_data_closure("First")
+            .expect("First");
+        assert_eq!(first(&data), b"ABC");
+
+        let mut second = format.try_get_field_data_closure("Second")
+            .expect("Second");
+        assert_eq!(second(&data), b"DE");
+
+        let mut val = format.try_get_field_data_closure("Val")
+            .expect("Val");
+        assert_eq!(val(&data), &99u64.to_ne_bytes());
+    }
+
+    #[test]
+    fn scalar_then_counted_string_then_scalar() {
+        // u32 + counted_string + u32: mixed layout.
+        let mut format = EventFormat::new();
+        format.add_field(EventField::new(
+            "Id".into(), "u32".into(),
+            LocationType::Static, 0, 4,
+        ));
+        format.add_field(EventField::new(
+            "Status".into(), "counted_string".into(),
+            LocationType::StaticLenPrefixArray, 4, 0,
+        ));
+        format.add_field(EventField::new(
+            "Time".into(), "double".into(),
+            LocationType::Static, 0, 8,
+        ));
+
+        // Id=7, Status="OK" (2 bytes), Time=1.5
+        let mut data = Vec::new();
+        data.extend_from_slice(&7u32.to_ne_bytes());
+        data.extend_from_slice(&2u16.to_ne_bytes());
+        data.extend_from_slice(b"OK");
+        data.extend_from_slice(&1.5f64.to_ne_bytes());
+
+        let mut id = format.try_get_field_data_closure("Id").expect("Id");
+        assert_eq!(id(&data), &7u32.to_ne_bytes());
+
+        let mut status = format.try_get_field_data_closure("Status").expect("Status");
+        assert_eq!(status(&data), b"OK");
+
+        let mut time = format.try_get_field_data_closure("Time").expect("Time");
+        assert_eq!(time(&data), &1.5f64.to_ne_bytes());
+    }
+
+    #[test]
+    fn counted_string_too_short_for_prefix() {
+        let mut format = EventFormat::new();
+        format.add_field(EventField::new(
+            "Msg".into(), "counted_string".into(),
+            LocationType::StaticLenPrefixArray, 0, 0,
+        ));
+
+        // Only 1 byte — not enough for the u16 prefix
+        let data = vec![0x05];
+
+        let mut closure = format.try_get_field_data_closure("Msg")
+            .expect("closure");
+        assert_eq!(closure(&data), EMPTY);
     }
 }

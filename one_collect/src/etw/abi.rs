@@ -486,6 +486,17 @@ pub(crate) trait EventRecordExt {
     fn processor_index(&self) -> u16;
     fn provider_guid(&self) -> Guid;
     fn activity_guid(&self) -> Guid;
+
+    /// Searches the event's extended-data items for the first entry
+    /// matching `ext_type`.  Returns a pointer to the matching
+    /// [`EVENT_HEADER_EXTENDED_DATA_ITEM`], or `None` if not found.
+    ///
+    /// This is the single central place for extended-data lookup; both
+    /// [`AncillaryData`] and the TDH decoder delegate to this method.
+    fn find_extended_data(
+        &self,
+        ext_type: u16,
+    ) -> Option<*const EVENT_HEADER_EXTENDED_DATA_ITEM>;
 }
 
 // SAFETY guard for the `provider_guid` / `activity_guid` transmutes below.
@@ -523,6 +534,9 @@ const _: () = assert!(
 impl EventRecordExt for EVENT_RECORD {
     #[inline]
     fn user_data_slice(&self) -> &[u8] {
+        if self.UserData.is_null() || self.UserDataLength == 0 {
+            return &[];
+        }
         unsafe {
             std::slice::from_raw_parts(
                 self.UserData as *const u8,
@@ -552,6 +566,25 @@ impl EventRecordExt for EVENT_RECORD {
     fn activity_guid(&self) -> Guid {
         // SAFETY: see `provider_guid` above.
         unsafe { std::mem::transmute(self.EventHeader.ActivityId) }
+    }
+
+    fn find_extended_data(
+        &self,
+        ext_type: u16,
+    ) -> Option<*const EVENT_HEADER_EXTENDED_DATA_ITEM> {
+        if self.ExtendedDataCount == 0 || self.ExtendedData.is_null() {
+            return None;
+        }
+        unsafe {
+            let ext = self.ExtendedData;
+            for i in 0..self.ExtendedDataCount as usize {
+                let item = ext.add(i);
+                if (*item).ExtType == ext_type {
+                    return Some(item);
+                }
+            }
+        }
+        None
     }
 }
 

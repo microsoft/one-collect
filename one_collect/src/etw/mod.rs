@@ -15,11 +15,12 @@ use crate::Guid;
 #[allow(dead_code)]
 mod abi;
 mod events;
+pub mod tdh;
 
 use abi::{
+    EVENT_RECORD,
     TraceSession,
     TraceEnable,
-    EVENT_RECORD,
     EVENT_HEADER_EXTENDED_DATA_ITEM,
     CLASSIC_EVENT_ID,
     EventRecordExt,
@@ -81,6 +82,13 @@ impl AncillaryData {
             },
             None => { 0 },
         }
+    }
+
+    /// Returns a borrow of the current `EVENT_RECORD`, or `None` if no
+    /// event is currently being processed.  The borrow is valid for the
+    /// duration of the ETW callback (same as `&self`).
+    pub fn record(&self) -> Option<&EVENT_RECORD> {
+        self.event.map(|p| unsafe { &*p })
     }
 
     pub fn time(&self) -> u64 {
@@ -206,21 +214,10 @@ impl AncillaryData {
         ext_type: u32) -> Option<*const EVENT_HEADER_EXTENDED_DATA_ITEM> {
         match self.event {
             Some(event) => {
-                unsafe {
-                    let ext = (*event).ExtendedData;
-
-                    for i in 0..(*event).ExtendedDataCount as usize {
-                        let item = ext.add(i);
-
-                        if (*item).ExtType == ext_type as u16 {
-                            return Some(item);
-                        }
-                    }
-
-                    None
-                }
+                // Delegate to the centralized EventRecordExt method.
+                unsafe { (*event).find_extended_data(ext_type as u16) }
             },
-            None => { None},
+            None => None,
         }
     }
 }

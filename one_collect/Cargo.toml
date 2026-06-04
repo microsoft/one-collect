@@ -43,7 +43,7 @@ winreg = "0.55.0"
 # transitively inherited features.
 [dependencies.windows-sys]
 version = "0.59"
-features = ["Win32_System_Diagnostics_Etw"]
+features = ["Win32_Foundation", "Win32_System_Diagnostics_Etw"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2.153"
