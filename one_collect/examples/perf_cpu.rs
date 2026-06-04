@@ -36,7 +36,7 @@ impl Utilization {
     }
 
     #[cfg(target_os = "linux")]
-    pub fn new(session: &mut PerfSession) -> Writable<Self> {
+    fn new(session: &mut PerfSession) -> Writable<Self> {
         let util = Writable::new(Self::create());
 
         /* CPU is ancillary data for perf_event_open */
@@ -66,7 +66,7 @@ impl Utilization {
         util
     }
 
-    pub fn report(&mut self) {
+    fn report(&mut self) {
         let mut all = 0u64;
 
         println!(concat!(

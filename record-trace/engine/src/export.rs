@@ -63,7 +63,7 @@ pub (crate) struct PerfViewExporter {
 }
 
 impl PerfViewExporter {
-    pub fn new() -> Self {
+    pub (crate) fn new() -> Self {
         Self {
         }
     }
@@ -248,7 +248,7 @@ pub (crate) struct NetTraceExporter {
 }
 
 impl NetTraceExporter {
-    pub fn new() -> Self {
+    pub (crate) fn new() -> Self {
         Self {
             output_path: PathBuf::new(),
         }

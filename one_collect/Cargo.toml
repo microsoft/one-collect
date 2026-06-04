@@ -67,6 +67,9 @@ harness = false
 name = "kallsyms"
 harness = false
 
+[lints.rust]
+unreachable_pub = "deny"
+
 [lints.clippy]
 absurd_extreme_comparisons = "deny"
 almost_swapped = "deny"
