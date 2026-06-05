@@ -23,7 +23,7 @@ fn register_soft_pid(
     }
 }
 
-pub fn comm(
+pub(super) fn comm(
     id: usize,
     name: &str) -> Event {
     let mut event = Event::new(id, name.into());
@@ -97,7 +97,7 @@ pub fn comm(
     event
 }
 
-pub fn mmap(
+pub(super) fn mmap(
     id: usize,
     name: &str) -> Event {
     let mut event = Event::new(id, name.into());
@@ -170,7 +170,7 @@ pub fn mmap(
     event
 }
 
-pub fn sample_profile(
+pub(super) fn sample_profile(
     id: usize,
     name: &str) -> Event {
     let mut event = Event::new(id, name.into());
@@ -203,7 +203,7 @@ pub fn sample_profile(
     event
 }
 
-pub fn dpc(
+pub(super) fn dpc(
     id: usize,
     name: &str) -> Event {
     let mut event = Event::new(id, name.into());
@@ -229,7 +229,7 @@ pub fn dpc(
     event
 }
 
-pub fn callstack(
+pub(super) fn callstack(
     id: usize,
     name: &str) -> Event {
     let mut event = Event::new(id, name.into());
@@ -270,7 +270,7 @@ pub fn callstack(
     event
 }
 
-pub fn ready_thread(
+pub(super) fn ready_thread(
     id: usize,
     name: &str) -> Event {
     let mut event = Event::new(id, name.into());
@@ -307,7 +307,7 @@ pub fn ready_thread(
     event
 }
 
-pub fn cswitch(
+pub(super) fn cswitch(
     id: usize,
     name: &str) -> Event {
     let mut event = Event::new(id, name.into());
@@ -380,7 +380,7 @@ pub fn cswitch(
     event
 }
 
-pub fn hard_page_fault(
+pub(super) fn hard_page_fault(
     id: usize,
     name: &str) -> Event {
     let mut event = Event::new(id, name.into());
@@ -427,7 +427,7 @@ pub fn hard_page_fault(
     event
 }
 
-pub fn soft_page_fault(
+pub(super) fn soft_page_fault(
     id: usize,
     name: &str) -> Event {
     let mut event = Event::new(id, name.into());

@@ -48,7 +48,7 @@ pub(crate) struct OSExportSettings {
 }
 
 impl OSExportSettings {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
         }
     }
@@ -60,7 +60,7 @@ pub(crate) struct OSExportProcess {
 }
 
 impl OSExportProcess {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
         }
     }
@@ -201,7 +201,7 @@ struct CpuProfile {
 }
 
 impl CpuProfile {
-    pub fn new(
+    pub(crate) fn new(
         cpu: u32,
         ip: u64) -> Self {
         Self {
@@ -218,7 +218,7 @@ struct CpuProfileKey {
 }
 
 impl CpuProfileKey {
-    pub fn new(
+    pub(crate) fn new(
         time: u64,
         tid: u32) -> Self {
         Self {
@@ -252,7 +252,7 @@ pub(crate) struct OSExportMachine {
 }
 
 impl OSExportMachine {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             cswitches: HashMap::new(),
             faults: HashMap::new(),
@@ -263,7 +263,7 @@ impl OSExportMachine {
         }
     }
 
-    pub fn alloc_idle_pid(machine: &mut ExportMachine) {
+    pub(crate) fn alloc_idle_pid(machine: &mut ExportMachine) {
         /* Always allocate global idle pid as NsPid 0 */
         machine.os.global_idle_pid = machine.os.alloc_global_pid(0);
 
@@ -271,7 +271,7 @@ impl OSExportMachine {
         *machine.process_mut(machine.os.global_idle_pid).ns_pid_mut() = Some(0);
     }
 
-    pub fn get_or_alloc_global_pid(
+    pub(crate) fn get_or_alloc_global_pid(
         &mut self,
         local_pid: u32) -> u32 {
         match self.get_global_pid(local_pid) {
@@ -280,7 +280,7 @@ impl OSExportMachine {
         }
     }
 
-    pub fn get_global_pid(
+    pub(crate) fn get_global_pid(
         &self,
         local_pid: u32) -> Option<u32> {
         match self.pid_mapping.get(&local_pid) {
@@ -289,7 +289,7 @@ impl OSExportMachine {
         }
     }
 
-    pub fn alloc_global_pid(
+    pub(crate) fn alloc_global_pid(
         &mut self,
         local_pid: u32) -> u32 {
         let global_pid = self.new_global_pid();
@@ -300,7 +300,7 @@ impl OSExportMachine {
             .or_insert(global_pid)
     }
 
-    pub fn new_global_pid(
+    pub(crate) fn new_global_pid(
         &mut self) -> u32 {
         let global_pid = self.pid_index;
 

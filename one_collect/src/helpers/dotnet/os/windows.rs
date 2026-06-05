@@ -35,7 +35,7 @@ pub(crate) struct OSDotNetHelper {
 }
 
 impl OSDotNetHelper {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             jit_symbols: false,
         }
@@ -67,7 +67,7 @@ pub(crate) struct OSDotNetEventFactory {
 impl OSDotNetEventFactory {
     const ETW_REG_PUB_KEY: &'static str = "SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Winevt\\Publishers";
 
-    pub fn new(_proxy: impl FnMut(String, usize) -> Option<Event> + 'static) -> Self {
+    pub(crate) fn new(_proxy: impl FnMut(String, usize) -> Option<Event> + 'static) -> Self {
         Self {
             filter_args: Writable::new(Some(HashMap::new())),
             record_events: Writable::new(Some(Vec::new())),
@@ -161,7 +161,7 @@ impl OSDotNetEventFactory {
             });
     }
 
-    pub fn hook_to_exporter(
+    pub(crate) fn hook_to_exporter(
         &mut self,
         exporter: UniversalExporter) -> UniversalExporter {
         let filter_args = self.filter_args.clone();
@@ -294,7 +294,7 @@ impl OSDotNetEventFactory {
         })
     }
 
-    pub fn record_provider(
+    pub(crate) fn record_provider(
         &mut self,
         provider_name: &str,
         keyword: u64,
@@ -327,7 +327,7 @@ impl OSDotNetEventFactory {
         Ok(())
     }
 
-    pub fn set_filter_args(
+    pub(crate) fn set_filter_args(
         &mut self,
         provider_name: &str,
         filter_args: String) -> anyhow::Result<()> {
@@ -354,7 +354,7 @@ impl OSDotNetEventFactory {
         }
     }
 
-    pub fn new_event(
+    pub(crate) fn new_event(
         &mut self,
         provider_name: &str,
         keyword: u64,

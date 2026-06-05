@@ -3,10 +3,10 @@
 
 /* Windows */
 #[cfg(any(doc, target_os = "windows"))]
-pub mod windows;
+pub(super) mod windows;
 
 #[cfg(target_os = "windows")]
-pub use windows::*;
+pub(super) use windows::*;
 
 /* Linux */
 #[cfg(any(doc, target_os = "linux"))]

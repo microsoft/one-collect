@@ -54,7 +54,7 @@ pub(crate) fn version() -> (u16, u16) {
 }
 
 #[derive(Default)]
-pub struct OSScriptEngine {
+pub(crate) struct OSScriptEngine {
 }
 
 impl OSScriptEngine {
@@ -109,7 +109,7 @@ impl OSScriptEngine {
         Ok(event)
     }
 
-    pub fn enable(
+    pub(crate) fn enable(
         &mut self,
         engine: &mut Engine) {
         engine.register_fn(
@@ -154,7 +154,7 @@ impl OSScriptEngine {
         });
     }
 
-    pub fn cleanup_task(&mut self) -> Box<dyn FnMut()> {
+    pub(crate) fn cleanup_task(&mut self) -> Box<dyn FnMut()> {
         /* Nothing */
         Box::new(|| {})
     }

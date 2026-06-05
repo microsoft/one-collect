@@ -105,50 +105,50 @@ const EVENT_FILTER_TYPE_EVENT_ID: u32 = 0x80000200;
 const EVENT_FILTER_TYPE_STACKWALK: u32 = 0x80001000;
 const EVENT_FILTER_TYPE_STACKWALK_LEVEL_KW: u32 = 0x80004000;
 
-pub const EVENT_ENABLE_PROPERTY_ENABLE_KEYWORD_0: u32 = 64u32;
-pub const EVENT_ENABLE_PROPERTY_ENABLE_SILOS: u32 = 1024u32;
-pub const EVENT_ENABLE_PROPERTY_EVENT_KEY: u32 = 256u32;
-pub const EVENT_ENABLE_PROPERTY_EXCLUDE_INPRIVATE: u32 = 512u32;
-pub const EVENT_ENABLE_PROPERTY_IGNORE_KEYWORD_0: u32 = 16u32;
-pub const EVENT_ENABLE_PROPERTY_PROCESS_START_KEY: u32 = 128u32;
-pub const EVENT_ENABLE_PROPERTY_PROVIDER_GROUP: u32 = 32u32;
-pub const EVENT_ENABLE_PROPERTY_PSM_KEY: u32 = 8u32;
-pub const EVENT_ENABLE_PROPERTY_SID: u32 = 1u32;
-pub const EVENT_ENABLE_PROPERTY_SOURCE_CONTAINER_TRACKING: u32 = 2048u32;
-pub const EVENT_ENABLE_PROPERTY_STACK_TRACE: u32 = 4u32;
-pub const EVENT_ENABLE_PROPERTY_TS_ID: u32 = 2u32;
+pub(super) const EVENT_ENABLE_PROPERTY_ENABLE_KEYWORD_0: u32 = 64u32;
+pub(super) const EVENT_ENABLE_PROPERTY_ENABLE_SILOS: u32 = 1024u32;
+pub(super) const EVENT_ENABLE_PROPERTY_EVENT_KEY: u32 = 256u32;
+pub(super) const EVENT_ENABLE_PROPERTY_EXCLUDE_INPRIVATE: u32 = 512u32;
+pub(super) const EVENT_ENABLE_PROPERTY_IGNORE_KEYWORD_0: u32 = 16u32;
+pub(super) const EVENT_ENABLE_PROPERTY_PROCESS_START_KEY: u32 = 128u32;
+pub(super) const EVENT_ENABLE_PROPERTY_PROVIDER_GROUP: u32 = 32u32;
+pub(super) const EVENT_ENABLE_PROPERTY_PSM_KEY: u32 = 8u32;
+pub(super) const EVENT_ENABLE_PROPERTY_SID: u32 = 1u32;
+pub(super) const EVENT_ENABLE_PROPERTY_SOURCE_CONTAINER_TRACKING: u32 = 2048u32;
+pub(super) const EVENT_ENABLE_PROPERTY_STACK_TRACE: u32 = 4u32;
+pub(super) const EVENT_ENABLE_PROPERTY_TS_ID: u32 = 2u32;
 
-pub const EVENT_HEADER_EXT_TYPE_CONTAINER_ID: u32 = 16u32;
-pub const EVENT_HEADER_EXT_TYPE_CONTROL_GUID: u32 = 14u32;
-pub const EVENT_HEADER_EXT_TYPE_EVENT_KEY: u32 = 10u32;
-pub const EVENT_HEADER_EXT_TYPE_EVENT_SCHEMA_TL: u32 = 11u32;
-pub const EVENT_HEADER_EXT_TYPE_INSTANCE_INFO: u32 = 4u32;
-pub const EVENT_HEADER_EXT_TYPE_MAX: u32 = 19u32;
-pub const EVENT_HEADER_EXT_TYPE_PEBS_INDEX: u32 = 7u32;
-pub const EVENT_HEADER_EXT_TYPE_PMC_COUNTERS: u32 = 8u32;
-pub const EVENT_HEADER_EXT_TYPE_PROCESS_START_KEY: u32 = 13u32;
-pub const EVENT_HEADER_EXT_TYPE_PROV_TRAITS: u32 = 12u32;
-pub const EVENT_HEADER_EXT_TYPE_PSM_KEY: u32 = 9u32;
-pub const EVENT_HEADER_EXT_TYPE_QPC_DELTA: u32 = 15u32;
-pub const EVENT_HEADER_EXT_TYPE_RELATED_ACTIVITYID: u32 = 1u32;
-pub const EVENT_HEADER_EXT_TYPE_SID: u32 = 2u32;
-pub const EVENT_HEADER_EXT_TYPE_STACK_KEY32: u32 = 17u32;
-pub const EVENT_HEADER_EXT_TYPE_STACK_KEY64: u32 = 18u32;
-pub const EVENT_HEADER_EXT_TYPE_STACK_TRACE32: u32 = 5u32;
-pub const EVENT_HEADER_EXT_TYPE_STACK_TRACE64: u32 = 6u32;
-pub const EVENT_HEADER_EXT_TYPE_TS_ID: u32 = 3u32;
+pub(super) const EVENT_HEADER_EXT_TYPE_CONTAINER_ID: u32 = 16u32;
+pub(super) const EVENT_HEADER_EXT_TYPE_CONTROL_GUID: u32 = 14u32;
+pub(super) const EVENT_HEADER_EXT_TYPE_EVENT_KEY: u32 = 10u32;
+pub(super) const EVENT_HEADER_EXT_TYPE_EVENT_SCHEMA_TL: u32 = 11u32;
+pub(super) const EVENT_HEADER_EXT_TYPE_INSTANCE_INFO: u32 = 4u32;
+pub(super) const EVENT_HEADER_EXT_TYPE_MAX: u32 = 19u32;
+pub(super) const EVENT_HEADER_EXT_TYPE_PEBS_INDEX: u32 = 7u32;
+pub(super) const EVENT_HEADER_EXT_TYPE_PMC_COUNTERS: u32 = 8u32;
+pub(super) const EVENT_HEADER_EXT_TYPE_PROCESS_START_KEY: u32 = 13u32;
+pub(super) const EVENT_HEADER_EXT_TYPE_PROV_TRAITS: u32 = 12u32;
+pub(super) const EVENT_HEADER_EXT_TYPE_PSM_KEY: u32 = 9u32;
+pub(super) const EVENT_HEADER_EXT_TYPE_QPC_DELTA: u32 = 15u32;
+pub(super) const EVENT_HEADER_EXT_TYPE_RELATED_ACTIVITYID: u32 = 1u32;
+pub(super) const EVENT_HEADER_EXT_TYPE_SID: u32 = 2u32;
+pub(super) const EVENT_HEADER_EXT_TYPE_STACK_KEY32: u32 = 17u32;
+pub(super) const EVENT_HEADER_EXT_TYPE_STACK_KEY64: u32 = 18u32;
+pub(super) const EVENT_HEADER_EXT_TYPE_STACK_TRACE32: u32 = 5u32;
+pub(super) const EVENT_HEADER_EXT_TYPE_STACK_TRACE64: u32 = 6u32;
+pub(super) const EVENT_HEADER_EXT_TYPE_TS_ID: u32 = 3u32;
 
-pub const TRACE_LEVEL_CRITICAL: u8 = 1;
-pub const TRACE_LEVEL_ERROR: u8 = 2;
-pub const TRACE_LEVEL_WARNING: u8 = 3;
-pub const TRACE_LEVEL_INFORMATION: u8 = 4;
-pub const TRACE_LEVEL_VERBOSE: u8 = 5;
+pub(super) const TRACE_LEVEL_CRITICAL: u8 = 1;
+pub(super) const TRACE_LEVEL_ERROR: u8 = 2;
+pub(super) const TRACE_LEVEL_WARNING: u8 = 3;
+pub(super) const TRACE_LEVEL_INFORMATION: u8 = 4;
+pub(super) const TRACE_LEVEL_VERBOSE: u8 = 5;
 
-pub const EVENT_CONTROL_CODE_DISABLE_PROVIDER: u32 = 0;
-pub const EVENT_CONTROL_CODE_ENABLE_PROVIDER: u32 = 1;
-pub const EVENT_CONTROL_CODE_CAPTURE_STATE: u32 = 2;
+pub(super) const EVENT_CONTROL_CODE_DISABLE_PROVIDER: u32 = 0;
+pub(super) const EVENT_CONTROL_CODE_ENABLE_PROVIDER: u32 = 1;
+pub(super) const EVENT_CONTROL_CODE_CAPTURE_STATE: u32 = 2;
 
-pub fn wide_string(
+pub(super) fn wide_string(
     name: &str) -> Vec<u16> {
     let mut name_wide: Vec<u16> = Vec::new();
 
@@ -217,14 +217,14 @@ impl Default for WNODE_HEADER {
 
 #[repr(C)]
 #[allow(non_snake_case)]
-pub struct CLASSIC_EVENT_ID {
+pub(super) struct CLASSIC_EVENT_ID {
     pub EventGuid: Guid,
     pub Type: u8,
     pub Reserved: [u8; 7],
 }
 
 impl CLASSIC_EVENT_ID {
-    pub fn new(
+    pub(super) fn new(
         provider: Guid,
         id: u8) -> Self {
         Self {
@@ -470,7 +470,7 @@ impl Default for ENABLE_TRACE_PARAMETERS {
 // surface (`EVENT_TRACE_PROPERTIES`, `WNODE_HEADER`, `ENABLE_TRACE_PARAMETERS`,
 // the extern entry points, etc.) is internal-only and stays hand-rolled
 // to keep the migration localized.
-pub use windows_sys::Win32::System::Diagnostics::Etw::{
+pub(super) use windows_sys::Win32::System::Diagnostics::Etw::{
     EVENT_HEADER_EXTENDED_DATA_ITEM,
     EVENT_RECORD,
 };
@@ -588,7 +588,7 @@ impl EventRecordExt for EVENT_RECORD {
     }
 }
 
-pub struct TraceFilter {
+pub(super) struct TraceFilter {
     filter_type: u32,
     filter_data: Vec<u8>,
 }
@@ -838,7 +838,7 @@ pub(crate) fn flush_trace(handle: u64) {
     }
 }
 
-pub struct TraceSession {
+pub(super) struct TraceSession {
     properties: EVENT_TRACE_PROPERTIES,
     name: String,
     handle: u64,
@@ -862,7 +862,7 @@ extern "C" fn event_callback(record: *const EVENT_RECORD) {
 }
 
 impl TraceSession {
-    pub fn new(
+    pub(super) fn new(
         name: String,
         buf_size_kb: u32) -> Self {
         let mut session = Self {
@@ -876,11 +876,11 @@ impl TraceSession {
         session
     }
 
-    pub fn handle(&self) -> u64 { self.handle }
+    pub(super) fn handle(&self) -> u64 { self.handle }
 
-    pub fn id(&self) -> u64 { self.properties.Wnode.HistoricalContext }
+    pub(super) fn id(&self) -> u64 { self.properties.Wnode.HistoricalContext }
 
-    pub fn start(
+    pub(super) fn start(
         &mut self) -> anyhow::Result<()> {
         let trace_name = wide_string(&self.name);
 
@@ -947,7 +947,7 @@ impl TraceSession {
         }
     }
 
-    pub fn process(
+    pub(super) fn process(
         &self,
         parse: Box<dyn FnMut(&EVENT_RECORD)>) -> anyhow::Result<()> {
         /* Create thin pointer */
@@ -981,7 +981,7 @@ impl TraceSession {
         Ok(())
     }
 
-    pub fn remote_stop(
+    pub(super) fn remote_stop(
         handle: u64) {
         let mut properties = EVENT_TRACE_PROPERTIES::default();
 
@@ -994,7 +994,7 @@ impl TraceSession {
         }
     }
 
-    pub fn stop(
+    pub(super) fn stop(
         &mut self) {
         unsafe {
             ControlTraceW(
@@ -1005,7 +1005,7 @@ impl TraceSession {
         }
     }
 
-    pub fn enable_kernel_callstacks(
+    pub(super) fn enable_kernel_callstacks(
         &self,
         events: &Vec<CLASSIC_EVENT_ID>) -> anyhow::Result<()> {
         unsafe {
@@ -1025,7 +1025,7 @@ impl TraceSession {
         Ok(())
     }
 
-    pub fn set_profile_interval(
+    pub(super) fn set_profile_interval(
         &self,
         milliseconds: u32) -> anyhow::Result<()> {
         let mut interval = TRACE_PROFILE_INTERVAL {
@@ -1066,7 +1066,7 @@ impl TraceSession {
         Ok(())
     }
 
-    pub fn enable_privilege(
+    pub(super) fn enable_privilege(
         &self,
         name: &str) -> bool {
         let mut id: u64 = 0;
