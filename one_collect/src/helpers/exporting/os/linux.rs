@@ -1388,10 +1388,13 @@ impl ExportMachineOSHooks for ExportMachine {
         kernel_symbols: &mut impl ExportSymbolReader) {
 
         // Cached kernel symbol for in-memory matching.
+        // name_id is interned once in Phase 2 so Phase 3 does not pay the
+        // hash + bucket-walk + memcmp cost of strings.to_id for every
+        // (process, symbol) pair.
         struct CachedKernelSymbol {
             start: u64,
             end: u64,
-            name: String,
+            name_id: usize,
         }
 
         let mut frames = Vec::new();
@@ -1433,10 +1436,11 @@ impl ExportMachineOSHooks for ExportMachine {
             };
 
             if has_match {
+                let name_id = self.strings.to_id(kernel_symbols.name());
                 matched_symbols.push(CachedKernelSymbol {
                     start,
                     end,
-                    name: kernel_symbols.name().to_string(),
+                    name_id,
                 });
             }
         }
@@ -1483,11 +1487,12 @@ impl ExportMachineOSHooks for ExportMachine {
                     seen[idx] = true;
                     added += 1;
 
-                    let name_id = self.strings.to_id(&sym.name);
-                    let symbol = ExportSymbol::new(name_id, sym.start, sym.end);
+                    let symbol = ExportSymbol::new(sym.name_id, sym.start, sym.end);
 
                     trace!("Adding symbol to mapping: mapping_id={}, name={}, start={:#x}, end={:#x}",
-                        kernel.id(), &sym.name, sym.start, sym.end);
+                        kernel.id(),
+                        self.strings.from_id(sym.name_id).unwrap_or(""),
+                        sym.start, sym.end);
                     kernel.add_symbol(symbol);
                 }
             }
