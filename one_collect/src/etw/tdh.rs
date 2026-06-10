@@ -628,11 +628,17 @@ const fn intype_to_field_info(in_type: i32, is_32bit: bool) -> (&'static str, Lo
     match in_type {
         // Fixed-size scalars
         TDH_INTYPE_INT8                          => ("s8",   LocationType::Static, 1),
-        TDH_INTYPE_UINT8 | TDH_INTYPE_BOOLEAN   => ("u8",   LocationType::Static, 1),
+        TDH_INTYPE_UINT8                         => ("u8",   LocationType::Static, 1),
         TDH_INTYPE_INT16                         => ("s16",  LocationType::Static, 2),
         TDH_INTYPE_UINT16                        => ("u16",  LocationType::Static, 2),
         TDH_INTYPE_INT32 | TDH_INTYPE_HEXINT32  => ("s32",  LocationType::Static, 4),
         TDH_INTYPE_UINT32                        => ("u32",  LocationType::Static, 4),
+        // `TDH_INTYPE_BOOLEAN` is a Win32 `BOOL` — a 32-bit value
+        // (TraceLogging `bool32`).  It is **not** a 1-byte boolean:
+        // mapping it as `u8` would mis-size every subsequent field in
+        // the same event.  TraceLogging encodes 1-byte booleans as
+        // `TDH_INTYPE_UINT8` with `OutType::Boolean` (`bool8`).
+        TDH_INTYPE_BOOLEAN                       => ("u32",  LocationType::Static, 4),
         TDH_INTYPE_INT64 | TDH_INTYPE_HEXINT64  => ("s64",  LocationType::Static, 8),
         TDH_INTYPE_UINT64                        => ("u64",  LocationType::Static, 8),
         TDH_INTYPE_FLOAT                         => ("float", LocationType::Static, 4),
@@ -688,6 +694,7 @@ mod tests {
     #[test]
     fn type_name_scalars() {
         assert_eq!(intype_to_type_name(TDH_INTYPE_INT8), "s8");
+        assert_eq!(intype_to_type_name(TDH_INTYPE_UINT8), "u8");
         assert_eq!(intype_to_type_name(TDH_INTYPE_UINT32), "u32");
         assert_eq!(intype_to_type_name(TDH_INTYPE_DOUBLE), "double");
         assert_eq!(intype_to_type_name(TDH_INTYPE_GUID), "guid");
@@ -695,6 +702,21 @@ mod tests {
         assert_eq!(intype_to_type_name(TDH_INTYPE_ANSISTRING), "string");
         assert_eq!(intype_to_type_name(TDH_INTYPE_BINARY), "binary");
         assert_eq!(intype_to_type_name(999), "unsupported");
+    }
+
+    /// `TDH_INTYPE_BOOLEAN` is a Win32 `BOOL` — a 32-bit value
+    /// (TraceLogging `bool32`).  Mapping it as `u8` (its previous
+    /// behaviour) would mis-size every subsequent field in the same
+    /// event.  TraceLogging encodes 1-byte booleans as
+    /// `TDH_INTYPE_UINT8` with `OutType::Boolean` (`bool8`), which is
+    /// covered by the `u8` case in `type_name_scalars`.
+    #[test]
+    fn type_name_boolean_is_u32() {
+        assert_eq!(intype_to_type_name(TDH_INTYPE_BOOLEAN), "u32");
+        let (name, loc, size) = intype_to_field_info(TDH_INTYPE_BOOLEAN, false);
+        assert_eq!(name, "u32");
+        assert_eq!(loc, LocationType::Static);
+        assert_eq!(size, 4);
     }
 
     /// Verify that the extended TDH_INTYPE values 300-305 are all

@@ -80,6 +80,21 @@ const EXPECTED_F64: f64 = std::f64::consts::E;
 ///
 /// TraceLogging encodes `true` as the byte `1` and `false` as `0`.
 const EXPECTED_BOOL8: u8 = 1;
+/// Expected bool32 (`InType::Bool32`, Win32 `BOOL`) value in "EventScalars".
+///
+/// `TDH_INTYPE_BOOLEAN` is a 4-byte signed integer where `0` is
+/// `false` and any non-zero value is `true`.  We use `-1` (`0xFFFFFFFF`)
+/// because it is asymmetric, sign-extends distinctly through the
+/// `u32 as i32` round-trip, and shares no bytes with the surrounding
+/// FILETIME / SYSTEMTIME / GUID payloads — making any byte-order or
+/// offset-by-N regression unambiguous in the failure diff.
+///
+/// Note that the historical "decoded as 1 byte" bug is caught
+/// independently of this value: a 1-byte field declaration causes
+/// `get_u32` here to fail (it requires ≥ 4 bytes), and the 3 unconsumed
+/// on-wire bytes shift every subsequent field's offset, which the
+/// FILETIME assertion would catch on its own.
+const EXPECTED_BOOL32: i32 = -1;
 /// Expected FILETIME (`InType::FileTime`, 64-bit) value in "EventScalars".
 ///
 /// 100-nanosecond intervals since 1601-01-01 UTC.  This value
@@ -417,7 +432,7 @@ fn assert_strings_event(event: &CapturedEvent) {
 /// Asserts every field value in an "EventScalars" event matches the
 /// constants written by the producer.
 ///
-/// Exercises the six fixed-size in-types not covered by the integer
+/// Exercises the seven fixed-size in-types not covered by the integer
 /// tests:
 ///
 /// * `f32` → `TDH_INTYPE_FLOAT`  → `("float",  Static, 4)`
@@ -425,14 +440,18 @@ fn assert_strings_event(event: &CapturedEvent) {
 /// * `bool8` (TLG `InType::U8` + `OutType::Boolean`) → `TDH_INTYPE_UINT8`
 ///   → `("u8", Static, 1)` (TLG encodes `bool8` as a 1-byte integer with
 ///   a `Boolean` out-type hint, so it shares the `u8` decoder path)
+/// * `bool32` (TLG `InType::Bool32`) → `TDH_INTYPE_BOOLEAN`
+///   → `("u32", Static, 4)` (Win32 `BOOL` is a 32-bit value; a previous
+///   decoder bug mapped this to `("u8", Static, 1)`, which would
+///   mis-size every field after it in the same event)
 /// * `filetime`   → `TDH_INTYPE_FILETIME`   → `("filetime",   Static, 8)`
 /// * `systemtime` → `TDH_INTYPE_SYSTEMTIME` → `("systemtime", Static, 16)`
 /// * `guid`       → `TDH_INTYPE_GUID`       → `("guid",       Static, 16)`
 fn assert_scalars_event(event: &CapturedEvent) {
     assert_schema(
         event,
-        &["Pi", "E", "Flag", "Created", "When", "Id"],
-        &["float", "double", "u8", "filetime", "systemtime", "guid"],
+        &["Pi", "E", "Flag", "WideFlag", "Created", "When", "Id"],
+        &["float", "double", "u8", "u32", "filetime", "systemtime", "guid"],
         "scalars event",
     );
 
@@ -456,6 +475,21 @@ fn assert_scalars_event(event: &CapturedEvent) {
     let flag = event.format.get_u8(flag_ref, &event.payload)
         .expect("Flag should decode as u8");
     assert_eq!(flag, EXPECTED_BOOL8, "bool8 field round-trip mismatch");
+
+    // bool32 — Win32 `BOOL` (4 bytes, signed).  Decoded as `u32` and
+    // reinterpreted as `i32` to compare against the original `-1`
+    // (`0xFFFFFFFF`) value.  This implicitly verifies the 4-byte
+    // on-wire size: if the decoder were to truncate to 1 byte (the
+    // historical bug), the subsequent FILETIME field would shift by
+    // 3 bytes and its assertion would fail.
+    let wide_flag_ref = event.format.get_field_ref("WideFlag")
+        .expect("WideFlag field should exist");
+    let wide_flag = event.format.get_u32(wide_flag_ref, &event.payload)
+        .expect("WideFlag should decode as u32");
+    assert_eq!(
+        wide_flag as i32, EXPECTED_BOOL32,
+        "bool32 field round-trip mismatch"
+    );
 
     // FILETIME — signed 64-bit integer, little-endian on the wire.
     let created = i64::from_le_bytes(read_fixed::<8>(event, "Created"));
@@ -583,6 +617,7 @@ fn tdh_decodes_tracelogging_dynamic_events() {
     //       Pi       : f32       = EXPECTED_F32       (π)
     //       E        : f64       = EXPECTED_F64       (e)
     //       Flag     : bool8     = EXPECTED_BOOL8     (true → 0x01)
+    //       WideFlag : bool32    = EXPECTED_BOOL32    (i32 -1 → 0xFFFFFFFF)
     //       Created  : FILETIME  = EXPECTED_FILETIME  (i64, 100 ns since 1601)
     //       When     : SYSTEMTIME= EXPECTED_SYSTEMTIME([u16; 8] calendar form)
     //       Id       : GUID      = EXPECTED_GUID      (16-byte COM layout)
@@ -615,16 +650,20 @@ fn tdh_decodes_tracelogging_dynamic_events() {
                 .add_cstr16("Name", EXPECTED_STR16, tlg::OutType::Default, 0)
                 .write(provider, None, None);
 
-            // EventScalars: f32 + f64 + bool8 + FILETIME + SYSTEMTIME + GUID.
+            // EventScalars: f32 + f64 + bool8 + bool32 + FILETIME + SYSTEMTIME + GUID.
             //
             // `add_u8(name, value, OutType::Boolean, 0)` is the dynamic
             // equivalent of the static `bool8(name, &val)` macro keyword:
             // both produce `InType::U8` with `OutType::Boolean`.
+            //
+            // `add_bool32` takes an `i32` and emits `InType::Bool32`
+            // (`TDH_INTYPE_BOOLEAN`) — a 4-byte Win32 `BOOL`.
             builder
                 .reset("EventScalars", tlg::Level::Verbose, TEST_KEYWORD, 0)
                 .add_f32("Pi", EXPECTED_F32, tlg::OutType::Default, 0)
                 .add_f64("E", EXPECTED_F64, tlg::OutType::Default, 0)
                 .add_u8("Flag", EXPECTED_BOOL8, tlg::OutType::Boolean, 0)
+                .add_bool32("WideFlag", EXPECTED_BOOL32, tlg::OutType::Default, 0)
                 .add_filetime(
                     "Created",
                     EXPECTED_FILETIME,
@@ -701,6 +740,7 @@ fn tdh_decodes_tracelogging_static_events() {
     //       Pi       : f32       = EXPECTED_F32       (π)
     //       E        : f64       = EXPECTED_F64       (e)
     //       Flag     : bool8     = true               (TLG `bool8` keyword)
+    //       WideFlag : bool32    = EXPECTED_BOOL32    (TLG `bool32` keyword, i32 -1)
     //       Created  : FILETIME  = EXPECTED_FILETIME  (i64, 100 ns since 1601)
     //       When     : SYSTEMTIME= EXPECTED_SYSTEMTIME([u16; 8] calendar form)
     //       Id       : GUID      = EXPECTED_GUID      (16-byte COM layout)
@@ -732,14 +772,16 @@ fn tdh_decodes_tracelogging_static_events() {
                 cstr16("Name", EXPECTED_STR16),
             );
 
-            // EventScalars: f32 + f64 + bool8 + FILETIME + SYSTEMTIME + GUID.
+            // EventScalars: f32 + f64 + bool8 + bool32 + FILETIME + SYSTEMTIME + GUID.
             //
             // The `bool8` macro keyword is the static crate's name for
-            // `InType::U8` + `OutType::Boolean`; `win_filetime` is its
-            // name for `InType::FileTime` from a raw `i64`; and
-            // `win_systemtime` is the 16-byte `InType::SystemTime` from
-            // an `&[u16; 8]` (the static `systemtime` keyword, despite
-            // its name, actually emits an 8-byte FILETIME).
+            // `InType::U8` + `OutType::Boolean`; `bool32` emits the
+            // 4-byte Win32 `BOOL` (`InType::Bool32` →
+            // `TDH_INTYPE_BOOLEAN`); `win_filetime` is its name for
+            // `InType::FileTime` from a raw `i64`; and `win_systemtime`
+            // is the 16-byte `InType::SystemTime` from an `&[u16; 8]`
+            // (the static `systemtime` keyword, despite its name,
+            // actually emits an 8-byte FILETIME).
             let _ = tlg::write_event!(
                 STATIC_PROV,
                 "EventScalars",
@@ -748,6 +790,7 @@ fn tdh_decodes_tracelogging_static_events() {
                 f32("Pi", &EXPECTED_F32),
                 f64("E", &EXPECTED_F64),
                 bool8("Flag", &true),
+                bool32("WideFlag", &EXPECTED_BOOL32),
                 win_filetime("Created", &EXPECTED_FILETIME),
                 win_systemtime("When", &EXPECTED_SYSTEMTIME),
                 guid("Id", &EXPECTED_GUID),
