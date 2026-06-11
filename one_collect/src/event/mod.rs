@@ -588,12 +588,13 @@ impl EventFormat {
                 &slice[2..2+bytes]
             },
 
-            LocationType::DynRelative => {
-                todo!("Need to support relative location");
-            },
-
-            LocationType::DynAbsolute => {
-                todo!("Need to support absolute location");
+            LocationType::DynRelative | LocationType::DynAbsolute => {
+                /* TODO: Dynamic locations require a relative/absolute
+                 * resolver and are not yet supported through the
+                 * direct-offset path. Return EMPTY rather than panicking
+                 * until resolution is wired through (Linux tracefs
+                 * `__rel_loc` / `__dyn_loc`). */
+                EMPTY
             },
         }
     }
