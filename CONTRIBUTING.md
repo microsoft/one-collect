@@ -29,7 +29,6 @@ This repository contains multiple Rust crates:
 
 - `one_collect/` - Main library for event and profiling data collection
 - `record-trace/` - Command-line tool built on top of one_collect
-- `ruwind/` - Unwinding library for callstack analysis
 
 To build the main library:
 
@@ -42,13 +41,6 @@ To build the command-line tool:
 
 ```bash
 cd record-trace
-cargo build
-```
-
-To build the unwinding library:
-
-```bash
-cd ruwind
 cargo build
 ```
 
@@ -65,13 +57,6 @@ To run tests for the command-line tool:
 
 ```bash
 cd record-trace
-cargo test
-```
-
-To run tests for the unwinding library:
-
-```bash
-cd ruwind
 cargo test
 ```
 

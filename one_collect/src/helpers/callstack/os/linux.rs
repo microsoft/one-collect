@@ -15,7 +15,7 @@ use crate::event::DataFieldRef;
 use crate::openat::DupFd;
 use crate::Writable;
 
-use ruwind::*;
+use crate::ruwind::*;
 use libc::PROT_EXEC;
 
 pub struct CallstackReader {
@@ -66,7 +66,7 @@ impl ModuleLookup {
             match fd.open() {
                 Some(file) => {
                     let mut reader = std::io::BufReader::new(file);
-                    if let Ok(load_header) = ruwind::elf::get_load_header(&mut reader) {
+                    if let Ok(load_header) = crate::ruwind::elf::get_load_header(&mut reader) {
                         value = load_header
                             .p_vaddr()
                             .saturating_sub(load_header.p_offset());

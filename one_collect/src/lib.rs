@@ -42,6 +42,15 @@ pub mod helpers;
 pub mod intern;
 pub mod os;
 
+mod ruwind;
+
+/// Public types from the stack unwinding implementation that appear in
+/// `one_collect`'s public API.
+pub mod unwind {
+    pub use crate::ruwind::{ModuleKey, UnwindType};
+    pub use crate::ruwind::elf::ElfLoadHeader;
+}
+
 #[cfg(any(doc, target_os = "linux"))]
 pub mod tracefs;
 #[cfg(any(doc, target_os = "linux"))]

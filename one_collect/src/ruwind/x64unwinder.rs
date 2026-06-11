@@ -2,7 +2,7 @@
 // Licensed under the MIT license.
 
 use super::*;
-use crate::dwarf::*;
+use crate::ruwind::dwarf::*;
 use tracing::{debug, trace, error, warn};
 
 #[derive(Default)]
