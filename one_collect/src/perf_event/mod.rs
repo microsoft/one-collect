@@ -344,6 +344,7 @@ pub struct PerfSession {
     branch_stack_field: DataFieldRef,
     regs_user_field: DataFieldRef,
     stack_user_field: DataFieldRef,
+    cgroup_field: DataFieldRef,
 
     /* Options */
     read_timeout: Duration,
@@ -442,6 +443,7 @@ impl PerfSession {
             branch_stack_field: DataFieldRef::new(),
             regs_user_field: DataFieldRef::new(),
             stack_user_field: DataFieldRef::new(),
+            cgroup_field: DataFieldRef::new(),
 
             /* BPF */
             bpf_events: HashMap::new(),
@@ -604,6 +606,10 @@ impl PerfSession {
 
     pub fn stack_user_data_ref(&self) -> DataFieldRef {
         self.stack_user_field.clone()
+    }
+
+    pub fn cgroup_data_ref(&self) -> DataFieldRef {
+        self.cgroup_field.clone()
     }
 
     pub fn set_read_timeout(
@@ -1085,6 +1091,35 @@ impl PerfSession {
                 }
 
                 /* TODO: Remaining abi format types */
+
+                /*
+                 * Fields decode in ABI bit order by advancing `offset`, so cgroup (bit 21)
+                 * is only at `offset` when nothing between STACK_USER (bit 13) and it is
+                 * enabled. No builder enables those, so parse directly; else drop (reset).
+                 */
+                const UNPARSED_SAMPLE_FIELDS_BEFORE_CGROUP: u64 =
+                    abi::PERF_SAMPLE_WEIGHT |
+                    abi::PERF_SAMPLE_DATA_SRC |
+                    abi::PERF_SAMPLE_TRANSACTION |
+                    abi::PERF_SAMPLE_REGS_INTR |
+                    abi::PERF_SAMPLE_PHYS_ADDR;
+
+                /* PERF_SAMPLE_CGROUP */
+                if perf_data.has_format(abi::PERF_SAMPLE_CGROUP) {
+                    let sample_type = perf_data.ancillary.attributes.sample_type;
+                    debug_assert_eq!(
+                        sample_type & UNPARSED_SAMPLE_FIELDS_BEFORE_CGROUP, 0,
+                        "a builder enabled a sample field between STACK_USER and CGROUP; \
+                         the cgroup parser needs explicit skip logic for it");
+                    if (sample_type & UNPARSED_SAMPLE_FIELDS_BEFORE_CGROUP) != 0 {
+                        warn!("Skipping PERF_SAMPLE_CGROUP: unparsed sample fields precede it");
+                        self.cgroup_field.reset();
+                    } else {
+                        offset += self.cgroup_field.update(offset, 8);
+                    }
+                } else {
+                    self.cgroup_field.reset();
+                }
 
                 /* For now print warning if we see this */
                 if offset > perf_data.raw_data.len() {
@@ -1954,4 +1989,59 @@ mod tests {
             other => panic!("expected UnknownCpu(7), got {other:?}"),
         }
     }
+    #[test]
+    fn mock_data_cgroup_field() {
+        let count = Arc::new(AtomicUsize::new(0));
+
+        let sample_format =
+            abi::PERF_SAMPLE_TIME |
+            abi::PERF_SAMPLE_CGROUP |
+            abi::PERF_SAMPLE_RAW;
+
+        let mut mock = MockData::new(sample_format, 0);
+        let mut perf_data = Vec::new();
+        let mut raw_data = Vec::new();
+
+        let id: u16 = 1;
+        let time: u64 = 9999;
+        let cgroup_id: u64 = 404228;
+
+        /* PERF_SAMPLE_TIME */
+        Sample::write_time(time, &mut raw_data);
+
+        /* PERF_SAMPLE_RAW */
+        let id_bytes = id.to_ne_bytes();
+        let field_size = 4 + id_bytes.len();
+        raw_data.extend_from_slice(&(id_bytes.len() as u32).to_ne_bytes());
+        raw_data.extend_from_slice(&id_bytes);
+        raw_data.resize(raw_data.len() + abi::align_to_perf_record(field_size) - field_size, 0);
+
+        /* PERF_SAMPLE_CGROUP */
+        raw_data.extend_from_slice(&cgroup_id.to_ne_bytes());
+
+        Header::write(abi::PERF_RECORD_SAMPLE, 0, raw_data.as_slice(), &mut perf_data);
+        mock.push(perf_data.as_slice());
+
+        let mut session = PerfSession::new(Box::new(mock));
+        let mut e = Event::new(id as usize, "test".into());
+
+        let cgroup_data = session.cgroup_data_ref();
+        let time_data = session.time_data_ref();
+        let callback_count = Arc::clone(&count);
+
+        e.add_callback(move |data| {
+            let full_data = data.full_data();
+
+            assert_eq!(Some(time), time_data.try_get_u64(full_data));
+            assert_eq!(Some(cgroup_id), cgroup_data.try_get_u64(full_data));
+
+            callback_count.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        });
+
+        session.add_event(e).unwrap();
+        session.parse_all().unwrap();
+        assert_eq!(1, count.load(Ordering::Relaxed));
+    }
+
 }

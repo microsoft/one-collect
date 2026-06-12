@@ -103,6 +103,15 @@ pub trait RingBufOptions {
 
         clone
     }
+
+    fn with_cgroup_data(&self) -> Self where Self: Sized {
+        let mut clone = self.clone_options();
+        let attributes = clone.attributes_mut();
+
+        attributes.sample_type |= abi::PERF_SAMPLE_CGROUP;
+
+        clone
+    }
 }
 
 pub fn cpu_count() -> u32 {
