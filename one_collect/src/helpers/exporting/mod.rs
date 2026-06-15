@@ -21,7 +21,7 @@ use crate::helpers::callstack::CallstackHelper;
 use modulemetadata::ModuleMetadata;
 use pe_file::PEModuleMetadata;
 use process::MetricValue::{self, Span};
-use ruwind::UnwindType;
+use crate::ruwind::UnwindType;
 use chrono::{DateTime, Utc};
 
 mod lookup;
@@ -56,7 +56,7 @@ pub const KERNEL_END:u64 = 0xFFFFFFFFFFFFFFFF;
 
 const NANOS_IN_SEC:u64 = 1000000000;
 
-pub type ExportDevNode = ruwind::ModuleKey;
+pub type ExportDevNode = crate::unwind::ModuleKey;
 
 pub mod graph;
 pub mod formats;

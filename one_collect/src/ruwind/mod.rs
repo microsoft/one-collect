@@ -1,6 +1,16 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
+// This module was previously the standalone `ruwind` crate and is now an
+// internal implementation detail of `one_collect`. Its items retain their
+// original library-level visibility so the small public facade in
+// `crate::unwind` can re-export the types that appear in this crate's public
+// API. As an internal module, many of those `pub` items are no longer
+// reachable outside the crate, and a few are only used on specific targets,
+// so the corresponding lints are allowed here rather than churning the
+// vendored code.
+#![allow(unreachable_pub, dead_code)]
+
 use std::collections::HashMap;
 use std::collections::hash_map::Entry::{Vacant, Occupied};
 use std::fs::File;

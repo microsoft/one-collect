@@ -46,10 +46,6 @@ jobs:
       working-directory: one_collect
       run: cargo clippy --locked
 
-    - name: 'ruwind: Clippy'
-      working-directory: ruwind
-      run: cargo clippy --locked
-
     - name: 'record-trace executable: Clippy'
       working-directory: record-trace
       run: cargo clippy --locked

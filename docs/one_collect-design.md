@@ -270,7 +270,6 @@ Helpers are the way to layer non-platform-level functionality on top of platform
 
 ##### Callstack Helper (`helpers::callstack`)
 Stack unwinding integration:
-- Integrates with `ruwind` library
 - Manages unwinding context and state
 - Call stack symbolization happens in ExportMachine/Universal
 

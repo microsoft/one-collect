@@ -48,14 +48,6 @@ jobs:
       working-directory: one_collect
       run: cargo test --locked ${{ inputs.build-flavor == 'release' && '--release' || '' }} --verbose
     
-    - name: 'ruwind: Build'
-      working-directory: ruwind
-      run: cargo build --locked ${{ inputs.build-flavor == 'release' && '--release' || '' }} --verbose
-    
-    - name: 'ruwind: Run tests'
-      working-directory: ruwind
-      run: cargo test --locked ${{ inputs.build-flavor == 'release' && '--release' || '' }} --verbose
-    
     - name: 'record-trace executable: Build'
       working-directory: record-trace
       run: cargo build --locked ${{ inputs.build-flavor == 'release' && '--release' || '' }} --verbose

@@ -473,11 +473,12 @@ version = "0.0.0-dev"
 dependencies = [
  "anyhow",
  "chrono",
+ "cpp_demangle",
  "flate2",
  "libc",
  "protobuf",
  "rhai",
- "ruwind",
+ "rustc-demangle",
  "sha1",
  "tracing",
  "twox-hash",
@@ -644,16 +645,6 @@ name = "rustversion"
 version = "1.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
-
-[[package]]
-name = "ruwind"
-version = "0.0.0-dev"
-dependencies = [
- "cpp_demangle",
- "libc",
- "rustc-demangle",
- "tracing",
-]
 
 [[package]]
 name = "sha1"

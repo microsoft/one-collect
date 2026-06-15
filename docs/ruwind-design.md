@@ -1,8 +1,13 @@
 # ruwind - Stack Unwinding Library Design Document
 
+> **Note:** `ruwind` is an internal module of `one_collect`
+> (`one_collect/src/ruwind`). The handful of types that appear in
+> `one_collect`'s public API are re-exported from `one_collect::unwind`. This
+> document describes the design of that unwinding implementation.
+
 ## Overview
 
-The `ruwind` crate is a specialized stack unwinding library designed for x64 Linux systems that provides DWARF-based call stack unwinding with support for anonymous code sections (such as JIT-compiled code from languages like C# and Java).
+The `ruwind` module is a specialized stack unwinding implementation designed for x64 Linux systems that provides DWARF-based call stack unwinding with support for anonymous code sections (such as JIT-compiled code from languages like C# and Java).
 
 ## Purpose and Responsibilities
 

@@ -3,7 +3,7 @@
 
 use std::{fs::File, io::{BufRead, BufReader, Seek, SeekFrom}};
 use std::collections::HashSet;
-use ruwind::elf::{ElfLoadHeader, ElfSymbol, ElfSymbolIterator};
+use crate::ruwind::elf::{ElfLoadHeader, ElfSymbol, ElfSymbolIterator};
 use tracing::{info, trace, warn};
 
 use crate::helpers::exporting::ExportMachine;

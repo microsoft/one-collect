@@ -8,7 +8,7 @@ use tracing::debug;
 
 use crate::intern::InternedCallstacks;
 
-use ruwind::{CodeSection, Unwindable};
+use crate::ruwind::{CodeSection, Unwindable};
 
 use super::*;
 use super::os::OSExportProcess;

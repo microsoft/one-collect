@@ -1268,7 +1268,7 @@ fn get_load_header64(
 
 #[cfg(test)]
 mod tests {
-    use crate::elf;
+    use crate::ruwind::elf;
 
     use super::*;
     #[cfg(target_os = "linux")]

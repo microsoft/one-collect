@@ -4,7 +4,7 @@
 use std::io::{Error, ErrorKind, Read, Seek, SeekFrom};
 use std::fmt;
 
-use crate::elf::*;
+use crate::ruwind::elf::*;
 use tracing::{debug, trace, info, warn};
 
 const VALUE_TYPE_OFFSET: u8 = 0;

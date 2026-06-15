@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-use ruwind::elf::{self, SHT_DYNSYM, SHT_SYMTAB};
+use crate::ruwind::elf::{self, SHT_DYNSYM, SHT_SYMTAB};
 use std::fs::File;
 use anyhow::Result;
 

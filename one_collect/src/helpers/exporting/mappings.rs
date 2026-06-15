@@ -5,7 +5,7 @@ use std::cmp::Ordering;
 
 use tracing::{info, trace};
 
-use ruwind::{CodeSection, ModuleKey, UnwindType};
+use crate::ruwind::{CodeSection, ModuleKey, UnwindType};
 
 use super::*;
 use super::lookup::*;

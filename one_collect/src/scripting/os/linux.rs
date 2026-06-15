@@ -85,7 +85,7 @@ impl OSScriptEngine {
     fn elf_symbol_offset(
         path: &str,
         name: &str) -> anyhow::Result<u64> {
-        use ruwind::elf::{self, SHT_DYNSYM, SHT_SYMTAB};
+        use crate::ruwind::elf::{self, SHT_DYNSYM, SHT_SYMTAB};
         use std::fs::File;
 
         debug!("elf_symbol_offset: looking up symbol, path={}, name={}", path, name);

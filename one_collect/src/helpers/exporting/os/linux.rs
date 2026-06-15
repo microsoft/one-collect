@@ -26,8 +26,8 @@ use crate::helpers::exporting::modulemetadata::{ModuleMetadata, ElfModuleMetadat
 use crate::page_size_to_mask;
 use crate::os::system_page_size;
 
-use ruwind::elf::*;
-use ruwind::{ModuleAccessor, UnwindType};
+use crate::ruwind::elf::*;
+use crate::ruwind::{ModuleAccessor, UnwindType};
 use symbols::{ElfSymbolReader, R2RLoadedLayoutSymbolTransformer, R2RMapSymbolReader};
 use self::symbols::PerfMapSymbolReader;
 
