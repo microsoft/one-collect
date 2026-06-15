@@ -1,5 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
+#![doc = include_str!("../README.md")]
+
 use std::hash::{Hash, Hasher};
 
 #[repr(C)]

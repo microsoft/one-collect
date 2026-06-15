@@ -5,6 +5,20 @@ version = "0.0.0-dev"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/microsoft/one-collect"
+homepage = "https://github.com/microsoft/one-collect"
+documentation = "https://docs.rs/one_collect"
+readme = "README.md"
+keywords = ["profiling", "perf_events", "etw", "tracing", "observability"]
+categories = [
+    "development-tools::profiling",
+    "development-tools::debugging",
+    "os::linux-apis",
+    "os::windows-apis",
+]
+exclude = [
+    "UnitTest.pprof",
+    "test_assets/stack_gen/**",
+]
 
 [features]
 default = ["scripting"]

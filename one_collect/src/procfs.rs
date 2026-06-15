@@ -13,7 +13,7 @@ use crate::PathBufInteger;
 ///
 /// # Arguments
 ///
-/// * `path` - A mutable reference to a PathBuf pointing to the procfs directory of a process (e.g. /proc/[pid]).
+/// * `path` - A mutable reference to a PathBuf pointing to the procfs directory of a process (e.g. `/proc/[pid]`).
 ///
 /// # Returns
 ///
