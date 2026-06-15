@@ -9,6 +9,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::ffi::OsString;
 use std::process;
+use std::time::Duration;
 
 use crate::export::{Exporter, NetTraceExporter, PerfViewExporter};
 
@@ -35,6 +36,12 @@ struct Args {
 
     #[arg(long, help = "Display samples live")]
     live: bool,
+
+    #[arg(long, help = "Stop collecting after the specified number of seconds")]
+    duration: Option<u64>,
+
+    #[arg(long, help = "Stop collecting once this process uses the specified amount of memory, in megabytes")]
+    max_memory: Option<u64>,
 
     #[arg(long = "pid", help = "Capture data for the specified process ID.  Multiple pids can be specified, one per usage of --pid")]
     target_pids: Option<Vec<i32>>,
@@ -99,6 +106,8 @@ pub struct RecordArgs {
     soft_page_faults: bool,
     hard_page_faults: bool,
     live: bool,
+    duration: Option<Duration>,
+    max_memory_bytes: Option<u64>,
     target_pids: Option<Vec<i32>>,
     target_cpus: Option<Vec<u16>>,
     script: Option<String>,
@@ -155,6 +164,8 @@ impl RecordArgs {
             soft_page_faults: command_args.soft_page_faults,
             hard_page_faults: command_args.hard_page_faults,
             live: command_args.live,
+            duration: command_args.duration.map(Duration::from_secs),
+            max_memory_bytes: command_args.max_memory.map(|mb| mb.saturating_mul(1024 * 1024)),
             target_pids: command_args.target_pids,
             target_cpus: command_args.target_cpus,
             script,
@@ -206,6 +217,14 @@ impl RecordArgs {
         self.live
     }
 
+    pub (crate) fn duration(&self) -> Option<Duration> {
+        self.duration
+    }
+
+    pub (crate) fn max_memory_bytes(&self) -> Option<u64> {
+        self.max_memory_bytes
+    }
+
     pub (crate) fn target_pids(&self) -> &Option<Vec<i32>> {
         &self.target_pids
     }
@@ -238,6 +257,12 @@ impl RecordArgs {
         info!("Arguments parsed: soft_page_faults={}", self.soft_page_faults);
         info!("Arguments parsed: hard_page_faults={}", self.hard_page_faults);
         info!("Arguments parsed: live={}", self.live);
+        if let Some(duration) = self.duration {
+            info!("Arguments parsed: duration_secs={}", duration.as_secs());
+        }
+        if let Some(max_memory_bytes) = self.max_memory_bytes {
+            info!("Arguments parsed: max_memory_bytes={}", max_memory_bytes);
+        }
         if let Some(ref pids) = self.target_pids {
             info!("Arguments parsed: target_pids={:?}", pids);
         }
