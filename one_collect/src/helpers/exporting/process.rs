@@ -333,6 +333,7 @@ pub struct ExportProcessSample {
     callstack_id: u32,
     record_id: u32,
     attributes_id: u32,
+    cgroup_id: u64,
 }
 
 impl ExportProcessSample {
@@ -356,6 +357,7 @@ impl ExportProcessSample {
             callstack_id,
             record_id: 0,
             attributes_id: 0,
+            cgroup_id: 0,
         }
     }
 
@@ -396,6 +398,10 @@ impl ExportProcessSample {
         attributes_id: usize) {
         self.attributes_id = attributes_id as u32;
     }
+
+    pub fn cgroup_id(&self) -> u64 { self.cgroup_id }
+
+    pub fn set_cgroup_id(&mut self, id: u64) { self.cgroup_id = id; }
 }
 
 const EXPORT_PROCESS_FLAG_CREATED: u8 = 1 << 0;

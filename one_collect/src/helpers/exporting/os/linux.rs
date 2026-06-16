@@ -17,6 +17,7 @@ use crate::openat::{OpenAt, DupFd};
 use crate::procfs;
 use crate::perf_event::{AncillaryData, PerfSession};
 use crate::perf_event::{RingBufSessionBuilder, RingBufBuilder};
+use crate::perf_event::rb::RingBufOptions;
 use crate::perf_event::abi::PERF_RECORD_MISC_SWITCH_OUT;
 use crate::helpers::callstack::{CallstackHelp, CallstackReader};
 use crate::helpers::exporting::*;
@@ -658,6 +659,7 @@ pub(crate) struct OSExportSampler {
     time_field: DataFieldRef,
     pid_field: DataFieldRef,
     tid_field: DataFieldRef,
+    cgroup_field: DataFieldRef,
 }
 
 impl OSExportSampler {
@@ -670,6 +672,7 @@ impl OSExportSampler {
             time_field: session.time_data_ref(),
             pid_field: session.pid_field_ref(),
             tid_field: session.tid_data_ref(),
+            cgroup_field: session.cgroup_data_ref(),
         }
     }
 }
@@ -740,6 +743,12 @@ impl ExportSamplerOSHooks for ExportSampler {
         &self,
         _data: &EventData) -> anyhow::Result<Option<[u8; 16]>> {
         Ok(None)
+    }
+
+    fn os_event_cgroup(
+        &self,
+        data: &EventData) -> anyhow::Result<Option<u64>> {
+        Ok(self.os.cgroup_field.try_get_u64(data.full_data()))
     }
 
     fn os_event_callstack(
@@ -1674,7 +1683,8 @@ impl ExportBuilderHelp for RingBufSessionBuilder {
         }
 
         if settings.events.is_some() {
-            let tracepoint = RingBufBuilder::for_tracepoint();
+            let tracepoint = RingBufBuilder::for_tracepoint()
+                .with_cgroup_data();
 
             builder = builder.with_tracepoint_events(tracepoint);
         }

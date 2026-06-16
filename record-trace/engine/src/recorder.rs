@@ -222,6 +222,11 @@ impl Recorder {
                     context.comm_name(),
                     context.pid());
 
+                let cgroup_id = context.cgroup_id();
+                if cgroup_id != 0 {
+                    let _ = write!(line, "CGroup={} ", cgroup_id);
+                }
+
                 match context.sample().value() {
                     MetricValue::Count(count) => {
                         append_count(count, &mut line);

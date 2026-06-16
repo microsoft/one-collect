@@ -196,6 +196,12 @@ pub trait ExportSamplerOSHooks {
     fn os_event_related_activity_id(
         &self,
         data: &EventData) -> anyhow::Result<Option<[u8; 16]>>;
+
+    fn os_event_cgroup(
+        &self,
+        _data: &EventData) -> anyhow::Result<Option<u64>> {
+        Ok(None)
+    }
 }
 
 impl ExportSampler {
@@ -348,14 +354,19 @@ impl ExportSampler {
 
         let time = self.os_event_time(data)?;
         let cpu = self.os_event_cpu(data)?;
+        let cgroup_id = self.os_event_cgroup(data)?.unwrap_or(0);
 
-        Ok(self.exporter.borrow_mut().make_sample(
+        let mut sample = self.exporter.borrow_mut().make_sample(
             time,
             value,
             tid,
             cpu,
             kind,
-            &self.frames))
+            &self.frames);
+
+        sample.set_cgroup_id(cgroup_id);
+
+        Ok(sample)
     }
 
     fn add_custom_sample(
@@ -939,6 +950,8 @@ impl<'a> ExportSampleFilterContext<'a> {
     }
 
     pub fn pid(&self) -> u32 { self.proc.pid() }
+
+    pub fn cgroup_id(&self) -> u64 { self.sample.cgroup_id() }
 
     pub fn sample_record_data(&self) -> Option<ExportRecordData<'_>> {
         if self.record_data.is_none() {
