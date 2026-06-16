@@ -36,6 +36,42 @@ impl Guid {
     pub fn to_bytes(&self) -> [u8; 16] {
         unsafe { std::mem::transmute(*self) }
     }
+
+    /// Derive a GUID from a namespace and a name by hashing `namespace ++ name`
+    /// with SHA-1 and laying the digest into the GUID fields (RFC 4122 v5 style).
+    ///
+    /// Only the version nibble is set (to 5); the variant bits are deliberately
+    /// left untouched so the output stays byte-identical to the pre-existing
+    /// `helpers::dotnet::scripting::guid_from_provider` algorithm. This means the
+    /// result is *not* a strictly conformant v5 UUID.
+    ///
+    /// Callers choose the byte encoding of `name` (UTF-8 for ETW session names,
+    /// uppercase UTF-16BE for `EventSource` provider names).
+    pub fn v5_from_name(namespace: &[u8], name: &[u8]) -> Self {
+        use sha1::{Sha1, Digest};
+
+        let mut hasher = Sha1::new();
+        hasher.update(namespace);
+        hasher.update(name);
+        let result = hasher.finalize();
+
+        let a = u32::from_ne_bytes([result[0], result[1], result[2], result[3]]);
+        let b = u16::from_ne_bytes([result[4], result[5]]);
+        let mut c = u16::from_ne_bytes([result[6], result[7]]);
+
+        /* High 4 bits of octet 7 to 5, as per RFC 4122 */
+        c = (c & 0x0FFF) | 0x5000;
+
+        Self {
+            data1: a,
+            data2: b,
+            data3: c,
+            data4: [
+                result[8], result[9], result[10], result[11],
+                result[12], result[13], result[14], result[15],
+            ],
+        }
+    }
 }
 
 pub mod event;
@@ -87,3 +123,38 @@ pub fn io_error(message: &str) -> IOError {
         std::io::ErrorKind::Other,
         message)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Guid;
+
+    const NS: &[u8] = b"one_collect test namespace";
+
+    #[test]
+    fn v5_from_name_is_deterministic() {
+        assert_eq!(
+            Guid::v5_from_name(NS, b"record-trace").to_bytes(),
+            Guid::v5_from_name(NS, b"record-trace").to_bytes());
+    }
+
+    #[test]
+    fn v5_from_name_distinct_names_distinct_guids() {
+        assert_ne!(
+            Guid::v5_from_name(NS, b"session-a").to_bytes(),
+            Guid::v5_from_name(NS, b"session-b").to_bytes());
+    }
+
+    #[test]
+    fn v5_from_name_distinct_namespaces_distinct_guids() {
+        assert_ne!(
+            Guid::v5_from_name(b"namespace-a", b"same-name").to_bytes(),
+            Guid::v5_from_name(b"namespace-b", b"same-name").to_bytes());
+    }
+
+    #[test]
+    fn v5_from_name_sets_version_nibble_to_5() {
+        let guid = Guid::v5_from_name(NS, b"record-trace");
+        assert_eq!(guid.data3 & 0xF000, 0x5000);
+    }
+}
+

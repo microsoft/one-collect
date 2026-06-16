@@ -201,16 +201,50 @@ struct WNODE_HEADER {
     pub Flags: u32,
 }
 
-impl Default for WNODE_HEADER {
-    fn default() -> Self {
+impl WNODE_HEADER {
+    /// Namespace for deriving an ETW session's `Wnode.Guid` from its session
+    /// name. Must be a fixed byte string, distinct from the `EventSource`
+    /// provider-name namespace used by
+    /// `helpers::dotnet::scripting::guid_from_provider` so session-name and
+    /// provider-name GUIDs never collide.
+    ///
+    /// Any change to this string changes every derived GUID. That only affects
+    /// GUID identity, not crash recovery, which is name-based (see
+    /// [`TraceSession::start`]).
+    const SESSION_NAMESPACE: &[u8] = b"one_collect ETW session namespace";
+
+    /// Construct a `WNODE_HEADER` for a named ETW session destined for
+    /// `StartTraceW`. `Guid` is derived from `session_name` and
+    /// `WNODE_FLAG_TRACED_GUID` is set, so the kernel enforces per-name
+    /// uniqueness while sessions with distinct names coexist. Because the same
+    /// name always maps to the same GUID, the by-name `ControlTraceW(STOP)` in
+    /// `TraceSession::start` can reclaim a stale session across processes.
+    fn new(session_name: &str) -> Self {
         Self {
             BufferSize: std::mem::size_of::<EVENT_TRACE_PROPERTIES>() as u32,
             ProviderId: 0,
             HistoricalContext: 0,
             TimeStamp: 0,
-            Guid: Guid::from_u128(0x123),
+            Guid: Guid::v5_from_name(
+                Self::SESSION_NAMESPACE,
+                session_name.as_bytes()),
             ClientContext: 1,
             Flags: WNODE_FLAG_TRACED_GUID,
+        }
+    }
+
+    /// Construct a `WNODE_HEADER` for driving `ControlTraceW` by handle
+    /// (e.g. `flush_trace`, `TraceSession::remote_stop`) where `Wnode.Guid`
+    /// is ignored. The GUID is zero and `WNODE_FLAG_TRACED_GUID` is unset.
+    fn for_control() -> Self {
+        Self {
+            BufferSize: std::mem::size_of::<EVENT_TRACE_PROPERTIES>() as u32,
+            ProviderId: 0,
+            HistoricalContext: 0,
+            TimeStamp: 0,
+            Guid: Guid::from_u128(0),
+            ClientContext: 1,
+            Flags: 0,
         }
     }
 }
@@ -391,12 +425,24 @@ struct EVENT_TRACE_PROPERTIES {
     pub LoggerName: [u8; 1024],
 }
 
-impl Default for EVENT_TRACE_PROPERTIES {
-    fn default() -> Self {
+impl EVENT_TRACE_PROPERTIES {
+    /// Construct properties for a named ETW session to be started with
+    /// `StartTraceW`; see [`WNODE_HEADER::new`].
+    fn new(session_name: &str) -> Self {
+        Self::with_wnode(WNODE_HEADER::new(session_name))
+    }
+
+    /// Construct properties for driving `ControlTraceW` by handle;
+    /// see [`WNODE_HEADER::for_control`].
+    fn for_control() -> Self {
+        Self::with_wnode(WNODE_HEADER::for_control())
+    }
+
+    fn with_wnode(wnode: WNODE_HEADER) -> Self {
         let cpus = unsafe { GetActiveProcessorCount(0xFFFF) };
 
         Self {
-            Wnode: WNODE_HEADER::default(),
+            Wnode: wnode,
             BufferSize: 64,
             MinimumBuffers: cpus * 4,
             MaximumBuffers: cpus * 32,
@@ -827,7 +873,7 @@ impl TraceEnable {
 }
 
 pub(crate) fn flush_trace(handle: u64) {
-    let mut properties = EVENT_TRACE_PROPERTIES::default();
+    let mut properties = EVENT_TRACE_PROPERTIES::for_control();
 
     unsafe {
         ControlTraceW(
@@ -865,15 +911,15 @@ impl TraceSession {
     pub(super) fn new(
         name: String,
         buf_size_kb: u32) -> Self {
-        let mut session = Self {
-            properties: EVENT_TRACE_PROPERTIES::default(),
+        let mut properties = EVENT_TRACE_PROPERTIES::new(&name);
+
+        properties.BufferSize = buf_size_kb;
+
+        Self {
+            properties,
             name,
             handle: 0,
-        };
-
-        session.properties.BufferSize = buf_size_kb;
-
-        session
+        }
     }
 
     pub(super) fn handle(&self) -> u64 { self.handle }
@@ -983,7 +1029,7 @@ impl TraceSession {
 
     pub(super) fn remote_stop(
         handle: u64) {
-        let mut properties = EVENT_TRACE_PROPERTIES::default();
+        let mut properties = EVENT_TRACE_PROPERTIES::for_control();
 
         unsafe {
             ControlTraceW(

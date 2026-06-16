@@ -12,8 +12,6 @@ use crate::scripting::ScriptEvent;
 use crate::Writable;
 use crate::Guid;
 
-use sha1::{Sha1, Digest};
-
 use rhai::{CustomType, TypeBuilder, EvalAltResult};
 
 mod runtime;
@@ -76,33 +74,13 @@ pub(crate) fn guid_from_provider(provider_name: &str) -> anyhow::Result<Guid> {
                     0x87, 0xF8, 0x1A, 0x15,
                     0xBF, 0xC1, 0x30, 0xFB];
 
-                let mut hasher = Sha1::new();
-
-                hasher.update(&namespace_bytes);
-
+                /* EventSource encodes the name as upper-case UTF-16BE */
+                let mut name_bytes = Vec::with_capacity(provider_name.len() * 2);
                 for c in provider_name.to_uppercase().chars() {
-                    let c = c as u16;
-                    hasher.update(&c.to_be_bytes());
+                    name_bytes.extend_from_slice(&(c as u16).to_be_bytes());
                 }
 
-                let result = hasher.finalize();
-
-                let a = u32::from_ne_bytes(result[0..4].try_into()?);
-                let b = u16::from_ne_bytes(result[4..6].try_into()?);
-                let mut c = u16::from_ne_bytes(result[6..8].try_into()?);
-
-                /* High 4 bits of octet 7 to 5, as per RFC 4122 */
-                c = (c & 0x0FFF) | 0x5000;
-
-                Ok(Guid {
-                    data1: a,
-                    data2: b,
-                    data3: c,
-                    data4: [
-                        result[8], result[9], result[10], result[11],
-                        result[12], result[13], result[14], result[15]
-                    ]
-                })
+                Ok(Guid::v5_from_name(&namespace_bytes, &name_bytes))
             }
         }
     }
