@@ -588,12 +588,45 @@ impl EventFormat {
                 &slice[2..2+bytes]
             },
 
-            LocationType::DynRelative => {
-                todo!("Need to support relative location");
-            },
-
+            LocationType::DynRelative |
             LocationType::DynAbsolute => {
-                todo!("Need to support absolute location");
+                /* Only produced by Linux ftrace sources (kernel tracepoints
+                 * parsed via tracefs and user_events); Windows/ETW never emits
+                 * these. The field's static slot holds a 4-byte u32 descriptor:
+                 * the high 16 bits are the payload length and the low 16 bits
+                 * are the offset to the payload. DynRelative (__rel_loc)
+                 * measures that offset from the end of the descriptor;
+                 * DynAbsolute (__data_loc) measures it from the start of the
+                 * record. See also EventFormat::get_rel_loc. */
+                let desc_end = offset + 4;
+
+                /* Not enough bytes to read the 4-byte descriptor */
+                if desc_end > data.len() {
+                    return EMPTY;
+                }
+
+                let desc = u32::from_ne_bytes([
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
+                ]);
+
+                let base = match loc_type {
+                    LocationType::DynRelative => desc_end,
+                    LocationType::DynAbsolute => 0,
+                    _ => unreachable!("arm only entered for Dyn* location types"),
+                };
+
+                let start = base + (desc & 0xFFFF) as usize;
+                let end = start + (desc >> 16) as usize;
+
+                /* Descriptor points past the end of the record */
+                if end > data.len() {
+                    return EMPTY;
+                }
+
+                &data[start..end]
             },
         }
     }
@@ -2947,5 +2980,196 @@ mod tests {
         let mut closure = format.try_get_field_data_closure("Msg")
             .expect("closure");
         assert_eq!(closure(&data), EMPTY);
+    }
+    
+    // ── DynRelative / DynAbsolute resolution tests ──────────────
+
+    /// Builds the 4-byte ftrace dynamic-location descriptor: the high 16
+    /// bits hold the payload length and the low 16 bits hold the offset to
+    /// the payload (measured from the descriptor end for `__rel_loc`, or
+    /// from the record start for `__data_loc`).
+    const fn dyn_descriptor(length: u16, offset: u16) -> [u8; 4] {
+        (((length as u32) << 16) | offset as u32).to_ne_bytes()
+    }
+
+    /// Builds a single-field format holding a dynamic-location descriptor.
+    fn dyn_format(type_name: &str, location: LocationType) -> EventFormat {
+        let mut format = EventFormat::new();
+        format.add_field(EventField::new(
+            "data".into(), type_name.into(), location, 0, 4,
+        ));
+        format
+    }
+
+    /// Resolves a field via its data closure, panicking if none is produced.
+    fn resolve<'a>(format: &EventFormat, name: &str, data: &'a [u8]) -> &'a [u8] {
+        let mut closure = format.try_get_field_data_closure(name)
+            .unwrap_or_else(|| panic!("no data closure for field {name}"));
+        closure(data)
+    }
+
+    // Scenario: payload immediately follows the descriptor.
+
+    #[test]
+    fn dyn_relative_payload_immediately_after_descriptor() {
+        let format = dyn_format("__rel_loc u8[]", LocationType::DynRelative);
+
+        let payload = 123456789u32.to_ne_bytes();
+        let mut data = Vec::new();
+        data.extend_from_slice(&dyn_descriptor(payload.len() as u16, 0));
+        data.extend_from_slice(&payload);
+
+        assert_eq!(resolve(&format, "data", &data), &payload);
+    }
+
+    #[test]
+    fn dyn_absolute_payload_immediately_after_descriptor() {
+        let format = dyn_format("__data_loc u8[]", LocationType::DynAbsolute);
+
+        let payload = 123456789u32.to_ne_bytes();
+        // Absolute offset from record start: the payload begins right after
+        // the 4-byte descriptor, so the stored offset is 4.
+        let mut data = Vec::new();
+        data.extend_from_slice(&dyn_descriptor(payload.len() as u16, 4));
+        data.extend_from_slice(&payload);
+
+        assert_eq!(resolve(&format, "data", &data), &payload);
+    }
+
+    // Scenario: payload sits after some padding.
+
+    #[test]
+    fn dyn_relative_payload_after_padding() {
+        let format = dyn_format("__rel_loc u8[]", LocationType::DynRelative);
+
+        let pad = 987654321u32.to_ne_bytes();
+        let payload = 123456789u32.to_ne_bytes();
+        // Relative offset is measured from the END of the 4-byte descriptor,
+        // so skipping `pad` (4 bytes) means a stored offset of 4.
+        let mut data = Vec::new();
+        data.extend_from_slice(&dyn_descriptor(payload.len() as u16, pad.len() as u16));
+        data.extend_from_slice(&pad);
+        data.extend_from_slice(&payload);
+
+        assert_eq!(resolve(&format, "data", &data), &payload);
+    }
+
+    #[test]
+    fn dyn_absolute_offset_is_from_record_start() {
+        let format = dyn_format("__data_loc u8[]", LocationType::DynAbsolute);
+
+        let pad = 987654321u32.to_ne_bytes();
+        let payload = 123456789u32.to_ne_bytes();
+        // Absolute offset is measured from the START of the record, so the
+        // payload at byte 8 (4-byte descriptor + 4-byte pad) stores offset 8.
+        let payload_offset = 8u16;
+        let mut data = Vec::new();
+        data.extend_from_slice(&dyn_descriptor(payload.len() as u16, payload_offset));
+        data.extend_from_slice(&pad);
+        data.extend_from_slice(&payload);
+
+        assert_eq!(resolve(&format, "data", &data), &payload);
+    }
+
+    // Scenario: resolution via the public EventFieldRef accessor.
+
+    #[test]
+    fn dyn_relative_resolves_via_get_data() {
+        // Exercises the public EventFieldRef accessor, not just the closure.
+        let format = dyn_format("__rel_loc u8[]", LocationType::DynRelative);
+        let field = format.get_field_ref_unchecked("data");
+
+        let payload = 123456789u32.to_ne_bytes();
+        let mut data = Vec::new();
+        data.extend_from_slice(&dyn_descriptor(payload.len() as u16, 0));
+        data.extend_from_slice(&payload);
+
+        assert_eq!(format.get_data(field, &data), &payload);
+    }
+
+    #[test]
+    fn dyn_absolute_resolves_via_get_data() {
+        // Exercises the public EventFieldRef accessor, not just the closure.
+        let format = dyn_format("__data_loc u8[]", LocationType::DynAbsolute);
+        let field = format.get_field_ref_unchecked("data");
+
+        let payload = 123456789u32.to_ne_bytes();
+        let mut data = Vec::new();
+        data.extend_from_slice(&dyn_descriptor(payload.len() as u16, 4));
+        data.extend_from_slice(&payload);
+
+        assert_eq!(format.get_data(field, &data), &payload);
+    }
+
+    // Scenario: a dynamic field followed by a later static field.
+
+    #[test]
+    fn dyn_relative_followed_by_static_field() {
+        /* A DynRelative descriptor followed by a static u32. Both are
+         * fixed-size in the static layout, so the static field's offset
+         * resolves straight through without a skip entry. */
+        let mut format = EventFormat::new();
+        format.add_field(EventField::new(
+            "blob".into(), "__rel_loc u8[]".into(),
+            LocationType::DynRelative, 0, 4,
+        ));
+        format.add_field(EventField::new(
+            "code".into(), "u32".into(),
+            LocationType::Static, 4, 4,
+        ));
+
+        let code = 42u32.to_ne_bytes();
+        let payload = 123456789u32.to_ne_bytes();
+        // The blob payload lives after the static u32, so the relative offset
+        // is 4 (skip past the u32 that immediately follows the descriptor).
+        let mut data = Vec::new();
+        data.extend_from_slice(&dyn_descriptor(payload.len() as u16, code.len() as u16)); // 0..4
+        data.extend_from_slice(&code);                                                    // 4..8
+        data.extend_from_slice(&payload);                                                 // 8..12
+
+        assert_eq!(resolve(&format, "blob", &data), &payload);
+        assert_eq!(resolve(&format, "code", &data), &code);
+    }
+
+    // Scenario: malformed descriptors resolve to EMPTY (both location types).
+
+    #[test]
+    fn dyn_loc_zero_length_payload_is_empty() {
+        // A length-0 descriptor yields an empty payload even though more
+        // bytes follow it in the record.
+        for location in [LocationType::DynRelative, LocationType::DynAbsolute] {
+            let format = dyn_format("dyn u8[]", location);
+
+            let mut data = Vec::new();
+            data.extend_from_slice(&dyn_descriptor(0, 0));
+            data.extend_from_slice(&42u32.to_ne_bytes());
+
+            assert_eq!(resolve(&format, "data", &data), EMPTY);
+        }
+    }
+
+    #[test]
+    fn dyn_loc_truncated_descriptor_returns_empty() {
+        // Fewer than the 4 bytes needed to even read the descriptor.
+        for location in [LocationType::DynRelative, LocationType::DynAbsolute] {
+            let format = dyn_format("dyn u8[]", location);
+            let data = vec![0u8; 2];
+
+            assert_eq!(resolve(&format, "data", &data), EMPTY);
+        }
+    }
+
+    #[test]
+    fn dyn_loc_payload_past_end_returns_empty() {
+        // The descriptor claims a 16-byte payload but only 4 bytes follow it.
+        for location in [LocationType::DynRelative, LocationType::DynAbsolute] {
+            let format = dyn_format("dyn u8[]", location);
+
+            let mut data = Vec::new();
+            data.extend_from_slice(&dyn_descriptor(16, 0));
+            data.extend_from_slice(&1u32.to_ne_bytes());
+
+            assert_eq!(resolve(&format, "data", &data), EMPTY);
+        }
     }
 }
