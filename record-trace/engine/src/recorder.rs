@@ -25,6 +25,49 @@ use std::fmt::Write;
 
 const DEFAULT_CPU_FREQUENCY: u64 = 1000;
 
+/// Returns the current process's resident memory usage in bytes, or `None`
+/// if it cannot be determined on this platform.
+#[cfg(target_os = "windows")]
+fn current_process_memory_bytes() -> Option<u64> {
+    use windows_sys::Win32::System::ProcessStatus::{
+        GetProcessMemoryInfo,
+        PROCESS_MEMORY_COUNTERS,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    // SAFETY: We pass a zeroed, correctly-sized PROCESS_MEMORY_COUNTERS and the
+    // size of that structure. GetProcessMemoryInfo fills it in and the pseudo
+    // handle from GetCurrentProcess is always valid for the current process.
+    unsafe {
+        let mut counters: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
+        let size = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        if GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, size) != 0 {
+            Some(counters.WorkingSetSize as u64)
+        } else {
+            None
+        }
+    }
+}
+
+/// Returns the current process's resident memory usage in bytes, or `None`
+/// if it cannot be determined on this platform.
+#[cfg(target_os = "linux")]
+fn current_process_memory_bytes() -> Option<u64> {
+    // /proc/self/statm reports the resident set size as a count of pages in
+    // its second field.
+    let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+    let rss_pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
+
+    Some(rss_pages.saturating_mul(one_collect::os::system_page_size()))
+}
+
+/// Returns the current process's resident memory usage in bytes, or `None`
+/// if it cannot be determined on this platform.
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+fn current_process_memory_bytes() -> Option<u64> {
+    None
+}
+
 pub struct Recorder {
     args: RecordArgs,
     output: Arc<EngineOutput>,
@@ -267,6 +310,46 @@ impl Recorder {
         let print_banner = Arc::new(AtomicBool::new(true));
         let parse_output = self.output.clone();
 
+        // Stop conditions configured via the command line.
+        // The duration clock starts now, immediately before recording begins.
+        let deadline = self.args.duration()
+            .map(|duration| std::time::Instant::now() + duration);
+
+        // Querying process memory can be slow, so poll it on a dedicated
+        // background thread rather than inside the hot parse_until closure.
+        // The thread flips continue_recording once the limit is exceeded.
+        let memory_monitor = match self.args.max_memory_bytes() {
+            Some(max_memory_bytes) if current_process_memory_bytes().is_some() => {
+                let monitor_output = self.output.clone();
+                let monitor_continue = continue_recording.clone();
+                Some(std::thread::spawn(move || {
+                    const POLL_INTERVAL: std::time::Duration =
+                        std::time::Duration::from_millis(250);
+
+                    while monitor_continue.load(Ordering::SeqCst) {
+                        if let Some(used) = current_process_memory_bytes() {
+                            if used >= max_memory_bytes {
+                                info!(
+                                    "Stopping recording: memory limit reached: used_bytes={} limit_bytes={}",
+                                    used, max_memory_bytes);
+                                monitor_output.normal("Memory limit reached.");
+                                monitor_continue.store(false, Ordering::SeqCst);
+                                break;
+                            }
+                        }
+
+                        std::thread::sleep(POLL_INTERVAL);
+                    }
+                }))
+            },
+            Some(_) => {
+                self.output.error(
+                    "Warning: --max-memory is not supported on this platform and will be ignored.");
+                None
+            },
+            None => None,
+        };
+
         let parse_result = universal.parse_until("record-trace", move || {
             // Print the banner telling the user that recording has started.
             if print_banner.load(Ordering::SeqCst) {
@@ -280,9 +363,26 @@ impl Recorder {
                 continue_recording.store(false, Ordering::SeqCst);
             }
 
+            // Stop once the configured duration has elapsed.
+            if let Some(deadline) = deadline {
+                if std::time::Instant::now() >= deadline {
+                    info!("Stopping recording: duration limit reached");
+                    parse_output.normal("Duration limit reached.");
+                    continue_recording.store(false, Ordering::SeqCst);
+                }
+            }
+
             // When a callback returns non-zero, this will flip.
+            // The memory monitor thread (if any) also flips this when the
+            // configured memory limit is exceeded.
             !continue_recording.load(Ordering::SeqCst)
         });
+
+        // Recording has stopped; continue_recording is now false, so the
+        // memory monitor thread (if any) will observe it and exit.
+        if let Some(memory_monitor) = memory_monitor {
+            let _ = memory_monitor.join();
+        }
 
         let exporter = match parse_result {
             Ok(exporter) => {

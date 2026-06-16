@@ -13,6 +13,9 @@ one_collect = { path = "../../one_collect" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
+
 [lints.rust]
 unreachable_pub = "deny"
 
