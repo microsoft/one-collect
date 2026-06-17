@@ -350,7 +350,7 @@ impl Recorder {
             None => None,
         };
 
-        let parse_result = universal.parse_until("record-trace", move || {
+        let parse_result = universal.parse_until(self.args.session_name(), move || {
             // Print the banner telling the user that recording has started.
             if print_banner.load(Ordering::SeqCst) {
                 print_banner.store(false, Ordering::SeqCst);
