@@ -63,6 +63,9 @@ struct Args {
 
     #[arg(long, default_value_t = LogMode::File, help = "Log mode: 'disabled', 'console', or 'file'")]
     log_mode: LogMode,
+
+    #[arg(long, help = "Session name to record under. Defaults to \"record-trace\". On Windows this names the ETW session: a fixed name limits the machine to one record-trace session at a time but lets a new run reclaim a session left behind by a crashed one, while a unique name (e.g. per-PID) allows multiple concurrent sessions. On Linux the name is just a label (perf sessions are scoped per PID/CPU, so concurrent runs already work).")]
+    session_name: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
@@ -114,6 +117,7 @@ pub struct RecordArgs {
     log_filter: Option<String>,
     log_path: Option<String>,
     log_mode: LogMode,
+    session_name: String,
 }
 
 impl RecordArgs {
@@ -172,6 +176,8 @@ impl RecordArgs {
             log_filter: command_args.log_filter,
             log_path: command_args.log_path,
             log_mode: command_args.log_mode,
+            session_name: command_args.session_name
+                .unwrap_or_else(|| String::from("record-trace")),
         };
 
         // Cross-argument validation.
@@ -249,6 +255,10 @@ impl RecordArgs {
         self.log_mode
     }
 
+    pub (crate) fn session_name(&self) -> &str {
+        &self.session_name
+    }
+
     pub fn write_to_log(&self) {
         info!("Arguments parsed: output_path={}", self.output_path.display());
         info!("Arguments parsed: format={}", self.format);
@@ -276,6 +286,7 @@ impl RecordArgs {
             info!("Arguments parsed: log_path={}", path);
         }
         info!("Arguments parsed: log_mode={}", self.log_mode);
+        info!("Arguments parsed: session_name={}", self.session_name);
         if let Some(ref script) = self.script {
             info!("Arguments parsed: script start");
             info!("{}", script);
