@@ -17,7 +17,7 @@ use crate::openat::{OpenAt, DupFd};
 use crate::procfs;
 use crate::perf_event::{AncillaryData, PerfSession};
 use crate::perf_event::{RingBufSessionBuilder, RingBufBuilder};
-use crate::perf_event::rb::RingBufOptions;
+use crate::perf_event::rb::{RingBufOptions, cgroup_sample_supported};
 use crate::perf_event::abi::PERF_RECORD_MISC_SWITCH_OUT;
 use crate::helpers::callstack::{CallstackHelp, CallstackReader};
 use crate::helpers::exporting::*;
@@ -1683,8 +1683,11 @@ impl ExportBuilderHelp for RingBufSessionBuilder {
         }
 
         if settings.events.is_some() {
-            let tracepoint = RingBufBuilder::for_tracepoint()
-                .with_cgroup_data();
+            let mut tracepoint = RingBufBuilder::for_tracepoint();
+
+            if cgroup_sample_supported() {
+                tracepoint = tracepoint.with_cgroup_data();
+            }
 
             builder = builder.with_tracepoint_events(tracepoint);
         }

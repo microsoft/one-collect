@@ -114,6 +114,52 @@ pub trait RingBufOptions {
     }
 }
 
+/// Determine whether cgroup ids can be recorded in samples.
+///
+/// This is done by checking whether the running Linux kernel supports
+/// `PERF_SAMPLE_CGROUP`, which was added in kernel 5.7+. We check
+/// this separately, otherwise `perf_event_open` would fail fatally.
+pub(crate) fn cgroup_sample_supported() -> bool {
+    let attr = perf_event_attr {
+        size: PERF_ATTR_SIZE_VER4,
+        event_type: PERF_TYPE_SOFTWARE,
+        config: PERF_COUNT_SW_DUMMY,
+        sample_type: abi::PERF_SAMPLE_CGROUP,
+        flags: FLAG_DISABLED,
+        .. Default::default()
+    };
+
+    // SAFETY: `attr` is the fully initialized perf_event_attr that
+    // outlives the call. The syscall only reads through the pointer
+    // and returns an fd or -1.
+    let result = unsafe {
+        syscall(
+            SYS_perf_event_open,
+            &attr as *const perf_event_attr as usize,
+            0,                /* pid: calling process */
+            (-1i32) as usize, /* cpu: any */
+            (-1i32) as usize, /* group_fd: none */
+            0)
+    };
+
+    if result >= 0 {
+        // SAFETY: `result` is an fd we just opened and solely own.
+        // Closed once now.
+        unsafe { close(result as i32); }
+        true
+    } else {
+        let err = std::io::Error::last_os_error();
+
+        if err.raw_os_error() == Some(EINVAL) {
+            warn!("PERF_SAMPLE_CGROUP unsupported; cgroup ids will not be recorded");
+            false
+        } else {
+            /* Not a kernel support failure (but, e.g., permissions) */
+            true
+        }
+    }
+}
+
 pub fn cpu_count() -> u32 {
     unsafe {
         const SC_NPROCESSORS_ONLN: i32 = 84;
