@@ -4,6 +4,8 @@
 pub mod os;
 use os::OSDotNetHelper;
 
+pub(crate) mod provider;
+
 #[cfg(feature = "scripting")]
 pub mod scripting;
 
