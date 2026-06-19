@@ -43,7 +43,11 @@ jobs:
     - name: 'one_collect: Build'
       working-directory: one_collect
       run: cargo build --locked ${{ inputs.build-flavor == 'release' && '--release' || '' }} --verbose
-    
+
+    - name: 'one_collect: Build (no default features)'
+      working-directory: one_collect
+      run: cargo build --locked --no-default-features ${{ inputs.build-flavor == 'release' && '--release' || '' }} --verbose
+
     - name: 'one_collect: Run tests'
       working-directory: one_collect
       run: cargo test --locked ${{ inputs.build-flavor == 'release' && '--release' || '' }} --verbose

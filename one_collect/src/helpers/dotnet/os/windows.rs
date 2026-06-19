@@ -9,7 +9,6 @@ use std::collections::hash_map::Entry::{Vacant, Occupied};
 use crate::helpers::dotnet::*;
 use crate::helpers::dotnet::universal::UniversalDotNetHelperOSHooks;
 
-#[cfg(feature = "scripting")]
 use crate::helpers::exporting::UniversalExporter;
 
 use crate::helpers::exporting::record::*;
@@ -22,7 +21,7 @@ use crate::event::os::windows::WindowsEventExtension;
 
 use crate::etw::{EtwSession, AncillaryData};
 
-use crate::helpers::dotnet::scripting::*;
+use crate::helpers::dotnet::provider::{DotNetProviderFlags, guid_from_provider, event_full_name};
 use crate::Guid;
 
 use tracing::{warn, debug};

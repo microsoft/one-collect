@@ -31,7 +31,7 @@ use crate::Writable;
 use crate::procfs;
 use crate::event::*;
 
-use crate::helpers::dotnet::scripting::*;
+use crate::helpers::dotnet::provider::{DotNetProviderFlags, guid_from_provider, event_full_name};
 use crate::helpers::dotnet::nettrace;
 
 use tracing::{warn, info, debug};
