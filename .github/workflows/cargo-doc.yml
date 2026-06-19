@@ -1,0 +1,53 @@
+name: Cargo Doc
+
+permissions:
+  contents: read
+
+on:
+  workflow_call:
+    inputs:
+      os:
+        required: true
+        type: string
+        description: 'Operating system (ubuntu-latest, windows-latest)'
+      container:
+        required: false
+        type: string
+        description: 'Container image (e.g., rust:alpine)'
+      setup-command:
+        required: false
+        type: string
+        description: 'Setup command to run before checkout (e.g., apk add --no-cache musl-dev)'
+      platform-name:
+        required: true
+        type: string
+        description: 'Platform name for display (e.g., Linux-glibc-x64, Windows-x64)'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTDOCFLAGS: -D warnings
+
+jobs:
+  cargo-doc:
+    name: Cargo Doc (${{ inputs.platform-name }})
+    runs-on: ${{ inputs.os }}
+    container: ${{ inputs.container || null }}
+
+    steps:
+    - name: Setup environment
+      if: ${{ inputs.setup-command != '' }}
+      run: ${{ inputs.setup-command }}
+
+    - uses: actions/checkout@v3
+
+    - name: 'one_collect: Build docs'
+      working-directory: one_collect
+      run: cargo doc --locked --no-deps
+
+    - name: 'record-trace executable: Build docs'
+      working-directory: record-trace
+      run: cargo doc --locked --no-deps
+
+    - name: 'record-trace FFI: Build docs'
+      working-directory: record-trace/ffi
+      run: cargo doc --locked --no-deps
