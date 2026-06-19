@@ -221,6 +221,26 @@ pub trait PerfDataSource {
 
     fn more(&self) -> bool;
 
+    /// Prime reading for a single CPU's ring. Returns a
+    /// [`CpuReadContext`] to pass to [`Self::read_cpu`] and
+    /// [`Self::end_reading_cpu`], or `None` if the source has no ring
+    /// for `cpu` (the default for sources without per-CPU draining).
+    fn begin_reading_cpu(
+        &mut self,
+        _cpu: u32) -> Option<CpuReadContext> { None }
+
+    /// Read the next record from the ring identified by `ctx`, or `None`
+    /// once it is drained.
+    fn read_cpu(
+        &mut self,
+        _ctx: &CpuReadContext) -> Option<PerfData<'_>> { None }
+
+    /// Finish the drain started by [`Self::begin_reading_cpu`],
+    /// publishing the consumed bytes back to the kernel.
+    fn end_reading_cpu(
+        &mut self,
+        _ctx: &CpuReadContext) { }
+
     /// Borrow the per-CPU perf file descriptors owned by this source,
     /// paired with their CPU index. Returns an empty list for sources
     /// that do not expose per-CPU perf fds (for example, mock or
@@ -232,6 +252,73 @@ pub trait PerfDataSource {
     /// Returns None if no in-process ring buffer is available.
     fn take_in_process_writer(
         &mut self) -> Option<rb::InProcessRingBufWriter> { None }
+}
+
+/// Opaque per-CPU drain handle returned by
+/// [`PerfDataSource::begin_reading_cpu`] and passed back to
+/// [`PerfDataSource::read_cpu`] and [`PerfDataSource::end_reading_cpu`]
+/// for the duration of one CPU's drain.
+///
+/// Holding it lets a source resolve a CPU's ring once and reuse that
+/// result for every record, instead of looking it up per record.
+pub struct CpuReadContext {
+    cpu: u32,
+    reader_index: usize,
+}
+
+impl CpuReadContext {
+    pub(crate) fn new(
+        cpu: u32,
+        reader_index: usize) -> Self {
+        Self { cpu, reader_index }
+    }
+
+    pub(crate) const fn cpu(&self) -> u32 {
+        self.cpu
+    }
+
+    pub(crate) const fn reader_index(&self) -> usize {
+        self.reader_index
+    }
+}
+
+/// Error returned by [`PerfSession::parse_for_cpu`].
+#[derive(Debug)]
+pub enum ParseForCpuError {
+    /// No ring buffer is associated with the requested CPU. Valid CPU
+    /// values come from [`PerfSession::perf_fds`].
+    UnknownCpu(u32),
+
+    /// A perf record could not be decoded while draining the ring.
+    Parse(TryFromSliceError),
+}
+
+impl std::fmt::Display for ParseForCpuError {
+    fn fmt(
+        &self,
+        f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ParseForCpuError::UnknownCpu(cpu) => write!(
+                f,
+                "no ring buffer for cpu={cpu}; valid CPUs come from perf_fds()"),
+            ParseForCpuError::Parse(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for ParseForCpuError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ParseForCpuError::UnknownCpu(_) => None,
+            ParseForCpuError::Parse(e) => Some(e),
+        }
+    }
+}
+
+impl From<TryFromSliceError> for ParseForCpuError {
+    fn from(e: TryFromSliceError) -> Self {
+        ParseForCpuError::Parse(e)
+    }
 }
 
 pub struct PerfSession {
@@ -706,6 +793,51 @@ impl PerfSession {
         result
     }
 
+    /// Drain and process all currently-available records from a single
+    /// CPU's ring, firing registered event callbacks just like
+    /// [`Self::parse_all`] but scoped to one CPU.
+    ///
+    /// This is the push-model counterpart to [`Self::perf_fds`]: when a
+    /// CPU's perf fd becomes readable (because its
+    /// [`RingBufSessionBuilder::with_wakeup_watermark`] threshold was
+    /// crossed), call `parse_for_cpu` with that CPU to drain only the
+    /// ring that signaled, instead of walking every CPU's ring via
+    /// [`Self::parse_all`]. It returns once that ring is drained, so the
+    /// consumer can return to waiting on fd readiness.
+    ///
+    /// The `cpu` value must come from [`Self::perf_fds`]. Calling this
+    /// with a CPU that the session has no ring for (for example a CPU
+    /// masked out by the builder, or a non-perf source) returns
+    /// [`ParseForCpuError::UnknownCpu`] without reading anything.
+    ///
+    /// Unlike [`Self::parse_all`], this never sleeps when the ring is
+    /// drained: it does a single pass and returns, so the consumer can
+    /// drive successive calls from fd readiness.
+    pub fn parse_for_cpu(
+        &mut self,
+        cpu: u32) -> Result<(), ParseForCpuError> {
+        debug!("parse_for_cpu: parsing cpu={}", cpu);
+
+        let Some(ctx) = self.source.begin_reading_cpu(cpu) else {
+            /* Valid CPUs come from perf_fds(); anything else is a caller
+             * error the consumer can handle explicitly. */
+            warn!("parse_for_cpu: no ring buffer for cpu={}", cpu);
+            return Err(ParseForCpuError::UnknownCpu(cpu));
+        };
+
+        /* A single CPU's ring is already time-ordered, so one pass fully
+         * drains it; no cross-CPU merge or re-priming loop is needed. The
+         * context carries the resolved reader slot so each read avoids
+         * re-looking-up the CPU. */
+        while self.parse_perf_data(None, Some(&ctx))? { }
+
+        self.source.end_reading_cpu(&ctx);
+
+        info!("parse_for_cpu completed: cpu={}", cpu);
+
+        Ok(())
+    }
+
     fn log_errors(
         &self,
         event: &Event) {
@@ -720,9 +852,14 @@ impl PerfSession {
 
     fn parse_perf_data(
         &mut self,
-        perf_data: Option<PerfData>) -> Result<bool, TryFromSliceError> {
+        perf_data: Option<PerfData>,
+        cpu_ctx: Option<&CpuReadContext>) -> Result<bool, TryFromSliceError> {
         let perf_data = perf_data.or_else(|| {
-            self.source.read(self.read_timeout)
+            match cpu_ctx {
+                /* Some: drain one CPU's ring; None: drain across all CPUs. */
+                Some(ctx) => self.source.read_cpu(ctx),
+                None => self.source.read(self.read_timeout),
+            }
         });
 
         if perf_data.is_none() {
@@ -1146,7 +1283,7 @@ impl PerfSession {
 
             self.source.begin_reading();
 
-            while self.parse_perf_data(None)? {
+            while self.parse_perf_data(None, None)? {
                 /* Ensure we cannot read forever without a should_stop call */
                 if i >= 100 {
                     break;
@@ -1334,6 +1471,7 @@ mod tests {
         entries: Vec<(usize, usize)>,
         attr: Rc<perf_event_attr>,
         index: usize,
+        cpu: u32,
     }
 
     impl MockData {
@@ -1350,7 +1488,14 @@ mod tests {
                 entries: Vec::new(),
                 attr: Rc::new(attr),
                 index: 0,
+                cpu: 0,
             }
+        }
+
+        pub(crate) fn set_cpu(
+            &mut self,
+            cpu: u32) {
+            self.cpu = cpu;
         }
 
         pub(crate) fn push(
@@ -1401,7 +1546,7 @@ mod tests {
 
             Some(PerfData {
                 ancillary: AncillaryData {
-                    cpu: 0,
+                    cpu: self.cpu,
                     attributes: self.attr.clone(),
                 },
                 raw_data: &self.data[start .. end],
@@ -1413,6 +1558,33 @@ mod tests {
         fn more(&self) -> bool {
             self.index < self.entries.len()
         }
+
+        /* CPU-scoped variants: this mock models a single CPU's ring, so
+         * only the configured `cpu` has data; any other CPU behaves like
+         * a CPU with no ring. */
+        fn begin_reading_cpu(
+            &mut self,
+            cpu: u32) -> Option<CpuReadContext> {
+            if cpu == self.cpu {
+                Some(CpuReadContext::new(cpu, 0))
+            } else {
+                None
+            }
+        }
+
+        fn read_cpu(
+            &mut self,
+            ctx: &CpuReadContext) -> Option<PerfData<'_>> {
+            if ctx.cpu() != self.cpu {
+                return None;
+            }
+
+            self.read(Duration::ZERO)
+        }
+
+        fn end_reading_cpu(
+            &mut self,
+            _ctx: &CpuReadContext) { }
     }
 
     #[test]
@@ -1669,5 +1841,101 @@ mod tests {
         session.add_event(e).unwrap();
         session.parse_all().unwrap();
         assert_eq!(1, count.load(Ordering::Relaxed));
+    }
+
+    /// Build a minimal PERF_RECORD_SAMPLE carrying PERF_SAMPLE_TIME and
+    /// PERF_SAMPLE_RAW (common_type + magic) into `mock`.
+    fn push_sample(
+        mock: &mut MockData,
+        id: u16,
+        magic: u64,
+        time: u64) {
+        let mut perf_data = Vec::new();
+        let mut raw_data = Vec::new();
+        let mut event_data = Vec::new();
+
+        event_data.extend_from_slice(&id.to_ne_bytes());
+        event_data.extend_from_slice(&magic.to_ne_bytes());
+
+        Sample::write_time(time, &mut raw_data);
+
+        let raw_len = event_data.len() as u32;
+        let field_size = 4 + event_data.len();
+        let aligned_field_size = abi::align_to_perf_record(field_size);
+        raw_data.extend_from_slice(&raw_len.to_ne_bytes());
+        raw_data.extend_from_slice(event_data.as_slice());
+        let padding = aligned_field_size - field_size;
+        if padding > 0 {
+            raw_data.resize(raw_data.len() + padding, 0);
+        }
+
+        Header::write(abi::PERF_RECORD_SAMPLE, 0, raw_data.as_slice(), &mut perf_data);
+        mock.push(perf_data.as_slice());
+    }
+
+    #[test]
+    fn parse_for_cpu_drains_matching_cpu() {
+        let sample_format = abi::PERF_SAMPLE_TIME | abi::PERF_SAMPLE_RAW;
+
+        let id: u16 = 1;
+        let cpu: u32 = 3;
+
+        let mut mock = MockData::new(sample_format, 0);
+        mock.set_cpu(cpu);
+        push_sample(&mut mock, id, 1234, 4321);
+
+        let mut session = PerfSession::new(Box::new(mock));
+
+        let mut e = Event::new(id as usize, "test".into());
+        let format = e.format_mut();
+
+        format.add_field(
+            EventField::new(
+                "common_type".into(), "unsigned short".into(),
+                LocationType::Static, 0, 2));
+        format.add_field(
+            EventField::new(
+                "magic".into(), "u64".into(),
+                LocationType::Static, 2, 8));
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let callback_count = Arc::clone(&count);
+        let magic_ref = format.get_field_ref("magic").unwrap();
+
+        e.add_callback(move |data| {
+            let read_magic = data.format()
+                .try_get_u64(magic_ref, data.event_data())
+                .unwrap();
+
+            assert_eq!(1234, read_magic);
+
+            callback_count.fetch_add(1, Ordering::Relaxed);
+
+            Ok(())
+        });
+
+        session.add_event(e).unwrap();
+
+        /* Draining the matching CPU fires the callback exactly once. */
+        session.parse_for_cpu(cpu).unwrap();
+        assert_eq!(1, count.load(Ordering::Relaxed));
+
+        /* The ring is now drained, so a second call is a no-op. */
+        session.parse_for_cpu(cpu).unwrap();
+        assert_eq!(1, count.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn parse_for_cpu_unknown_cpu_returns_error() {
+        /* The mock only owns cpu=0; any other CPU has no ring and must
+         * surface as ParseForCpuError::UnknownCpu rather than silently
+         * doing nothing. */
+        let mock = MockData::new(0, 0);
+        let mut session = PerfSession::new(Box::new(mock));
+
+        match session.parse_for_cpu(7) {
+            Err(ParseForCpuError::UnknownCpu(cpu)) => assert_eq!(7, cpu),
+            other => panic!("expected UnknownCpu(7), got {other:?}"),
+        }
     }
 }
