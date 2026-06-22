@@ -47,6 +47,13 @@ fn is_dotnet_memfd_mapping(filename: &str) -> bool {
     filename.starts_with("/memfd:doublemapper")
 }
 
+/// Conservative timeout for diagnostic socket reads and writes. Prevents
+/// indefinite blocking when a .NET runtime is stopped (e.g. under a debugger).
+const DIAG_SOCKET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Timeout for waiting on worker threads during shutdown.
+const WORKER_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 struct PerfMapContext {
     tmp: OpenAt,
     pid: u32,
@@ -78,6 +85,10 @@ impl PerfMapContext {
                 for path in paths {
                     let path = format!("/proc/{}/root/tmp/{}", self.pid, path);
                     if let Ok(sock) = UnixStream::connect(path) {
+                        /* Bound all reads/writes so a stopped runtime can
+                         * never block a worker thread indefinitely. */
+                        let _ = sock.set_read_timeout(Some(DIAG_SOCKET_TIMEOUT));
+                        let _ = sock.set_write_timeout(Some(DIAG_SOCKET_TIMEOUT));
                         debug!("Opened diagnostic socket: pid={}, nspid={}", self.pid, self.nspid);
                         return Some(sock);
                     }
@@ -430,9 +441,19 @@ impl UserEventTracker {
         /* Enqueue stop message */
         self.send.send(0)?;
 
-        /* Wait for worker to finish */
+        /* Wait for worker to finish, but never block shutdown
+         * indefinitely if it is stuck talking to a wedged runtime. */
         if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+            let (done_tx, done_rx) = mpsc::channel();
+
+            std::thread::spawn(move || {
+                let _ = worker.join();
+                let _ = done_tx.send(());
+            });
+
+            if done_rx.recv_timeout(WORKER_JOIN_TIMEOUT).is_err() {
+                warn!("oc-dotnet-events worker did not exit within timeout");
+            }
         }
 
         Ok(())
@@ -541,9 +562,19 @@ impl PerfMapTracker {
         /* Enqueue stop message */
         self.send.send(0)?;
 
-        /* Wait for worker to finish */
+        /* Wait for worker to finish, but never block shutdown
+         * indefinitely if it is stuck talking to a wedged runtime. */
         if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+            let (done_tx, done_rx) = mpsc::channel();
+
+            std::thread::spawn(move || {
+                let _ = worker.join();
+                let _ = done_tx.send(());
+            });
+
+            if done_rx.recv_timeout(WORKER_JOIN_TIMEOUT).is_err() {
+                warn!("oc-dotnet-perfmap worker did not exit within timeout");
+            }
         }
 
         Ok(())
