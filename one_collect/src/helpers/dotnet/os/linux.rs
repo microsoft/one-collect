@@ -518,6 +518,11 @@ impl UserEventTracker {
                 }
             }
 
+            /* Reap tracked processes that have exited; dropping the
+             * socket ends their (already-defunct) EventPipe session and
+             * keeps the map from growing across process churn. */
+            pids.retain(|&pid, _| is_process_alive(pid));
+
             if cancelled.load(Ordering::Relaxed) {
                 break;
             }
@@ -725,6 +730,21 @@ impl PerfMapTracker {
                     i += 1;
                 }
             }
+
+            /* Reap tracked processes that have exited: disable and drop
+             * their context, and forget the PID, so state does not grow
+             * across process churn. */
+            {
+                let mut contexts = arc.lock().unwrap();
+                contexts.retain(|proc| {
+                    let alive = is_process_alive(proc.pid);
+                    if !alive {
+                        let _ = proc.disable_perf_map();
+                    }
+                    alive
+                });
+            }
+            pids.retain(|&pid| is_process_alive(pid));
 
             if cancelled.load(Ordering::Relaxed) {
                 break;
