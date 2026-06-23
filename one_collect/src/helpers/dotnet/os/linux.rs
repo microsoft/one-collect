@@ -14,6 +14,7 @@ use std::collections::{HashSet, HashMap};
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::sync::mpsc::{self, Sender, Receiver};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 
 use crate::helpers::dotnet::*;
@@ -57,6 +58,13 @@ const WORKER_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// Interval between retry attempts for processes that failed IPC
 /// enablement (e.g. a runtime that was temporarily unreachable).
 const DIAG_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Returns true while the process still exists. Used to evict processes
+/// that exited before we could enable IPC, so they are not retried
+/// forever (which would also leak entries on PID reuse).
+fn is_process_alive(pid: u32) -> bool {
+    Path::new(&format!("/proc/{}", pid)).exists()
+}
 
 struct PerfMapContext {
     tmp: OpenAt,
@@ -246,19 +254,26 @@ struct UserEventTrackerSettings {
 struct UserEventTracker {
     send: Sender<u32>,
     worker: Option<JoinHandle<()>>,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl UserEventTracker {
     fn new(settings: Arc<Mutex<UserEventTrackerSettings>>) -> Self {
         let (send, recv) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
 
-        let worker = thread::spawn(move || {
-            Self::worker_thread_proc(recv, settings);
-        });
+        let worker_cancelled = cancelled.clone();
+        let worker = thread::Builder::new()
+            .name("oc-dotnet-events".into())
+            .spawn(move || {
+                Self::worker_thread_proc(recv, settings, worker_cancelled);
+            })
+            .expect("failed to spawn oc-dotnet-events worker");
 
         Self {
             send,
             worker: Some(worker),
+            cancelled,
         }
     }
 
@@ -414,7 +429,8 @@ impl UserEventTracker {
 
     fn worker_thread_proc(
         recv: Receiver<u32>,
-        arc: Arc<Mutex<UserEventTrackerSettings>>) {
+        arc: Arc<Mutex<UserEventTrackerSettings>>,
+        cancelled: Arc<AtomicBool>) {
         let mut pids: HashMap<u32, UnixStream> = HashMap::new();
         let mut pending: Vec<u32> = Vec::new();
         let mut path_buf = PathBuf::new();
@@ -464,6 +480,10 @@ impl UserEventTracker {
 
             /* Process newly discovered PIDs */
             for pid in incoming {
+                if cancelled.load(Ordering::Relaxed) {
+                    break;
+                }
+
                 if pids.contains_key(&pid) {
                     continue;
                 }
@@ -477,13 +497,29 @@ impl UserEventTracker {
                 }
             }
 
-            /* Retry processes that failed earlier */
-            if !pending.is_empty() {
-                pending.retain(|&pid| {
-                    !Self::try_enable_events(
-                        pid, &arc, &mut pids,
-                        &mut path_buf, &mut buffer)
-                });
+            /* Drop processes that exited before we could enable them so
+             * we don't retry them forever. */
+            pending.retain(|&pid| is_process_alive(pid));
+
+            /* Retry processes that failed earlier, checking for
+             * cancellation between attempts so shutdown is prompt. */
+            let mut i = 0;
+            while i < pending.len() {
+                if cancelled.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                if Self::try_enable_events(
+                    pending[i], &arc, &mut pids,
+                    &mut path_buf, &mut buffer) {
+                    pending.remove(i);
+                } else {
+                    i += 1;
+                }
+            }
+
+            if cancelled.load(Ordering::Relaxed) {
+                break;
             }
         }
 
@@ -504,6 +540,9 @@ impl UserEventTracker {
 
     fn disable(
         &mut self) -> anyhow::Result<()> {
+        /* Signal the worker to stop mid-pass, then wake it. */
+        self.cancelled.store(true, Ordering::Relaxed);
+
         /* Enqueue stop message */
         self.send.send(0)?;
 
@@ -529,19 +568,26 @@ impl UserEventTracker {
 struct PerfMapTracker {
     send: Sender<u32>,
     worker: Option<JoinHandle<()>>,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl PerfMapTracker {
     fn new(arc: ArcPerfMapContexts) -> Self {
         let (send, recv) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
 
-        let worker = thread::spawn(move || {
-            Self::worker_thread_proc(recv, arc)
-        });
+        let worker_cancelled = cancelled.clone();
+        let worker = thread::Builder::new()
+            .name("oc-dotnet-perfmap".into())
+            .spawn(move || {
+                Self::worker_thread_proc(recv, arc, worker_cancelled)
+            })
+            .expect("failed to spawn oc-dotnet-perfmap worker");
 
         Self {
             send,
             worker: Some(worker),
+            cancelled,
         }
     }
 
@@ -594,7 +640,8 @@ impl PerfMapTracker {
 
     fn worker_thread_proc(
         recv: Receiver<u32>,
-        arc: ArcPerfMapContexts) {
+        arc: ArcPerfMapContexts,
+        cancelled: Arc<AtomicBool>) {
         let mut pids = HashSet::new();
         let mut pending: Vec<u32> = Vec::new();
         let mut path_buf = PathBuf::new();
@@ -643,6 +690,10 @@ impl PerfMapTracker {
 
             /* Process newly discovered PIDs */
             for pid in incoming {
+                if cancelled.load(Ordering::Relaxed) {
+                    break;
+                }
+
                 if pids.contains(&pid) {
                     continue;
                 }
@@ -655,12 +706,28 @@ impl PerfMapTracker {
                 }
             }
 
-            /* Retry processes that failed earlier */
-            if !pending.is_empty() {
-                pending.retain(|&pid| {
-                    !Self::try_enable_perf_map(
-                        pid, &arc, &mut pids, &mut path_buf)
-                });
+            /* Drop processes that exited before we could enable them so
+             * we don't retry them forever. */
+            pending.retain(|&pid| is_process_alive(pid));
+
+            /* Retry processes that failed earlier, checking for
+             * cancellation between attempts so shutdown is prompt. */
+            let mut i = 0;
+            while i < pending.len() {
+                if cancelled.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                if Self::try_enable_perf_map(
+                    pending[i], &arc, &mut pids, &mut path_buf) {
+                    pending.remove(i);
+                } else {
+                    i += 1;
+                }
+            }
+
+            if cancelled.load(Ordering::Relaxed) {
+                break;
             }
         }
 
@@ -684,6 +751,9 @@ impl PerfMapTracker {
 
     fn disable(
         &mut self) -> anyhow::Result<()> {
+        /* Signal the worker to stop mid-pass, then wake it. */
+        self.cancelled.store(true, Ordering::Relaxed);
+
         /* Enqueue stop message */
         self.send.send(0)?;
 
