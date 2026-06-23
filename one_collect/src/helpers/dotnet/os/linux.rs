@@ -54,6 +54,10 @@ const DIAG_SOCKET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// Timeout for waiting on worker threads during shutdown.
 const WORKER_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Interval between retry attempts for processes that failed IPC
+/// enablement (e.g. a runtime that was temporarily unreachable).
+const DIAG_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
+
 struct PerfMapContext {
     tmp: OpenAt,
     pid: u32,
@@ -380,44 +384,106 @@ impl UserEventTracker {
         Ok(())
     }
 
+    fn try_enable_events(
+        pid: u32,
+        arc: &Arc<Mutex<UserEventTrackerSettings>>,
+        pids: &mut HashMap<u32, UnixStream>,
+        path_buf: &mut PathBuf,
+        buffer: &mut Vec<u8>) -> bool {
+        let nspid = procfs::ns_pid(path_buf, pid).unwrap_or(pid);
+
+        if let Ok(diag) = PerfMapContext::new(pid, nspid) {
+            if let Some(mut socket) = diag.open_diag_socket() {
+                if let Ok(settings) = arc.lock() {
+                    match Self::enable_events(&mut socket, &settings, buffer) {
+                        Ok(()) => {
+                            info!("Enabled .NET events for process: pid={}", pid);
+                            pids.insert(pid, socket);
+                            return true;
+                        },
+                        Err(err) => {
+                            warn!("Failed to enable .NET events: pid={}, error={}", pid, err);
+                        },
+                    }
+                }
+            }
+        }
+
+        false
+    }
+
     fn worker_thread_proc(
         recv: Receiver<u32>,
         arc: Arc<Mutex<UserEventTrackerSettings>>) {
         let mut pids: HashMap<u32, UnixStream> = HashMap::new();
+        let mut pending: Vec<u32> = Vec::new();
         let mut path_buf = PathBuf::new();
         let mut buffer = Vec::new();
 
         loop {
-            let pid = match recv.recv() {
-                Ok(pid) => { pid },
-                Err(_) => { break; },
+            /* Wait for at least one PID. Block when nothing is pending,
+             * otherwise use a timeout so failed processes get retried.
+             * A timeout yields no PID, which is distinct from receiving
+             * the shutdown sentinel (0). */
+            let first = if pending.is_empty() {
+                match recv.recv() {
+                    Ok(pid) => Some(pid),
+                    Err(_) => break,
+                }
+            } else {
+                match recv.recv_timeout(DIAG_RETRY_INTERVAL) {
+                    Ok(pid) => Some(pid),
+                    Err(mpsc::RecvTimeoutError::Timeout) => None,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
             };
 
-            if pid == 0 {
+            /* Drain everything immediately available before doing work.
+             * Stop promptly if the shutdown sentinel (0) is seen, even if
+             * other PIDs are queued behind it. */
+            let mut incoming = Vec::new();
+            let mut stop = matches!(first, Some(0));
+
+            if let Some(pid) = first {
+                if pid != 0 {
+                    incoming.push(pid);
+                }
+            }
+
+            while !stop {
+                match recv.try_recv() {
+                    Ok(0) => { stop = true; },
+                    Ok(pid) => { incoming.push(pid); },
+                    Err(_) => { break; },
+                }
+            }
+
+            if stop {
                 break;
             }
 
-            /* Skip if already enabled */
-            if pids.contains_key(&pid) {
-                continue;
-            }
+            /* Process newly discovered PIDs */
+            for pid in incoming {
+                if pids.contains_key(&pid) {
+                    continue;
+                }
 
-            let nspid = procfs::ns_pid(&mut path_buf, pid).unwrap_or(pid);
-
-            if let Ok(diag) = PerfMapContext::new(pid, nspid) {
-                if let Some(mut socket) = diag.open_diag_socket() {
-                    if let Ok(settings) = arc.lock() {
-                        match Self::enable_events(&mut socket, &settings, &mut buffer) {
-                            Ok(()) => {
-                                info!("Enabled .NET events for process: pid={}", pid);
-                                pids.insert(pid, socket);
-                            },
-                            Err(err) => {
-                                warn!("Failed to enable .NET events: pid={}, error={}", pid, err);
-                            },
-                        }
+                if !Self::try_enable_events(
+                    pid, &arc, &mut pids,
+                    &mut path_buf, &mut buffer) {
+                    if !pending.contains(&pid) {
+                        pending.push(pid);
                     }
                 }
+            }
+
+            /* Retry processes that failed earlier */
+            if !pending.is_empty() {
+                pending.retain(|&pid| {
+                    !Self::try_enable_events(
+                        pid, &arc, &mut pids,
+                        &mut path_buf, &mut buffer)
+                });
             }
         }
 
@@ -479,63 +545,122 @@ impl PerfMapTracker {
         }
     }
 
+    fn try_enable_perf_map(
+        pid: u32,
+        arc: &ArcPerfMapContexts,
+        pids: &mut HashSet<u32>,
+        path_buf: &mut PathBuf) -> bool {
+        let nspid = procfs::ns_pid(path_buf, pid).unwrap_or(pid);
+
+        let proc = match PerfMapContext::new(pid, nspid) {
+            Ok(proc) => proc,
+            Err(e) => {
+                warn!("PerfMapTracker: failed to create PerfMapContext: pid={}, nspid={}, error={}", pid, nspid, e);
+                return false;
+            }
+        };
+
+        match proc.has_perf_map_environ() {
+            Ok(true) => {
+                debug!("PerfMapTracker: skipping pid={}, nspid={}, already has perf map env var", pid, nspid);
+                pids.insert(pid);
+                return true;
+            }
+            Ok(false) => { }
+            Err(e) => {
+                warn!("PerfMapTracker: failed to read perf map environ: pid={}, nspid={}, error={}", pid, nspid, e);
+            }
+        }
+
+        /* Always try to disable in case it was left on */
+        let _ = proc.disable_perf_map();
+
+        /* Enable until the thread is done */
+        match proc.enable_perf_map() {
+            Ok(()) => {
+                /* Save context for later */
+                arc.lock().unwrap().push(proc);
+
+                /* Ensure we don't enable it again */
+                pids.insert(pid);
+                true
+            }
+            Err(e) => {
+                warn!("PerfMapTracker: failed to enable perf map: pid={}, nspid={}, error={}", pid, nspid, e);
+                false
+            }
+        }
+    }
+
     fn worker_thread_proc(
         recv: Receiver<u32>,
         arc: ArcPerfMapContexts) {
         let mut pids = HashSet::new();
+        let mut pending: Vec<u32> = Vec::new();
         let mut path_buf = PathBuf::new();
 
         loop {
-            let pid = match recv.recv() {
-                Ok(pid) => { pid },
-                Err(_) => { break; },
+            /* Wait for at least one PID. Block when nothing is pending,
+             * otherwise use a timeout so failed processes get retried.
+             * A timeout yields no PID, which is distinct from receiving
+             * the shutdown sentinel (0). */
+            let first = if pending.is_empty() {
+                match recv.recv() {
+                    Ok(pid) => Some(pid),
+                    Err(_) => break,
+                }
+            } else {
+                match recv.recv_timeout(DIAG_RETRY_INTERVAL) {
+                    Ok(pid) => Some(pid),
+                    Err(mpsc::RecvTimeoutError::Timeout) => None,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
             };
 
-            if pid == 0 {
+            /* Drain everything immediately available before doing work.
+             * Stop promptly if the shutdown sentinel (0) is seen, even if
+             * other PIDs are queued behind it. */
+            let mut incoming = Vec::new();
+            let mut stop = matches!(first, Some(0));
+
+            if let Some(pid) = first {
+                if pid != 0 {
+                    incoming.push(pid);
+                }
+            }
+
+            while !stop {
+                match recv.try_recv() {
+                    Ok(0) => { stop = true; },
+                    Ok(pid) => { incoming.push(pid); },
+                    Err(_) => { break; },
+                }
+            }
+
+            if stop {
                 break;
             }
 
-            /* Skip if already enabled */
-            if pids.contains(&pid) {
-                continue;
-            }
-
-            let nspid = procfs::ns_pid(&mut path_buf, pid).unwrap_or(pid);
-
-            let proc = match PerfMapContext::new(pid, nspid) {
-                Ok(proc) => proc,
-                Err(e) => {
-                    warn!("PerfMapTracker: failed to create PerfMapContext: pid={}, nspid={}, error={}", pid, nspid, e);
+            /* Process newly discovered PIDs */
+            for pid in incoming {
+                if pids.contains(&pid) {
                     continue;
                 }
-            };
 
-            match proc.has_perf_map_environ() {
-                Ok(true) => {
-                    debug!("PerfMapTracker: skipping pid={}, nspid={}, already has perf map env var", pid, nspid);
-                    continue;
-                }
-                Ok(false) => { }
-                Err(e) => {
-                    warn!("PerfMapTracker: failed to read perf map environ: pid={}, nspid={}, error={}", pid, nspid, e);
+                if !Self::try_enable_perf_map(
+                    pid, &arc, &mut pids, &mut path_buf) {
+                    if !pending.contains(&pid) {
+                        pending.push(pid);
+                    }
                 }
             }
 
-            /* Always try to disable in case it was left on */
-            let _ = proc.disable_perf_map();
-
-            /* Enable until the thread is done */
-            match proc.enable_perf_map() {
-                Ok(()) => {
-                    /* Save context for later */
-                    arc.lock().unwrap().push(proc);
-
-                    /* Ensure we don't enable it again */
-                    pids.insert(pid);
-                }
-                Err(e) => {
-                    warn!("PerfMapTracker: failed to enable perf map: pid={}, nspid={}, error={}", pid, nspid, e);
-                }
+            /* Retry processes that failed earlier */
+            if !pending.is_empty() {
+                pending.retain(|&pid| {
+                    !Self::try_enable_perf_map(
+                        pid, &arc, &mut pids, &mut path_buf)
+                });
             }
         }
 
