@@ -1410,10 +1410,20 @@ impl PerfSession {
         let mut module_count = 0;
 
         procfs::iter_modules(|pid, module| {
-            if module.path.is_none() {
-                return;
-            }
-
+            /*
+             * Note: we intentionally do NOT skip mappings without a backing
+             * file path here. Anonymous executable mappings are JIT code
+             * heaps (e.g. .NET when W^X is disabled or no usable memfd is
+             * available, common in some container sandboxes). For an
+             * already-running process no live MMAP2 record is ever emitted
+             * for these regions, so they only appear here in
+             * /proc/<pid>/maps. Skipping them leaves pre-existing JIT'd code
+             * unregistered, so the unwinder cannot walk through it and every
+             * sample that lands in it becomes a single-frame "broken" stack.
+             *
+             * Non-executable mappings are still skipped unless the caller
+             * asked for all mappings (e.g. data mappings via MMAP_DATA).
+             */
             if !captures_all && !module.is_exec() {
                 return;
             }
@@ -1424,7 +1434,13 @@ impl PerfSession {
                 }
             }
 
-            let path = module.path.unwrap();
+            /*
+             * Anonymous mappings have no path; emit an empty filename so the
+             * downstream MMAP2 handler treats them as anonymous code
+             * (UnwindType::Prolog), matching how live anon JIT mappings are
+             * handled.
+             */
+            let path = module.path.unwrap_or("");
 
             event_data.clear();
             full_data.clear();
