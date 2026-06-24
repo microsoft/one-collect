@@ -14,6 +14,7 @@ use std::collections::{HashSet, HashMap};
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::sync::mpsc::{self, Sender, Receiver};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 
 use crate::helpers::dotnet::*;
@@ -47,12 +48,37 @@ fn is_dotnet_memfd_mapping(filename: &str) -> bool {
     filename.starts_with("/memfd:doublemapper")
 }
 
+/* These timeouts form a 2x2 of {steady-state, teardown} x {per-op, aggregate}.
+ * Steady-state ops can legitimately take a few seconds (DIAG_SOCKET_TIMEOUT),
+ * while teardown ops are tiny single writes and should fail fast
+ * (DIAG_DISABLE_TIMEOUT). DIAG_DISABLE_BUDGET caps the teardown loop, and
+ * WORKER_JOIN_TIMEOUT is the outer backstop on disable() itself.
+ *
+ * Invariant: WORKER_JOIN_TIMEOUT should be >= the worst-case time the worker
+ * needs to reach completion after cancellation, i.e. one in-flight op plus
+ * DIAG_DISABLE_BUDGET. With a 5s in-flight op + 3s budget = 8s < 10s, the join
+ * backstop does not fire on a merely-slow-but-healthy teardown. (The events
+ * worker's enable_events can do up to three reads at DIAG_SOCKET_TIMEOUT each,
+ * which can exceed this; the join then detaches+warns, which is harmless.) */
+
 /// Conservative timeout for diagnostic socket reads and writes. Prevents
-/// indefinite blocking when a .NET runtime is stopped (e.g. under a debugger).
+/// indefinite blocking when a .NET runtime is unresponsive.
 const DIAG_SOCKET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Timeout for waiting on worker threads during shutdown.
 const WORKER_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Short timeout for diagnostic socket writes on the teardown path. A
+/// disable request is near-instant against a healthy runtime, so a wedged
+/// one fails fast instead of consuming the full read/write timeout.
+const DIAG_DISABLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Overall budget for best-effort disable of tracked runtimes at shutdown.
+/// Caps total teardown time so a large number of wedged runtimes can't make
+/// shutdown scale with process count. Sized to attempt roughly three teardown
+/// writes (each bounded by DIAG_DISABLE_TIMEOUT) before giving up.
+const DIAG_DISABLE_BUDGET: std::time::Duration =
+    std::time::Duration::from_secs(3 * DIAG_DISABLE_TIMEOUT.as_secs());
 
 struct PerfMapContext {
     tmp: OpenAt,
@@ -180,6 +206,9 @@ impl PerfMapContext {
 
         match self.open_diag_socket() {
             Some(mut sock) => { 
+                /* Teardown writes are near-instant on a healthy runtime;
+                 * fail fast on a wedged one rather than blocking shutdown. */
+                let _ = sock.set_write_timeout(Some(DIAG_DISABLE_TIMEOUT));
                 if let Err(e) = sock.write_all(bytes) {
                     warn!("Failed to write to diagnostic socket: pid={}, nspid={}, error={}", self.pid, self.nspid, e);
                     anyhow::bail!("Failed to write to diagnostic socket: {}", e);
@@ -242,19 +271,32 @@ struct UserEventTrackerSettings {
 struct UserEventTracker {
     send: Sender<u32>,
     worker: Option<JoinHandle<()>>,
+    cancelled: Arc<AtomicBool>,
+    done: Receiver<()>,
 }
 
 impl UserEventTracker {
     fn new(settings: Arc<Mutex<UserEventTrackerSettings>>) -> Self {
         let (send, recv) = mpsc::channel();
+        let (done_tx, done) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = cancelled.clone();
 
-        let worker = thread::spawn(move || {
-            Self::worker_thread_proc(recv, settings);
-        });
+        let worker = thread::Builder::new()
+            .name("oc-dotnet-events".into())
+            .spawn(move || {
+                Self::worker_thread_proc(recv, settings, worker_cancelled);
+                /* Signal completion as the last act so disable() can wait
+                 * with a timeout without spawning a helper thread. */
+                let _ = done_tx.send(());
+            })
+            .expect("failed to spawn oc-dotnet-events worker");
 
         Self {
             send,
             worker: Some(worker),
+            cancelled,
+            done,
         }
     }
 
@@ -382,7 +424,8 @@ impl UserEventTracker {
 
     fn worker_thread_proc(
         recv: Receiver<u32>,
-        arc: Arc<Mutex<UserEventTrackerSettings>>) {
+        arc: Arc<Mutex<UserEventTrackerSettings>>,
+        cancelled: Arc<AtomicBool>) {
         let mut pids: HashMap<u32, UnixStream> = HashMap::new();
         let mut path_buf = PathBuf::new();
         let mut buffer = Vec::new();
@@ -393,7 +436,9 @@ impl UserEventTracker {
                 Err(_) => { break; },
             };
 
-            if pid == 0 {
+            /* Stop on the shutdown sentinel, or once cancelled so any
+             * PIDs already queued behind it don't delay shutdown. */
+            if pid == 0 || cancelled.load(Ordering::Relaxed) {
                 break;
             }
 
@@ -438,20 +483,20 @@ impl UserEventTracker {
 
     fn disable(
         &mut self) -> anyhow::Result<()> {
+        /* Ask the worker to stop taking new work, then wake it. */
+        self.cancelled.store(true, Ordering::Relaxed);
+
         /* Enqueue stop message */
         self.send.send(0)?;
 
-        /* Wait for worker to finish, but never block shutdown
-         * indefinitely if it is stuck talking to a wedged runtime. */
+        /* Wait for the worker to finish, but never block shutdown
+         * indefinitely if it is wedged in an un-interruptible syscall.
+         * The worker signals completion on the done channel; on timeout we
+         * detach (drop the handle without joining) as a backstop. */
         if let Some(worker) = self.worker.take() {
-            let (done_tx, done_rx) = mpsc::channel();
-
-            std::thread::spawn(move || {
+            if self.done.recv_timeout(WORKER_JOIN_TIMEOUT).is_ok() {
                 let _ = worker.join();
-                let _ = done_tx.send(());
-            });
-
-            if done_rx.recv_timeout(WORKER_JOIN_TIMEOUT).is_err() {
+            } else {
                 warn!("oc-dotnet-events worker did not exit within timeout");
             }
         }
@@ -463,25 +508,39 @@ impl UserEventTracker {
 struct PerfMapTracker {
     send: Sender<u32>,
     worker: Option<JoinHandle<()>>,
+    cancelled: Arc<AtomicBool>,
+    done: Receiver<()>,
 }
 
 impl PerfMapTracker {
     fn new(arc: ArcPerfMapContexts) -> Self {
         let (send, recv) = mpsc::channel();
+        let (done_tx, done) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = cancelled.clone();
 
-        let worker = thread::spawn(move || {
-            Self::worker_thread_proc(recv, arc)
-        });
+        let worker = thread::Builder::new()
+            .name("oc-dotnet-perfmap".into())
+            .spawn(move || {
+                Self::worker_thread_proc(recv, arc, worker_cancelled);
+                /* Signal completion as the last act so disable() can wait
+                 * with a timeout without spawning a helper thread. */
+                let _ = done_tx.send(());
+            })
+            .expect("failed to spawn oc-dotnet-perfmap worker");
 
         Self {
             send,
             worker: Some(worker),
+            cancelled,
+            done,
         }
     }
 
     fn worker_thread_proc(
         recv: Receiver<u32>,
-        arc: ArcPerfMapContexts) {
+        arc: ArcPerfMapContexts,
+        cancelled: Arc<AtomicBool>) {
         let mut pids = HashSet::new();
         let mut path_buf = PathBuf::new();
 
@@ -491,7 +550,9 @@ impl PerfMapTracker {
                 Err(_) => { break; },
             };
 
-            if pid == 0 {
+            /* Stop on the shutdown sentinel, or once cancelled so any
+             * PIDs already queued behind it don't delay shutdown. */
+            if pid == 0 || cancelled.load(Ordering::Relaxed) {
                 break;
             }
 
@@ -539,10 +600,25 @@ impl PerfMapTracker {
             }
         }
 
-        /* Thread is done, disable in-case caller forgets */
-        for proc in arc.lock().unwrap().iter() {
+        /* Thread is done: best-effort disable so still-running runtimes stop
+         * emitting perf maps. Drain the contexts out from under the lock so a
+         * slow disable never holds it across blocking I/O (which would stall
+         * remove_perf_maps at exporter drop), and cap the total time so a
+         * large number of wedged runtimes can't make shutdown scale with
+         * process count. The contexts are put back so the file cleanup in
+         * remove_perf_maps can still run. */
+        let contexts = std::mem::take(&mut *arc.lock().unwrap());
+
+        let deadline = std::time::Instant::now() + DIAG_DISABLE_BUDGET;
+        for proc in &contexts {
+            if std::time::Instant::now() >= deadline {
+                warn!("oc-dotnet-perfmap: disable budget exhausted, some runtimes left enabled");
+                break;
+            }
             let _ = proc.disable_perf_map();
         }
+
+        *arc.lock().unwrap() = contexts;
     }
 
     fn track(
@@ -559,20 +635,20 @@ impl PerfMapTracker {
 
     fn disable(
         &mut self) -> anyhow::Result<()> {
+        /* Ask the worker to stop taking new work, then wake it. */
+        self.cancelled.store(true, Ordering::Relaxed);
+
         /* Enqueue stop message */
         self.send.send(0)?;
 
-        /* Wait for worker to finish, but never block shutdown
-         * indefinitely if it is stuck talking to a wedged runtime. */
+        /* Wait for the worker to finish, but never block shutdown
+         * indefinitely if it is wedged in an un-interruptible syscall.
+         * The worker signals completion on the done channel; on timeout we
+         * detach (drop the handle without joining) as a backstop. */
         if let Some(worker) = self.worker.take() {
-            let (done_tx, done_rx) = mpsc::channel();
-
-            std::thread::spawn(move || {
+            if self.done.recv_timeout(WORKER_JOIN_TIMEOUT).is_ok() {
                 let _ = worker.join();
-                let _ = done_tx.send(());
-            });
-
-            if done_rx.recv_timeout(WORKER_JOIN_TIMEOUT).is_err() {
+            } else {
                 warn!("oc-dotnet-perfmap worker did not exit within timeout");
             }
         }
