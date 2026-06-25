@@ -20,6 +20,10 @@ use crate::event::*;
 #[cfg(target_os = "linux")]
 use std::os::fd::FromRawFd;
 
+// Required for cargo doc on Windows.
+#[cfg(target_os = "windows")]
+struct BorrowedFd<'a> { fd: &'a u32 }
+
 pub mod abi;
 pub mod rb;
 mod events;
@@ -636,7 +640,6 @@ impl PerfSession {
     /// outlive any consumer that uses them. Sources that do not expose
     /// per-CPU perf fds (mock or in-process sources) return an empty
     /// list.
-    #[cfg(target_os = "linux")]
     pub fn perf_fds(&self) -> Vec<(u32, BorrowedFd<'_>)> {
         self.source.perf_fds()
     }
