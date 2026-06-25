@@ -94,7 +94,8 @@ impl Recorder {
         let mut settings = ExportSettings::default()
             .with_version_attributes()
             .with_trace_context_attributes()
-            .with_activity_id_attributes();
+            .with_activity_id_attributes()
+            .with_cgroup_attributes();
 
         // CPU sampling.
         if self.args.on_cpu() {
@@ -221,6 +222,11 @@ impl Recorder {
                     context.sample_kind_str(),
                     context.comm_name(),
                     context.pid());
+
+                let cgroup_id = context.cgroup_id();
+                if cgroup_id != 0 {
+                    let _ = write!(line, "CGroup={} ", cgroup_id);
+                }
 
                 match context.sample().value() {
                     MetricValue::Count(count) => {

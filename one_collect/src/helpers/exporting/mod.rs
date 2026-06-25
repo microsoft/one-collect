@@ -38,6 +38,7 @@ use attributes::ExportAttributeWalker;
 use attributes::VersionOpCodeAttributeSource;
 use attributes::TraceContextAttributeSource;
 use attributes::ActivityIdAttributeSource;
+use attributes::CgroupAttributeSource;
 
 pub mod span;
 use span::ExportSpan;
@@ -196,6 +197,12 @@ pub trait ExportSamplerOSHooks {
     fn os_event_related_activity_id(
         &self,
         data: &EventData) -> anyhow::Result<Option<[u8; 16]>>;
+
+    fn os_event_cgroup(
+        &self,
+        _data: &EventData) -> anyhow::Result<Option<u64>> {
+        Ok(None)
+    }
 }
 
 impl ExportSampler {
@@ -349,13 +356,15 @@ impl ExportSampler {
         let time = self.os_event_time(data)?;
         let cpu = self.os_event_cpu(data)?;
 
-        Ok(self.exporter.borrow_mut().make_sample(
+        let sample = self.exporter.borrow_mut().make_sample(
             time,
             value,
             tid,
             cpu,
             kind,
-            &self.frames))
+            &self.frames);
+
+        Ok(sample)
     }
 
     fn add_custom_sample(
@@ -727,6 +736,10 @@ impl<'a> ExportTraceContext<'a> {
         self.sampler.borrow().related_activity_id(self.data)
     }
 
+    pub fn cgroup(&self) -> anyhow::Result<Option<u64>> {
+        self.sampler.borrow().os_event_cgroup(self.data)
+    }
+
     pub fn record_type(
         &mut self,
         record_type: ExportRecordType) -> u16 {
@@ -820,7 +833,7 @@ impl<'a> ExportTraceContext<'a> {
         let associated_ids = attributes.associated_ids();
         let new_attributes = attributes.attributes();
 
-        let attribute_id = if !new_attributes.is_empty() || !associated_ids.len() > 1 {
+        let attribute_id = if !new_attributes.is_empty() || associated_ids.len() > 1 {
             /*
              * Multiple items, always save new attributes:
              * At some point we could look at caching these if needed. Many
@@ -902,6 +915,7 @@ pub struct ExportSampleFilterContext<'a> {
     record_type_id: u16,
     record_data: Option<&'a [u8]>,
     strings: &'a InternedStrings,
+    attributes: &'a Vec<ExportAttributes>,
     proc: &'a ExportProcess,
     sample: &'a ExportProcessSample,
 }
@@ -939,6 +953,48 @@ impl<'a> ExportSampleFilterContext<'a> {
     }
 
     pub fn pid(&self) -> u32 { self.proc.pid() }
+
+    pub fn cgroup_id(&self) -> u64 {
+        let attributes_id = self.sample.attributes_id();
+        if attributes_id == 0 {
+            return 0;
+        }
+
+        let cgroup_name_id = match self.strings.find_id("CGroup") {
+            Some(id) => id,
+            None => return 0,
+        };
+
+        /* Walk the attributes tree for this sample */
+        let mut seen = HashSet::new();
+        let mut stack = vec![attributes_id];
+
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+
+            if id >= self.attributes.len() {
+                continue;
+            }
+
+            let attrs = &self.attributes[id];
+
+            for pair in attrs.attributes() {
+                if pair.name() == cgroup_name_id {
+                    if let Some(value) = pair.value() {
+                        return value;
+                    }
+                }
+            }
+
+            for associated_id in attrs.associated_ids() {
+                stack.push(*associated_id);
+            }
+        }
+
+        0
+    }
 
     pub fn sample_record_data(&self) -> Option<ExportRecordData<'_>> {
         if self.record_data.is_none() {
@@ -992,6 +1048,7 @@ macro_rules! filter_sample_ret_on_drop {
                 record_type_id: $record_type_id,
                 record_data: $record_data,
                 spans: &$self.spans,
+                attributes: &$self.attributes,
                 proc: $proc,
                 sample: $sample,
             };
@@ -1148,6 +1205,11 @@ impl ExportSettings {
     pub fn with_activity_id_attributes(self) -> Self {
         self.with_attribute_source(
             Box::new(ActivityIdAttributeSource::default()))
+    }
+
+    pub fn with_cgroup_attributes(self) -> Self {
+        self.with_attribute_source(
+            Box::new(CgroupAttributeSource::default()))
     }
 
     pub fn with_event(
