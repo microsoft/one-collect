@@ -333,6 +333,53 @@ impl ExportAttributeSource for ActivityIdAttributeSource {
     }
 }
 
+#[derive(Default)]
+pub struct CgroupAttributeSource {
+    attributes_cache: HashMap<u64, usize>,
+    cgroup_str_id: usize,
+}
+
+impl ExportAttributeSource for CgroupAttributeSource {
+    fn initialize(
+        &mut self,
+        machine: &mut ExportMachine) {
+        self.cgroup_str_id = machine.intern("CGroup");
+    }
+
+    fn add_attributes(
+        &mut self,
+        trace: &mut ExportTraceContext,
+        attributes: &mut ExportAttributes) -> anyhow::Result<()> {
+        let cgroup_id = trace.cgroup()?.unwrap_or(0);
+
+        if cgroup_id != 0 {
+            let attribute_id = match self.attributes_cache.entry(cgroup_id) {
+                Vacant(entry) => {
+                    let mut attributes = ExportAttributes::default();
+
+                    attributes.push(
+                        ExportAttributePair::new(
+                            self.cgroup_str_id,
+                            ExportAttributeValue::Value(cgroup_id)));
+
+                    let id = trace.push_unique_attributes(attributes);
+
+                    entry.insert(id);
+
+                    id
+                },
+                Occupied(entry) => {
+                    *entry.get()
+                },
+            };
+
+            attributes.push_association(attribute_id);
+        }
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
