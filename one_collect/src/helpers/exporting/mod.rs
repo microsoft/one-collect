@@ -833,7 +833,7 @@ impl<'a> ExportTraceContext<'a> {
         let associated_ids = attributes.associated_ids();
         let new_attributes = attributes.attributes();
 
-        let attribute_id = if !new_attributes.is_empty() || !associated_ids.len() > 1 {
+        let attribute_id = if !new_attributes.is_empty() || associated_ids.len() > 1 {
             /*
              * Multiple items, always save new attributes:
              * At some point we could look at caching these if needed. Many
