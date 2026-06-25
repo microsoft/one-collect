@@ -48,37 +48,40 @@ fn is_dotnet_memfd_mapping(filename: &str) -> bool {
     filename.starts_with("/memfd:doublemapper")
 }
 
-/* These timeouts form a 2x2 of {steady-state, teardown} x {per-op, aggregate}.
- * Steady-state ops can legitimately take a few seconds (DIAG_SOCKET_TIMEOUT),
- * while teardown ops are tiny single writes and should fail fast
- * (DIAG_DISABLE_TIMEOUT). DIAG_DISABLE_BUDGET caps the teardown loop, and
- * WORKER_JOIN_TIMEOUT is the outer backstop on disable() itself.
- *
- * Invariant: WORKER_JOIN_TIMEOUT should be >= the worst-case time the worker
- * needs to reach completion after cancellation, i.e. one in-flight op plus
- * DIAG_DISABLE_BUDGET. With a 5s in-flight op + 3s budget = 8s < 10s, the join
- * backstop does not fire on a merely-slow-but-healthy teardown. (The events
- * worker's enable_events can do up to three reads at DIAG_SOCKET_TIMEOUT each,
- * which can exceed this; the join then detaches+warns, which is harmless.) */
+/* Two kinds of timeout. Per-op timeouts bound a single socket exchange:
+ * DIAG_SOCKET_TIMEOUT for a read/write, DIAG_DISABLE_TIMEOUT for the tiny
+ * teardown write. The join timeout (dotnet_worker_join_timeout) bounds how long
+ * disable() waits for a cancelled worker to drain before detaching it, so a
+ * wedged runtime can never hang shutdown. */
 
 /// Conservative timeout for diagnostic socket reads and writes. Prevents
 /// indefinite blocking when a .NET runtime is unresponsive.
 const DIAG_SOCKET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// Timeout for waiting on worker threads during shutdown.
-const WORKER_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Short timeout for diagnostic socket writes on the teardown path. A
 /// disable request is near-instant against a healthy runtime, so a wedged
 /// one fails fast instead of consuming the full read/write timeout.
 const DIAG_DISABLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// Overall budget for best-effort disable of tracked runtimes at shutdown.
-/// Caps total teardown time so a large number of wedged runtimes can't make
-/// shutdown scale with process count. Sized to attempt roughly three teardown
-/// writes (each bounded by DIAG_DISABLE_TIMEOUT) before giving up.
-const DIAG_DISABLE_BUDGET: std::time::Duration =
-    std::time::Duration::from_secs(3 * DIAG_DISABLE_TIMEOUT.as_secs());
+/// Default budget for the perf-map disable loop at shutdown. Overridable via
+/// DotNetHelper::with_cleanup_timeout (record-trace: --dotnet-cleanup-timeout)
+/// to trade teardown time for a cleaner final state.
+const DEFAULT_DOTNET_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Scheduling/channel slack on top of the bounded in-flight I/O.
+const DIAG_DRAIN_MARGIN: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Join backstop shared by both .NET IPC workers: the teardown_budget (the
+/// perf-map disable loop; zero for the events worker, which has no such loop)
+/// plus the worst-case in-flight handshake. Cancellation is only polled at the
+/// top of each worker loop, so disable() can land mid-handshake; the largest is
+/// the events enable - two writes + two reads, each bounded by
+/// DIAG_SOCKET_TIMEOUT. saturating_add guards against an extreme budget.
+fn dotnet_worker_join_timeout(teardown_budget: std::time::Duration) -> std::time::Duration {
+    teardown_budget
+        .saturating_add(4 * DIAG_SOCKET_TIMEOUT)
+        .saturating_add(DIAG_DRAIN_MARGIN)
+}
 
 struct PerfMapContext {
     tmp: OpenAt,
@@ -494,7 +497,7 @@ impl UserEventTracker {
          * The worker signals completion on the done channel; on timeout we
          * detach (drop the handle without joining) as a backstop. */
         if let Some(worker) = self.worker.take() {
-            if self.done.recv_timeout(WORKER_JOIN_TIMEOUT).is_ok() {
+            if self.done.recv_timeout(dotnet_worker_join_timeout(std::time::Duration::ZERO)).is_ok() {
                 let _ = worker.join();
             } else {
                 warn!("oc-dotnet-events worker did not exit within timeout");
@@ -510,10 +513,13 @@ struct PerfMapTracker {
     worker: Option<JoinHandle<()>>,
     cancelled: Arc<AtomicBool>,
     done: Receiver<()>,
+    join_timeout: std::time::Duration,
 }
 
 impl PerfMapTracker {
-    fn new(arc: ArcPerfMapContexts) -> Self {
+    fn new(
+        arc: ArcPerfMapContexts,
+        cleanup_timeout: std::time::Duration) -> Self {
         let (send, recv) = mpsc::channel();
         let (done_tx, done) = mpsc::channel();
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -522,7 +528,7 @@ impl PerfMapTracker {
         let worker = thread::Builder::new()
             .name("oc-dotnet-perfmap".into())
             .spawn(move || {
-                Self::worker_thread_proc(recv, arc, worker_cancelled);
+                Self::worker_thread_proc(recv, arc, worker_cancelled, cleanup_timeout);
                 /* Signal completion as the last act so disable() can wait
                  * with a timeout without spawning a helper thread. */
                 let _ = done_tx.send(());
@@ -534,13 +540,15 @@ impl PerfMapTracker {
             worker: Some(worker),
             cancelled,
             done,
+            join_timeout: dotnet_worker_join_timeout(cleanup_timeout),
         }
     }
 
     fn worker_thread_proc(
         recv: Receiver<u32>,
         arc: ArcPerfMapContexts,
-        cancelled: Arc<AtomicBool>) {
+        cancelled: Arc<AtomicBool>,
+        cleanup_timeout: std::time::Duration) {
         let mut pids = HashSet::new();
         let mut path_buf = PathBuf::new();
 
@@ -609,7 +617,9 @@ impl PerfMapTracker {
          * remove_perf_maps can still run. */
         let contexts = std::mem::take(&mut *arc.lock().unwrap());
 
-        let deadline = std::time::Instant::now() + DIAG_DISABLE_BUDGET;
+        let deadline = std::time::Instant::now()
+            .checked_add(cleanup_timeout)
+            .unwrap_or_else(std::time::Instant::now);
         for proc in &contexts {
             if std::time::Instant::now() >= deadline {
                 warn!("oc-dotnet-perfmap: disable budget exhausted, some runtimes left enabled");
@@ -646,7 +656,7 @@ impl PerfMapTracker {
          * The worker signals completion on the done channel; on timeout we
          * detach (drop the handle without joining) as a backstop. */
         if let Some(worker) = self.worker.take() {
-            if self.done.recv_timeout(WORKER_JOIN_TIMEOUT).is_ok() {
+            if self.done.recv_timeout(self.join_timeout).is_ok() {
                 let _ = worker.join();
             } else {
                 warn!("oc-dotnet-perfmap worker did not exit within timeout");
@@ -662,6 +672,7 @@ type ArcPerfMapContexts = Arc<Mutex<Vec<PerfMapContext>>>;
 pub(crate) struct OSDotNetHelper {
     perf_maps: bool,
     perf_map_procs: Option<ArcPerfMapContexts>,
+    cleanup_timeout: std::time::Duration,
 }
 
 impl OSDotNetHelper {
@@ -669,12 +680,15 @@ impl OSDotNetHelper {
         Self {
             perf_maps: false,
             perf_map_procs: None,
+            cleanup_timeout: DEFAULT_DOTNET_CLEANUP_TIMEOUT,
         }
     }
 }
 
 pub trait DotNetHelperLinuxExt {
     fn with_perf_maps(self) -> Self;
+
+    fn with_cleanup_timeout(self, timeout: std::time::Duration) -> Self;
 
     fn remove_perf_maps(&mut self);
 
@@ -688,6 +702,11 @@ impl DotNetHelperLinuxExt for DotNetHelper {
             Arc::new(
                 Mutex::new(
                     Vec::new())));
+        self
+    }
+
+    fn with_cleanup_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.os.cleanup_timeout = timeout;
         self
     }
 
@@ -1548,6 +1567,10 @@ impl UniversalDotNetHelperOSHooks for DotNetHelper {
         self.with_perf_maps()
     }
 
+    fn os_with_cleanup_timeout(self, timeout: std::time::Duration) -> Self {
+        self.with_cleanup_timeout(timeout)
+    }
+
     fn os_cleanup_dynamic_symbols(&mut self) {
         self.remove_perf_maps();
     }
@@ -1558,6 +1581,7 @@ impl DotNetHelp for RingBufSessionBuilder {
         mut self,
         helper: &mut DotNetHelper) -> Self {
         let perf_maps = helper.os.perf_maps;
+        let cleanup_timeout = helper.os.cleanup_timeout;
         let perf_maps_procs = match helper.os.perf_map_procs.as_ref() {
             Some(arc) => { Some(arc.clone()) },
             None => { None },
@@ -1589,7 +1613,7 @@ impl DotNetHelp for RingBufSessionBuilder {
                     let filename = fmt.get_field_ref_unchecked("filename[]");
 
                     /* SAFETY: We always have this for perf_maps_procs */
-                    let tracker = PerfMapTracker::new(perf_maps_procs.unwrap());
+                    let tracker = PerfMapTracker::new(perf_maps_procs.unwrap(), cleanup_timeout);
                     let perfmap = Writable::new(tracker);
                     let perfmap_close = perfmap.clone();
 

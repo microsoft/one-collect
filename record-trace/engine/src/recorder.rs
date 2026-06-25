@@ -277,7 +277,8 @@ impl Recorder {
         }
 
         let dotnet = UniversalDotNetHelper::default()
-            .with_dynamic_symbols();
+            .with_dynamic_symbols()
+            .with_cleanup_timeout(self.args.dotnet_cleanup_timeout());
 
         let universal = match self.args.script() {
             Some(script) => {

@@ -382,6 +382,11 @@ impl UniversalDotNetHelperOSHooks for DotNetHelper {
         self.with_jit_symbols()
     }
 
+    fn os_with_cleanup_timeout(self, _timeout: std::time::Duration) -> Self {
+        /* The cleanup budget only applies to the Linux perf-map teardown. */
+        self
+    }
+
     fn os_cleanup_dynamic_symbols(&mut self) {
         /* Placeholder */
     }
