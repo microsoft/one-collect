@@ -533,6 +533,7 @@ pub struct RingBufDataSource {
     hard_page_faults_builder: Option<RingBufBuilder<PageFaults>>,
     next_time: Option<u64>,
     oldest_cpu: Option<usize>,
+    cpu_to_reader_index: Vec<Option<usize>>,
     in_process_ring_buf: Option<InProcessRingBuf>,
 }
 
@@ -566,6 +567,7 @@ impl RingBufDataSource {
             hard_page_faults_builder,
             next_time: None,
             oldest_cpu: None,
+            cpu_to_reader_index: Vec::new(),
             enabled: false,
             in_process_ring_buf: None,
         }
@@ -675,6 +677,8 @@ impl RingBufDataSource {
             None => { &empty_pids },
         };
 
+        self.cpu_to_reader_index.resize(cpu_count() as usize, None);
+
         /* Build the kernel only dummy rings first */
         for i in 0..cpu_count() {
             let mut cpu_buf = common.for_cpu(i);
@@ -691,6 +695,11 @@ impl RingBufDataSource {
 
                     /* We need to map these in, and only these */
                     let reader = cpu_buf.create_reader(self.pages)?;
+                    /* Record this CPU's reader index so per-CPU draining
+                     * (parse_for_cpu) can locate the right reader/cursor
+                     * without relying on positional ordering. */
+                    let reader_index = self.readers.len();
+                    self.cpu_to_reader_index[i as usize] = Some(reader_index);
                     self.readers.push(reader);
                     self.cursors.push(CpuRingCursor::default());
 
@@ -1269,6 +1278,82 @@ impl PerfDataSource for RingBufDataSource {
         }
 
         self.enabled
+    }
+
+    fn begin_reading_cpu(
+        &mut self,
+        cpu: u32) -> Option<CpuReadContext> {
+        let Some(Some(index)) = self.cpu_to_reader_index.get(cpu as usize) else {
+            return None;
+        };
+        let index = *index;
+
+        let reader = &self.readers[index];
+        let cursor = &mut self.cursors[index];
+
+        reader.begin_reading(cursor);
+
+        trace!("begin_reading_cpu: primed cpu={}, index={}", cpu, index);
+
+        Some(CpuReadContext::new(cpu, index))
+    }
+
+    fn read_cpu(
+        &mut self,
+        ctx: &CpuReadContext) -> Option<PerfData<'_>> {
+        /* The context resolved the reader slot once in begin_reading_cpu,
+         * so the per-record drain loop indexes directly without repeating
+         * the CPU-to-reader lookup. */
+        let index = ctx.reader_index();
+
+        let reader = &self.readers[index];
+        let cursor = &mut self.cursors[index];
+
+        /* A single CPU ring is already time-ordered, so we read records
+         * sequentially without the cross-CPU oldest/next_time merge that
+         * the all-CPU read() path performs. Ancillary still varies per
+         * record because multiple event types redirect into one CPU ring,
+         * so it is resolved for each record rather than cached. */
+        let ancillary = match Self::read_time(
+            reader,
+            cursor,
+            &self.ring_bufs) {
+            Some((_time, rb)) => rb.ancillary(),
+            None => {
+                trace!("read_cpu: no data for cpu={}", ctx.cpu());
+                return None;
+            }
+        };
+
+        match reader.read(
+            cursor,
+            &mut self.temp) {
+            Ok(raw_data) => {
+                trace!("read_cpu: data read from cpu={}, size={}", ctx.cpu(), raw_data.len());
+
+                Some(PerfData {
+                    ancillary,
+                    raw_data,
+                })
+            },
+            Err(e) => {
+                warn!("read_cpu failed: cpu={}, error={}", ctx.cpu(), e);
+                None
+            },
+        }
+    }
+
+    fn end_reading_cpu(
+        &mut self,
+        ctx: &CpuReadContext) {
+        let index = ctx.reader_index();
+
+        trace!("end_reading_cpu: completing read for cpu={}", ctx.cpu());
+
+        let reader = &mut self.readers[index];
+        let cursor = &mut self.cursors[index];
+
+        reader.end_reading(cursor);
     }
 
     #[cfg(target_os = "linux")]
