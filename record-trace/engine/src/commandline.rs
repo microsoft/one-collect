@@ -49,7 +49,7 @@ struct Args {
     #[arg(long = "cpu", help = "Capture data for the specified CPU.  Multiple cpus can be specified, one per usage of --cpu")]
     target_cpus: Option<Vec<u16>>,
 
-    #[arg(long = "dotnet-cleanup-timeout", value_parser = clap::value_parser!(u64).range(0..=86_400), help = "Total seconds budgeted to disable tracked .NET runtimes at shutdown. Higher values favor a cleaner final state (more runtimes disabled) at the cost of longer teardown when runtimes are unresponsive. Defaults to 10.")]
+    #[arg(long = "dotnet-cleanup-timeout", value_parser = clap::value_parser!(u64).range(0..=86_400), help = "Total seconds budgeted to disable tracked .NET runtimes at shutdown. Higher values favor a cleaner final state (more runtimes disabled) at the cost of longer teardown when runtimes are unresponsive. Defaults to 60.")]
     dotnet_cleanup_timeout: Option<u64>,
 
     #[arg(long, help = "Script snippet to run to enable complex configurations")]

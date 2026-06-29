@@ -63,10 +63,12 @@ const DIAG_SOCKET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// one fails fast instead of consuming the full read/write timeout.
 const DIAG_DISABLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// Default budget for the perf-map disable loop at shutdown. Overridable via
+/// Default budget for the perf-map disable loop at shutdown. Sized to favor
+/// disabling as many runtimes as possible (e.g. hundreds of processes) while
+/// still bounding shutdown when a runtime is unresponsive. Overridable via
 /// DotNetHelper::with_cleanup_timeout (record-trace: --dotnet-cleanup-timeout)
 /// to trade teardown time for a cleaner final state.
-const DEFAULT_DOTNET_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const DEFAULT_DOTNET_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Scheduling/channel slack on top of the bounded in-flight I/O.
 const DIAG_DRAIN_MARGIN: std::time::Duration = std::time::Duration::from_secs(1);
@@ -182,11 +184,11 @@ impl PerfMapContext {
                 let mut result = [0; 24];
 
                 if let Err(e) = sock.write_all(bytes) {
-                    warn!("Failed to write to diagnostic socket: pid={}, nspid={}, error={}", self.pid, self.nspid, e);
+                    warn!("Failed to write to diagnostic socket: pid={}, nspid={}, timeout={:?}, error={}", self.pid, self.nspid, DIAG_SOCKET_TIMEOUT, e);
                     anyhow::bail!("Failed to write to diagnostic socket: {}", e);
                 }
                 if let Err(e) = sock.read_exact(&mut result) {
-                    warn!("Failed to read diagnostic socket response: pid={}, nspid={}, error={}", self.pid, self.nspid, e);
+                    warn!("Failed to read diagnostic socket response: pid={}, nspid={}, timeout={:?}, error={}", self.pid, self.nspid, DIAG_SOCKET_TIMEOUT, e);
                     anyhow::bail!("Failed to read diagnostic socket response: {}", e);
                 }
 
@@ -213,7 +215,7 @@ impl PerfMapContext {
                  * fail fast on a wedged one rather than blocking shutdown. */
                 let _ = sock.set_write_timeout(Some(DIAG_DISABLE_TIMEOUT));
                 if let Err(e) = sock.write_all(bytes) {
-                    warn!("Failed to write to diagnostic socket: pid={}, nspid={}, error={}", self.pid, self.nspid, e);
+                    warn!("Failed to write to diagnostic socket: pid={}, nspid={}, timeout={:?}, error={}", self.pid, self.nspid, DIAG_DISABLE_TIMEOUT, e);
                     anyhow::bail!("Failed to write to diagnostic socket: {}", e);
                 }
                 Ok(())
@@ -497,10 +499,11 @@ impl UserEventTracker {
          * The worker signals completion on the done channel; on timeout we
          * detach (drop the handle without joining) as a backstop. */
         if let Some(worker) = self.worker.take() {
-            if self.done.recv_timeout(dotnet_worker_join_timeout(std::time::Duration::ZERO)).is_ok() {
+            let join_timeout = dotnet_worker_join_timeout(std::time::Duration::ZERO);
+            if self.done.recv_timeout(join_timeout).is_ok() {
                 let _ = worker.join();
             } else {
-                warn!("oc-dotnet-events worker did not exit within timeout");
+                warn!("oc-dotnet-events worker did not exit within timeout={:?}", join_timeout);
             }
         }
 
@@ -622,7 +625,7 @@ impl PerfMapTracker {
             .unwrap_or_else(std::time::Instant::now);
         for proc in &contexts {
             if std::time::Instant::now() >= deadline {
-                warn!("oc-dotnet-perfmap: disable budget exhausted, some runtimes left enabled");
+                warn!("oc-dotnet-perfmap: disable budget exhausted, some runtimes left enabled: budget={:?}", cleanup_timeout);
                 break;
             }
             let _ = proc.disable_perf_map();
@@ -659,7 +662,7 @@ impl PerfMapTracker {
             if self.done.recv_timeout(self.join_timeout).is_ok() {
                 let _ = worker.join();
             } else {
-                warn!("oc-dotnet-perfmap worker did not exit within timeout");
+                warn!("oc-dotnet-perfmap worker did not exit within timeout={:?}", self.join_timeout);
             }
         }
 
