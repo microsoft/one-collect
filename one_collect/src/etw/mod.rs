@@ -51,6 +51,60 @@ pub const CAPTURE_STATE: u32 = abi::EVENT_CONTROL_CODE_CAPTURE_STATE;
 
 const EMPTY_PROVIDER: Guid = Guid::from_u128(0u128);
 
+/// Cumulative loss/health counters for a running ETW session.
+/// 
+/// All counters are cumulative since session start and reset only when
+/// the session is stopped. Apply deltas between consecutive polls to
+/// track rate-of-loss metrics.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub struct TraceStats {
+    pub events_lost: u64,
+    pub real_time_buffers_lost: u64,
+    pub log_buffers_lost: u64,
+    pub buffers_written: u64,
+}
+
+/// Query a running session's loss counters by its raw handle.
+/// 
+/// Safe to call from any thread; the handle is `Send` and the query
+/// is stateless. Returns cumulative counters since session start.
+///
+/// # Example
+///
+/// ```ignore
+/// use std::sync::Arc;
+/// use std::sync::atomic::{AtomicU64, Ordering};
+/// use one_collect::etw::{EtwSession, query_stats};
+///
+/// let mut session = EtwSession::new();
+/// let handle_slot = Arc::new(AtomicU64::new(0));
+///
+/// {
+///     let handle_slot = handle_slot.clone();
+///     session.add_started_callback(move |ctx| {
+///         handle_slot.store(ctx.handle(), Ordering::SeqCst);
+///     });
+/// }
+///
+/// // Start `parse_until` or `parse_for_duration` on your desired cadence,
+/// // then poll from any thread/task and compute deltas between polls.
+/// let handle = handle_slot.load(Ordering::SeqCst);
+/// if handle != 0 {
+///     if let Ok(stats) = query_stats(handle) {
+///         let _ = stats.events_lost;
+///     }
+/// }
+/// ```
+pub fn query_stats(handle: u64) -> anyhow::Result<TraceStats> {
+    abi::query_stats(handle).map(|raw| TraceStats {
+        events_lost: raw.events_lost as u64,
+        real_time_buffers_lost: raw.real_time_buffers_lost as u64,
+        log_buffers_lost: raw.log_buffers_lost as u64,
+        buffers_written: raw.buffers_written as u64,
+    })
+}
+
+
 #[derive(Default)]
 pub struct AncillaryData {
     event: Option<*const EVENT_RECORD>,
@@ -272,6 +326,14 @@ impl SessionCallbackContext {
             handle,
             id,
         }
+    }
+
+    pub fn handle(&self) -> u64 { 
+        self.handle
+    }
+
+    pub fn query_stats(&self) -> anyhow::Result<TraceStats> {
+        query_stats(self.handle)
     }
 
     pub fn id(&self) -> u64 { self.id }
@@ -1276,6 +1338,72 @@ impl EtwSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::time::Duration;
+
+    #[ignore]
+    #[test]
+    fn query_stats_by_handle() {
+        let mut session = EtwSession::new();
+
+        let handle_slot = Arc::new(AtomicU64::new(0));
+        let query_ok = Arc::new(AtomicBool::new(false));
+
+        {
+            let handle_slot = handle_slot.clone();
+            let query_ok = query_ok.clone();
+
+            session.add_started_callback(move |ctx| {
+                handle_slot.store(ctx.handle(), Ordering::SeqCst);
+                if ctx.query_stats().is_ok() {
+                    query_ok.store(true, Ordering::SeqCst);
+                }
+            });
+        }
+
+        session
+            .parse_for_duration("one_collect_query_stats_test", Duration::from_secs(1))
+            .unwrap();
+
+        let handle = handle_slot.load(Ordering::SeqCst);
+        assert!(handle != 0, "started callback did not capture a valid session handle");
+        assert!(query_ok.load(Ordering::SeqCst), "query_stats failed while session was running");
+    }
+
+    #[ignore]
+    #[test]
+    fn query_stats_free_function_with_captured_handle() {
+        let mut session = EtwSession::new();
+
+        let handle_slot = Arc::new(AtomicU64::new(0));
+        let query_ok = Arc::new(AtomicBool::new(false));
+
+        {
+            let handle_slot = handle_slot.clone();
+            let query_ok = query_ok.clone();
+
+            session.add_started_callback(move |ctx| {
+                handle_slot.store(ctx.handle(), Ordering::SeqCst);
+
+                let handle = handle_slot.load(Ordering::SeqCst);
+                if handle != 0 && super::query_stats(handle).is_ok() {
+                    query_ok.store(true, Ordering::SeqCst);
+                }
+            });
+        }
+
+        session
+            .parse_for_duration("one_collect_query_stats_free_fn_test", Duration::from_secs(1))
+            .unwrap();
+
+        let handle = handle_slot.load(Ordering::SeqCst);
+        assert!(handle != 0, "started callback did not capture a valid session handle");
+        assert!(
+            query_ok.load(Ordering::SeqCst),
+            "free function query_stats(handle) failed while session was running"
+        );
+    }
 
     #[ignore]
     #[test]
