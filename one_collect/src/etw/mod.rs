@@ -52,26 +52,56 @@ pub const CAPTURE_STATE: u32 = abi::EVENT_CONTROL_CODE_CAPTURE_STATE;
 const EMPTY_PROVIDER: Guid = Guid::from_u128(0u128);
 
 /// Cumulative loss/health counters for a running ETW session.
-/// 
+///
 /// All counters are cumulative since session start and reset only when
 /// the session is stopped. Apply deltas between consecutive polls to
 /// track rate-of-loss metrics.
+///
+/// The native ETW counters are 32-bit and are widened to `u64` here for
+/// ergonomic delta math and future-proofing. Because the underlying
+/// values can wrap on long-running sessions, compute deltas using
+/// wrapping subtraction rather than assuming strict monotonicity.
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub struct TraceStats {
+    /// Events dropped because no free buffer was available when the
+    /// provider tried to log them (widened from the native `u32`).
     pub events_lost: u64,
+    /// Real-time delivery buffers lost in transit to the consumer
+    /// (widened from the native `u32`).
     pub real_time_buffers_lost: u64,
+    /// Buffers that could not be flushed to the log file
+    /// (widened from the native `u32`).
     pub log_buffers_lost: u64,
+    /// Buffers successfully written since session start
+    /// (widened from the native `u32`).
     pub buffers_written: u64,
 }
 
 /// Query a running session's loss counters by its raw handle.
-/// 
-/// Safe to call from any thread; the handle is `Send` and the query
-/// is stateless. Returns cumulative counters since session start.
+///
+/// The `handle` must be a live ETW session handle, such as the value
+/// captured from [`SessionCallbackContext::handle`] inside an
+/// `add_started_callback` closure. Returns cumulative counters since
+/// session start.
+///
+/// # Thread safety and handle lifecycle
+///
+/// The query itself is stateless and the handle is `Send`, so this may
+/// be called from any thread while the session is running. The caller is
+/// responsible for ensuring the handle outlives the call: once the
+/// session is stopped or torn down the handle becomes stale, and querying
+/// a stale handle will fail with a Win32 error (for example, the session
+/// instance no longer being found) rather than returning stale data.
+///
+/// # Errors
+///
+/// Returns an error if `handle` is zero (the never-started sentinel) or if
+/// the underlying `ControlTraceW` query fails (for example, when the
+/// session handle is stale after teardown).
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use std::sync::Arc;
 /// use std::sync::atomic::{AtomicU64, Ordering};
 /// use one_collect::etw::{EtwSession, query_stats};
@@ -82,13 +112,14 @@ pub struct TraceStats {
 /// {
 ///     let handle_slot = handle_slot.clone();
 ///     session.add_started_callback(move |ctx| {
-///         handle_slot.store(ctx.handle(), Ordering::SeqCst);
+///         // Release-store publishes the handle to other threads.
+///         handle_slot.store(ctx.handle(), Ordering::Release);
 ///     });
 /// }
 ///
 /// // Start `parse_until` or `parse_for_duration` on your desired cadence,
 /// // then poll from any thread/task and compute deltas between polls.
-/// let handle = handle_slot.load(Ordering::SeqCst);
+/// let handle = handle_slot.load(Ordering::Acquire);
 /// if handle != 0 {
 ///     if let Ok(stats) = query_stats(handle) {
 ///         let _ = stats.events_lost;
@@ -96,6 +127,12 @@ pub struct TraceStats {
 /// }
 /// ```
 pub fn query_stats(handle: u64) -> anyhow::Result<TraceStats> {
+    if handle == 0 {
+        anyhow::bail!(
+            "query_stats called with an invalid (zero) session handle; \
+             capture a live handle from SessionCallbackContext::handle first");
+    }
+
     abi::query_stats(handle).map(|raw| TraceStats {
         events_lost: raw.events_lost as u64,
         real_time_buffers_lost: raw.real_time_buffers_lost as u64,
@@ -103,7 +140,6 @@ pub fn query_stats(handle: u64) -> anyhow::Result<TraceStats> {
         buffers_written: raw.buffers_written as u64,
     })
 }
-
 
 #[derive(Default)]
 pub struct AncillaryData {
@@ -328,10 +364,22 @@ impl SessionCallbackContext {
         }
     }
 
+    /// The raw ETW session handle for this callback's session.
+    ///
+    /// Valid for the duration of the session (from the `started`
+    /// callback until the session is stopped/torn down). Capturing this
+    /// value lets other threads poll the session via [`query_stats`];
+    /// the handle becomes stale after teardown, at which point queries
+    /// fail rather than return stale data.
     pub fn handle(&self) -> u64 { 
         self.handle
     }
 
+    /// Query the running session's loss counters.
+    ///
+    /// Convenience wrapper over [`query_stats`] using this context's
+    /// handle. Only valid while the session is running; see
+    /// [`query_stats`] for handle-lifecycle and error semantics.
     pub fn query_stats(&self) -> anyhow::Result<TraceStats> {
         query_stats(self.handle)
     }
@@ -1341,6 +1389,17 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::Duration;
+
+    #[test]
+    fn query_stats_rejects_zero_handle() {
+        // A zero handle is the never-started sentinel and must fail fast
+        // without crossing the ETW ABI. Deterministic, no admin/live
+        // session required, so this guards the invalid-handle contract
+        // on every CI run.
+        assert!(
+            query_stats(0).is_err(),
+            "query_stats(0) must reject the invalid (zero) handle");
+    }
 
     #[ignore]
     #[test]
