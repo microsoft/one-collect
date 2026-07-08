@@ -883,16 +883,16 @@ pub(super) struct TraceStatsRaw {
 pub(super) fn query_stats(handle: u64) -> anyhow::Result<TraceStatsRaw> {
     let mut properties = EVENT_TRACE_PROPERTIES::for_control();
 
-    unsafe {
-        let result = ControlTraceW(
+    let result = unsafe {
+        ControlTraceW(
             handle,
             std::ptr::null(),
             &mut properties,
-            EVENT_TRACE_CONTROL_QUERY);
+            EVENT_TRACE_CONTROL_QUERY)
+    };
 
-        if result != 0 {
-            anyhow::bail!("ControlTraceW query failed with {}", result);
-        }
+    if result != 0 {
+        anyhow::bail!("ControlTraceW query failed with {}", result);
     }
 
     Ok(TraceStatsRaw {

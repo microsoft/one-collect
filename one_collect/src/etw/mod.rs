@@ -375,15 +375,6 @@ impl SessionCallbackContext {
         self.handle
     }
 
-    /// Query the running session's loss counters.
-    ///
-    /// Convenience wrapper over [`query_stats`] using this context's
-    /// handle. Only valid while the session is running; see
-    /// [`query_stats`] for handle-lifecycle and error semantics.
-    pub fn query_stats(&self) -> anyhow::Result<TraceStats> {
-        query_stats(self.handle)
-    }
-
     pub fn id(&self) -> u64 { self.id }
 
     pub fn flush_trace(&self) {
@@ -1399,35 +1390,6 @@ mod tests {
         assert!(
             query_stats(0).is_err(),
             "query_stats(0) must reject the invalid (zero) handle");
-    }
-
-    #[ignore]
-    #[test]
-    fn query_stats_by_handle() {
-        let mut session = EtwSession::new();
-
-        let handle_slot = Arc::new(AtomicU64::new(0));
-        let query_ok = Arc::new(AtomicBool::new(false));
-
-        {
-            let handle_slot = handle_slot.clone();
-            let query_ok = query_ok.clone();
-
-            session.add_started_callback(move |ctx| {
-                handle_slot.store(ctx.handle(), Ordering::SeqCst);
-                if ctx.query_stats().is_ok() {
-                    query_ok.store(true, Ordering::SeqCst);
-                }
-            });
-        }
-
-        session
-            .parse_for_duration("one_collect_query_stats_test", Duration::from_secs(1))
-            .unwrap();
-
-        let handle = handle_slot.load(Ordering::SeqCst);
-        assert!(handle != 0, "started callback did not capture a valid session handle");
-        assert!(query_ok.load(Ordering::SeqCst), "query_stats failed while session was running");
     }
 
     #[ignore]
