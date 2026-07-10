@@ -57,24 +57,20 @@ const EMPTY_PROVIDER: Guid = Guid::from_u128(0u128);
 /// the session is stopped. Apply deltas between consecutive polls to
 /// track rate-of-loss metrics.
 ///
-/// The native ETW counters are 32-bit and are widened to `u64` here for
-/// ergonomic delta math and future-proofing. Because the underlying
-/// values can wrap on long-running sessions, compute deltas using
-/// wrapping subtraction rather than assuming strict monotonicity.
+/// The native ETW counters are 32-bit and can wrap on long-running
+/// sessions, so compute deltas using wrapping subtraction rather than
+/// assuming strict monotonicity.
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub struct TraceStats {
     /// Events dropped because no free buffer was available when the
-    /// provider tried to log them (widened from the native `u32`).
-    pub events_lost: u64,
-    /// Real-time delivery buffers lost in transit to the consumer
-    /// (widened from the native `u32`).
-    pub real_time_buffers_lost: u64,
-    /// Buffers that could not be flushed to the log file
-    /// (widened from the native `u32`).
-    pub log_buffers_lost: u64,
-    /// Buffers successfully written since session start
-    /// (widened from the native `u32`).
-    pub buffers_written: u64,
+    /// provider tried to log them.
+    pub events_lost: u32,
+    /// Real-time delivery buffers lost in transit to the consumer.
+    pub real_time_buffers_lost: u32,
+    /// Buffers that could not be flushed to the log file.
+    pub log_buffers_lost: u32,
+    /// Buffers successfully written since session start.
+    pub buffers_written: u32,
 }
 
 /// Query a running session's loss counters by its raw handle.
@@ -133,12 +129,7 @@ pub fn query_stats(handle: u64) -> anyhow::Result<TraceStats> {
              capture a live handle from SessionCallbackContext::handle first");
     }
 
-    abi::query_stats(handle).map(|raw| TraceStats {
-        events_lost: raw.events_lost as u64,
-        real_time_buffers_lost: raw.real_time_buffers_lost as u64,
-        log_buffers_lost: raw.log_buffers_lost as u64,
-        buffers_written: raw.buffers_written as u64,
-    })
+    abi::query_stats(handle)
 }
 
 #[derive(Default)]
