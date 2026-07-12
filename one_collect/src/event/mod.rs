@@ -1314,6 +1314,45 @@ impl EventFormat {
         None
     }
 
+    /// Returns an iterator over every field and its bytes for a single event
+    /// payload, resolving all field positions in one forward pass.
+    ///
+    /// This is the efficient way to read many (or all) fields of an event: it
+    /// walks the payload once, carrying a running offset, so each
+    /// variable-length field (string / counted array) is scanned exactly once.
+    /// Reading every field is therefore O(n) in the number of fields plus the
+    /// total bytes of the variable-length fields, versus the O(n^2) cost of
+    /// resolving each field independently (where every field re-scans the
+    /// variable-length prefix before it).
+    ///
+    /// The slice yielded for each field is identical to what
+    /// [`try_get_field_data_closure`](Self::try_get_field_data_closure) would
+    /// return for that field: fields in the fixed prefix are read at their
+    /// absolute offset (honoring reserved gaps), and once a variable-length
+    /// field is reached later fields are read relative to the running offset.
+    /// A field whose length cannot be determined (and every field after it)
+    /// yields an empty slice.
+    ///
+    /// The iterator is lazy, so callers needing only the first few fields can
+    /// stop early.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - The event payload to read the field data from.
+    pub fn fields_with_data<'a>(
+        &'a self,
+        data: &'a [u8]) -> impl Iterator<Item = (&'a EventField, &'a [u8])> + 'a {
+        FieldsWithData {
+            fields: &self.fields,
+            data,
+            index: 0,
+            running_offset: 0,
+            skip_offset: 0,
+            seen_variable: false,
+            broken: false,
+        }
+    }
+
     /// Retrieves the data associated with a given `EventFieldRef` within the provided data slice
     /// and offset.
     ///
@@ -1670,6 +1709,158 @@ struct FieldSkip {
     loc_type: LocationType,
     offset: usize,
     size: Option<u16>,
+}
+
+/// Iterator returned by [`EventFormat::fields_with_data`].
+///
+/// Walks a schema's field list once, carrying a running offset, so each
+/// field's bytes are resolved in a single forward pass instead of re-deriving
+/// every field's position from scratch.
+struct FieldsWithData<'a> {
+    fields: &'a [EventField],
+    data: &'a [u8],
+    index: usize,
+    /// Sum of `field.size` for all fields already yielded. Mirrors the `offset`
+    /// accumulator in `try_get_field_data_closure` (variable-length fields have
+    /// `size == 0`, so they contribute nothing here).
+    running_offset: usize,
+    /// Sum of the runtime byte lengths consumed by the variable-length fields
+    /// already yielded. Mirrors `skip_offset` in `get_field_data_closure`.
+    skip_offset: usize,
+    /// Whether a variable-length field has been seen yet. Before the first one,
+    /// fields are read at their absolute `field.offset` (honoring reserved
+    /// gaps); after it, at `running_offset + skip_offset`.
+    seen_variable: bool,
+    /// Set once a field's length cannot be determined. That field and every
+    /// field after it yield an empty slice, matching the closure returning
+    /// `None`.
+    broken: bool,
+}
+
+impl<'a> FieldsWithData<'a> {
+    /// Adds the runtime byte length consumed by a variable-length field to
+    /// `skip_offset`, mirroring the per-type logic in `get_field_data_closure`.
+    fn advance_variable(
+        &mut self,
+        field: &EventField) {
+        let start = self.running_offset + self.skip_offset;
+
+        if start > self.data.len() {
+            /* Out of bounds: later fields cannot be located. */
+            self.broken = true;
+            return;
+        }
+
+        match field.location {
+            LocationType::StaticString => {
+                for b in &self.data[start..] {
+                    self.skip_offset += 1;
+
+                    if *b == 0 {
+                        break;
+                    }
+                }
+            },
+
+            LocationType::StaticUTF16String => {
+                let chunks = self.data[start..].chunks_exact(2);
+
+                for chunk in chunks {
+                    self.skip_offset += 2;
+
+                    if chunk[0] == 0 && chunk[1] == 0 {
+                        break;
+                    }
+                }
+            },
+
+            LocationType::StaticLenPrefixArray => {
+                let slice = &self.data[start..];
+                let element_size = EventFormat::try_get_element_size(
+                    &field.type_name).unwrap_or(0) as usize;
+
+                if slice.len() < 2 {
+                    /* Out of bounds */
+                    self.broken = true;
+                    return;
+                }
+
+                let len = u16::from_ne_bytes(
+                    slice[0..2].try_into().unwrap()) as usize;
+
+                self.skip_offset += 2;
+                self.skip_offset += element_size * len;
+            },
+
+            _ => { },
+        }
+    }
+}
+
+impl<'a> Iterator for FieldsWithData<'a> {
+    type Item = (&'a EventField, &'a [u8]);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let field = self.fields.get(self.index)?;
+        self.index += 1;
+
+        if self.broken {
+            return Some((field, EMPTY));
+        }
+
+        let location = field.location;
+
+        /* Resolve the effective read size for this field. */
+        let mut read_size = field.size;
+
+        if field.size == 0 && location == LocationType::StaticLenPrefixArray {
+            match EventFormat::try_get_element_size(&field.type_name) {
+                Some(element_size) => read_size = element_size as usize,
+                None => {
+                    /* Length undeterminable: this and all later fields
+                     * are unreadable (closure build returns None). */
+                    self.broken = true;
+                    return Some((field, EMPTY));
+                },
+            }
+        }
+
+        /* Read position: absolute for the fixed prefix, running once a
+         * variable-length field has been seen. */
+        let pos = if self.seen_variable {
+            self.running_offset + self.skip_offset
+        } else {
+            field.offset
+        };
+
+        let bytes = EventFormat::get_data_with_offset_direct(
+            read_size,
+            location,
+            pos,
+            self.data);
+
+        /* Advance accumulators for the next field. */
+        if field.size == 0 {
+            match location {
+                LocationType::StaticString |
+                LocationType::StaticUTF16String |
+                LocationType::StaticLenPrefixArray => {
+                    self.advance_variable(field);
+                    self.seen_variable = true;
+                },
+
+                _ => {
+                    /* Unknown-length field (e.g. a size-0 `Static` slot):
+                     * later fields cannot be located. */
+                    self.broken = true;
+                },
+            }
+        }
+
+        self.running_offset += field.size;
+
+        Some((field, bytes))
+    }
 }
 
 /// `Event` represents a system event in the context of event collection and profiling.
@@ -2766,6 +2957,136 @@ mod tests {
         let third = e.try_get_field_data_closure("3");
         assert!(third.is_some());
         assert_eq!(&data[13..21], third.unwrap()(&data));
+    }
+
+    #[test]
+    fn fields_with_data_matches_closures() {
+        /* Asserts that fields_with_data yields, for every field, the exact
+         * same bytes as building and calling try_get_field_data_closure for
+         * that field individually (the per-field path it replaces). */
+        fn assert_parity(
+            format: &EventFormat,
+            data: &[u8]) {
+            let via_iter: Vec<(String, Vec<u8>)> = format
+                .fields_with_data(data)
+                .map(|(field, bytes)| (field.name.clone(), bytes.to_vec()))
+                .collect();
+
+            /* One item per field, in order. */
+            assert_eq!(via_iter.len(), format.fields().len());
+
+            for (index, field) in format.fields().iter().enumerate() {
+                let (name, iter_bytes) = &via_iter[index];
+                assert_eq!(name, &field.name);
+
+                /* A field with no closure (None) has no bytes; the iterator
+                 * yields an empty slice for it. */
+                let closure_bytes = format
+                    .try_get_field_data_closure(&field.name)
+                    .map(|mut closure| closure(data).to_vec())
+                    .unwrap_or_default();
+
+                assert_eq!(
+                    &closure_bytes, iter_bytes,
+                    "field '{}' mismatch", field.name);
+            }
+        }
+
+        /* All fixed. */
+        let mut format = EventFormat::new();
+        format.add_field(EventField::new(
+            "a".into(), "unsigned char".into(),
+            LocationType::Static, 0, 1));
+        format.add_field(EventField::new(
+            "b".into(), "u32".into(),
+            LocationType::Static, 1, 4));
+        format.add_field(EventField::new(
+            "c".into(), "u64".into(),
+            LocationType::Static, 5, 8));
+        let mut data = Vec::new();
+        data.push(b'x');
+        data.extend_from_slice(&7u32.to_ne_bytes());
+        data.extend_from_slice(&9u64.to_ne_bytes());
+        assert_parity(&format, &data);
+
+        /* Fixed prefix with a reserved gap (offsets are not contiguous). */
+        let mut format = EventFormat::new();
+        format.add_field(EventField::new(
+            "a".into(), "u32".into(),
+            LocationType::Static, 0, 4));
+        /* 4-byte reserved gap at [4..8] with no field. */
+        format.add_field(EventField::new(
+            "b".into(), "u32".into(),
+            LocationType::Static, 8, 4));
+        let mut data = Vec::new();
+        data.extend_from_slice(&11u32.to_ne_bytes());
+        data.extend_from_slice(&0u32.to_ne_bytes());
+        data.extend_from_slice(&22u32.to_ne_bytes());
+        assert_parity(&format, &data);
+
+        /* Leading strings then a fixed field (variable prefix). */
+        let mut format = EventFormat::new();
+        format.add_field(EventField::new(
+            "s".into(), "string".into(),
+            LocationType::StaticString, 0, 0));
+        format.add_field(EventField::new(
+            "w".into(), "wide_string".into(),
+            LocationType::StaticUTF16String, 0, 0));
+        format.add_field(EventField::new(
+            "n".into(), "u64".into(),
+            LocationType::Static, 0, 8));
+        let mut data = Vec::new();
+        data.extend_from_slice(b"hello\0");
+        data.extend_from_slice(b"h\0i\0\0\0");
+        data.extend_from_slice(&123u64.to_ne_bytes());
+        assert_parity(&format, &data);
+
+        /* Variable field in the middle. */
+        let mut format = EventFormat::new();
+        format.add_field(EventField::new(
+            "s".into(), "string".into(),
+            LocationType::StaticString, 0, 0));
+        format.add_field(EventField::new(
+            "n".into(), "u64".into(),
+            LocationType::Static, 0, 8));
+        format.add_field(EventField::new(
+            "w".into(), "wide_string".into(),
+            LocationType::StaticUTF16String, 0, 0));
+        let mut data = Vec::new();
+        data.extend_from_slice(b"mid\0");
+        data.extend_from_slice(&456u64.to_ne_bytes());
+        data.extend_from_slice(b"o\0k\0\0\0");
+        assert_parity(&format, &data);
+
+        /* Counted (length-prefixed) array followed by a fixed field. */
+        let mut format = EventFormat::new();
+        format.add_field(EventField::new(
+            "arr".into(), "counted_string".into(),
+            LocationType::StaticLenPrefixArray, 0, 0));
+        format.add_field(EventField::new(
+            "tail".into(), "u64".into(),
+            LocationType::Static, 0, 8));
+        let mut data = Vec::new();
+        data.extend_from_slice(&3u16.to_ne_bytes());
+        data.extend_from_slice(b"abc");
+        data.extend_from_slice(&789u64.to_ne_bytes());
+        assert_parity(&format, &data);
+
+        /* Unreadable size-0 field: it and every field after yield no bytes. */
+        let mut format = EventFormat::new();
+        format.add_field(EventField::new(
+            "head".into(), "u32".into(),
+            LocationType::Static, 0, 4));
+        format.add_field(EventField::new(
+            "obj".into(), "object".into(),
+            LocationType::Static, 4, 0));
+        format.add_field(EventField::new(
+            "after".into(), "u32".into(),
+            LocationType::Static, 4, 4));
+        let mut data = Vec::new();
+        data.extend_from_slice(&1u32.to_ne_bytes());
+        data.extend_from_slice(&2u32.to_ne_bytes());
+        assert_parity(&format, &data);
     }
 
     #[test]
