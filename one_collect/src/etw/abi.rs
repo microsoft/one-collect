@@ -519,6 +519,7 @@ impl Default for ENABLE_TRACE_PARAMETERS {
 pub(super) use windows_sys::Win32::System::Diagnostics::Etw::{
     EVENT_HEADER_EXTENDED_DATA_ITEM,
     EVENT_RECORD,
+    EVENT_TRACE_CONTROL_QUERY,
 };
 
 /// Extension trait providing the few ergonomic accessors the rest of the
@@ -870,6 +871,29 @@ impl TraceEnable {
 
         Ok(())
     }
+}
+
+pub(super) fn query_stats(handle: u64) -> anyhow::Result<super::SessionStats> {
+    let mut properties = EVENT_TRACE_PROPERTIES::for_control();
+
+    let result = unsafe {
+        ControlTraceW(
+            handle,
+            std::ptr::null(),
+            &mut properties,
+            EVENT_TRACE_CONTROL_QUERY)
+    };
+
+    if result != 0 {
+        anyhow::bail!("ControlTraceW query failed with {}", result);
+    }
+
+    Ok(super::SessionStats {
+        events_lost: properties.EventsLost,
+        real_time_buffers_lost: properties.RealTimeBuffersLost,
+        log_buffers_lost: properties.LogBuffersLost,
+        buffers_written: properties.BuffersWritten,
+    })
 }
 
 pub(crate) fn flush_trace(handle: u64) {
