@@ -61,7 +61,7 @@ const EMPTY_PROVIDER: Guid = Guid::from_u128(0u128);
 /// sessions, so compute deltas using wrapping subtraction rather than
 /// assuming strict monotonicity.
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
-pub struct TraceStats {
+pub struct SessionStats {
     /// Events dropped because no free buffer was available when the
     /// provider tried to log them.
     pub events_lost: u32,
@@ -122,7 +122,7 @@ pub struct TraceStats {
 ///     }
 /// }
 /// ```
-pub fn query_stats(handle: u64) -> anyhow::Result<TraceStats> {
+pub fn query_stats(handle: u64) -> anyhow::Result<SessionStats> {
     if handle == 0 {
         anyhow::bail!(
             "query_stats called with an invalid (zero) session handle; \

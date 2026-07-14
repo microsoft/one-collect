@@ -873,7 +873,7 @@ impl TraceEnable {
     }
 }
 
-pub(super) fn query_stats(handle: u64) -> anyhow::Result<super::TraceStats> {
+pub(super) fn query_stats(handle: u64) -> anyhow::Result<super::SessionStats> {
     let mut properties = EVENT_TRACE_PROPERTIES::for_control();
 
     let result = unsafe {
@@ -888,7 +888,7 @@ pub(super) fn query_stats(handle: u64) -> anyhow::Result<super::TraceStats> {
         anyhow::bail!("ControlTraceW query failed with {}", result);
     }
 
-    Ok(super::TraceStats {
+    Ok(super::SessionStats {
         events_lost: properties.EventsLost,
         real_time_buffers_lost: properties.RealTimeBuffersLost,
         log_buffers_lost: properties.LogBuffersLost,
