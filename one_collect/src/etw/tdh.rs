@@ -143,28 +143,67 @@ struct CachedSchema {
 /// Hash builder using XxHash64, matching the rest of the ETW module.
 type XxBuildHasher = BuildHasherDefault<XxHash64>;
 
-/// Schema cache: two maps (32-bit / 64-bit) keyed by raw TL bytes.
+/// Schema cache: an append-only `Vec` of decoded schemas plus two maps
+/// (32-bit / 64-bit) that key raw TL bytes to an index into that `Vec`.
+///
+/// Storing a `Copy` index (rather than the schema inline in the map) lets the
+/// hot path hash the 50-500 byte key exactly once: the index is copied out,
+/// ending the map borrow, and the schema is then read from `schemas`.  The
+/// previous `get().is_none()` + `get().expect()` pattern hashed the key twice
+/// on every cache hit (a borrow-checker workaround for get-or-insert).
 struct SchemaCache {
-    cache_64: HashMap<Vec<u8>, CachedSchema, XxBuildHasher>,
-    cache_32: HashMap<Vec<u8>, CachedSchema, XxBuildHasher>,
+    /// Decoded schemas, indexed by the maps below.  Append-only: entries are
+    /// never removed, so an index stays valid for the life of the cache.
+    schemas: Vec<CachedSchema>,
+    cache_64: HashMap<Vec<u8>, usize, XxBuildHasher>,
+    cache_32: HashMap<Vec<u8>, usize, XxBuildHasher>,
 }
 
 impl SchemaCache {
     fn new() -> Self {
         Self {
+            schemas: Vec::new(),
             cache_64: HashMap::with_hasher(XxBuildHasher::default()),
             cache_32: HashMap::with_hasher(XxBuildHasher::default()),
         }
     }
 
-    fn get(&self, key: &[u8], is_32bit: bool) -> Option<&CachedSchema> {
+    /// Returns the index of a cached schema, or `None` on a miss.
+    /// The key is hashed exactly once.
+    fn index_of(&self, key: &[u8], is_32bit: bool) -> Option<usize> {
         let map = if is_32bit { &self.cache_32 } else { &self.cache_64 };
-        map.get(key)
+        map.get(key).copied()
     }
 
-    fn insert(&mut self, key: Vec<u8>, is_32bit: bool, schema: CachedSchema) {
+    /// Maps `key` to a schema index and returns it.  Intended for the cache
+    /// miss path, where `key` is not yet present.
+    ///
+    /// The schema is only pushed onto `schemas` when the key is actually
+    /// vacant, so a (contract-violating) duplicate key returns the existing
+    /// index without orphaning a freshly built schema.  The key is hashed
+    /// once via a single `entry` lookup.
+    fn insert(&mut self, key: Vec<u8>, is_32bit: bool, schema: CachedSchema) -> usize {
+        use std::collections::hash_map::Entry;
+
+        let idx = self.schemas.len();
         let map = if is_32bit { &mut self.cache_32 } else { &mut self.cache_64 };
-        map.entry(key).or_insert(schema);
+        match map.entry(key) {
+            // Already present: return the existing index and drop `schema`.
+            Entry::Occupied(e) => *e.get(),
+            Entry::Vacant(e) => {
+                let assigned = *e.insert(idx); // ends the map borrow
+                self.schemas.push(schema); // only push once actually indexed
+                assigned
+            }
+        }
+    }
+
+    /// Reads a cached schema by its index.
+    ///
+    /// `idx` always comes from `index_of` or `insert`, and `schemas` is
+    /// append-only (entries are never removed), so the index never dangles.
+    fn get(&self, idx: usize) -> &CachedSchema {
+        &self.schemas[idx]
     }
 }
 
@@ -243,24 +282,28 @@ impl TdhDecoder {
         let is_32bit = (record.EventHeader.Flags & EVENT_HEADER_FLAG_32_BIT_HEADER) != 0;
         let schema_tl_bytes = find_schema_tl(record)?;
 
-        if self.cache.get(schema_tl_bytes, is_32bit).is_none() {
-            call_tdh_get_event_information(record, &mut self.tei_buf)?;
-            let mut schema = build_cached_schema(self.tei_buf.as_bytes(), is_32bit)?;
-            let id = self.next_schema_id;
-            self.next_schema_id = id.wrapping_add(1);
-            schema.schema_id = SchemaId(id);
-            debug!(
-                event_name = %schema.event_name,
-                field_count = schema.format.fields().len(),
-                schema_id = id,
-                is_32bit,
-                "TDH schema cache miss — new schema cached"
-            );
-            self.cache.insert(schema_tl_bytes.to_vec(), is_32bit, schema);
-        }
+        // Single hash lookup on the hot path; the miss path builds and inserts,
+        // returning the index of the new schema.
+        let idx = match self.cache.index_of(schema_tl_bytes, is_32bit) {
+            Some(idx) => idx,
+            None => {
+                call_tdh_get_event_information(record, &mut self.tei_buf)?;
+                let mut schema = build_cached_schema(self.tei_buf.as_bytes(), is_32bit)?;
+                let id = self.next_schema_id;
+                self.next_schema_id = id.wrapping_add(1);
+                schema.schema_id = SchemaId(id);
+                debug!(
+                    event_name = %schema.event_name,
+                    field_count = schema.format.fields().len(),
+                    schema_id = id,
+                    is_32bit,
+                    "TDH schema cache miss — new schema cached"
+                );
+                self.cache.insert(schema_tl_bytes.to_vec(), is_32bit, schema)
+            }
+        };
 
-        let schema = self.cache.get(schema_tl_bytes, is_32bit)
-            .expect("just inserted");
+        let schema = self.cache.get(idx);
 
         let user_data = record.user_data_slice();
         debug!(
@@ -995,6 +1038,59 @@ mod tests {
         let r2 = decoder.decode(&record_2).expect("second decode (cached)");
         assert_eq!(r2.schema_id, id1, "cache hit should return same SchemaId");
         assert_eq!(r2.event_data.format().fields()[0].size, 4);
+    }
+
+    #[test]
+    fn tdh_decode_distinct_schemas_interleaved() {
+        // Exercises the index -> schema mapping introduced by the append-only
+        // `schemas` Vec.  With multiple distinct schemas cached, a bug that
+        // mixed up indices (e.g. always returning the last-inserted schema)
+        // would be caught here but not by the single-schema cache tests.
+        let schema_a = build_tl_schema("ProviderA", "EventA", &[
+            ("A", TL_UINT32),
+        ]);
+        let schema_b = build_tl_schema("ProviderB", "EventB", &[
+            ("B1", TL_UINT32),
+            ("B2", TL_UINT32),
+        ]);
+        let (prov_a, evt_a) = split_tl_schema(&schema_a);
+        let (prov_b, evt_b) = split_tl_schema(&schema_b);
+
+        let mut decoder = TdhDecoder::new();
+
+        // First decode of each schema populates the cache with two entries.
+        let ud_a = 1u32.to_le_bytes();
+        let mut ext_a: [EVENT_HEADER_EXTENDED_DATA_ITEM; 2] = unsafe { std::mem::zeroed() };
+        let rec_a = build_test_record(prov_a, evt_a, &mut ext_a, &ud_a);
+        let ra = decoder.decode(&rec_a).expect("decode A");
+        let id_a = ra.schema_id;
+        assert_eq!(ra.event_name, Some("EventA"));
+        assert_eq!(ra.event_data.format().fields().len(), 1);
+
+        let ud_b = [3u32.to_le_bytes(), 4u32.to_le_bytes()].concat();
+        let mut ext_b: [EVENT_HEADER_EXTENDED_DATA_ITEM; 2] = unsafe { std::mem::zeroed() };
+        let rec_b = build_test_record(prov_b, evt_b, &mut ext_b, &ud_b);
+        let rb = decoder.decode(&rec_b).expect("decode B");
+        let id_b = rb.schema_id;
+        assert_eq!(rb.event_name, Some("EventB"));
+        assert_eq!(rb.event_data.format().fields().len(), 2);
+        assert_ne!(id_a, id_b, "distinct schemas must get distinct SchemaIds");
+
+        // Re-decode in reversed order: both are cache hits and each must read
+        // back its own schema, not the other's.
+        let mut ext_b2: [EVENT_HEADER_EXTENDED_DATA_ITEM; 2] = unsafe { std::mem::zeroed() };
+        let rec_b2 = build_test_record(prov_b, evt_b, &mut ext_b2, &ud_b);
+        let rb2 = decoder.decode(&rec_b2).expect("cache hit B");
+        assert_eq!(rb2.schema_id, id_b, "B cache hit should map to B's schema");
+        assert_eq!(rb2.event_name, Some("EventB"));
+        assert_eq!(rb2.event_data.format().fields().len(), 2);
+
+        let mut ext_a2: [EVENT_HEADER_EXTENDED_DATA_ITEM; 2] = unsafe { std::mem::zeroed() };
+        let rec_a2 = build_test_record(prov_a, evt_a, &mut ext_a2, &ud_a);
+        let ra2 = decoder.decode(&rec_a2).expect("cache hit A");
+        assert_eq!(ra2.schema_id, id_a, "A cache hit should map to A's schema");
+        assert_eq!(ra2.event_name, Some("EventA"));
+        assert_eq!(ra2.event_data.format().fields().len(), 1);
     }
 
     #[test]
