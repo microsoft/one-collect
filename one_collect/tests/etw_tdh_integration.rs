@@ -398,22 +398,25 @@ fn assert_strings_event(event: &CapturedEvent) {
         "strings event",
     );
 
-    let mut get_message = event.format
-        .try_get_field_data_closure("Message")
+    let message = event.format
+        .fields_with_data(&event.payload)
+        .find(|(field, _)| field.name == "Message")
+        .map(|(_, bytes)| bytes)
         .expect("Message accessor should exist");
-    let mut get_name = event.format
-        .try_get_field_data_closure("Name")
-        .expect("Name accessor should exist");
 
     assert_eq!(
-        get_message(&event.payload),
+        message,
         EXPECTED_STR8.as_bytes(),
         "ANSI counted string round-trip mismatch"
     );
 
     // UTF-16 fields are returned as raw little-endian bytes (excluding
     // the trailing NUL).  Decode to verify code units round-trip.
-    let name_bytes = get_name(&event.payload);
+    let name_bytes = event.format
+        .fields_with_data(&event.payload)
+        .find(|(field, _)| field.name == "Name")
+        .map(|(_, bytes)| bytes)
+        .expect("Name accessor should exist");
     assert_eq!(
         name_bytes.len(),
         EXPECTED_STR16.len() * 2,
