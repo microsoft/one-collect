@@ -28,7 +28,7 @@ use crate::os::system_page_size;
 
 use crate::ruwind::elf::*;
 use crate::ruwind::{ModuleAccessor, UnwindType};
-use symbols::{ElfSymbolReader, R2RLoadedLayoutSymbolTransformer, R2RMapSymbolReader};
+use symbols::{ElfSymbolReader, GoPclnTabSymbolReader, R2RLoadedLayoutSymbolTransformer, R2RMapSymbolReader};
 use self::symbols::PerfMapSymbolReader;
 
 /* OS Specific Session Type */
@@ -68,7 +68,7 @@ trait ExportProcessLinuxExt {
         bin_path: &str,
         metadata: &ElfModuleMetadata,
         sym_types_requested: u32,
-        strings: &InternedStrings) -> Vec<File>;
+        strings: &InternedStrings) -> Vec<(File, u32)>;
 
     fn check_candidate_symbol_file(
         &self,
@@ -173,27 +173,56 @@ impl ExportProcessLinuxExt for ExportProcess {
                 let sym_files = self.find_symbol_files(
                     filename,
                     metadata,
-                    SYMBOL_TYPE_ELF_SYMTAB | SYMBOL_TYPE_ELF_DYNSYM,
+                    SYMBOL_TYPE_ELF_SYMTAB | SYMBOL_TYPE_ELF_DYNSYM | SYMBOL_TYPE_GO_PCLNTAB,
                     strings);
 
                 if sym_files.is_empty() {
                     debug!("add_matching_elf_symbols: no symbol files found for file={}", filename);
                 }
 
-                for sym_file in sym_files {
+                // De-duplication across the ELF and Go passes below is handled
+                // transparently by add_matching_symbols (a function already added
+                // from one source is not re-added from another).
+                for (sym_file, sym_types) in sym_files {
 
                     // Page align the values from the load header.
                     let p_offset = metadata.p_offset() & page_mask;
                     let p_vaddr = metadata.p_vaddr() & page_mask;
 
-                    let load_header = ElfLoadHeader::new(p_offset, p_vaddr);
-                    let mut sym_reader = ElfSymbolReader::new(sym_file, load_header, page_size);
+                    let has_elf = sym_types & (SYMBOL_TYPE_ELF_SYMTAB | SYMBOL_TYPE_ELF_DYNSYM) != 0;
+                    let has_go = sym_types & SYMBOL_TYPE_GO_PCLNTAB != 0;
+
+                    // Give each reader its own independent file handle. Only clone
+                    // when both passes will run; otherwise move the handle directly.
+                    let (elf_file, go_file): (Option<File>, Option<File>) = match (has_elf, has_go) {
+                        (true, true) => match sym_file.try_clone() {
+                            Ok(clone) => (Some(sym_file), Some(clone)),
+                            Err(_) => (Some(sym_file), None),
+                        },
+                        (true, false) => (Some(sym_file), None),
+                        (false, true) => (None, Some(sym_file)),
+                        (false, false) => (None, None),
+                    };
+
                     let map_mut = self.mappings_mut().get_mut(map_index).unwrap();
 
-                    map_mut.add_matching_symbols(
-                        frames,
-                        &mut sym_reader,
-                        strings);
+                    // ELF symtab/dynsym pass.
+                    if let Some(elf_file) = elf_file {
+                        let load_header = ElfLoadHeader::new(p_offset, p_vaddr);
+                        let mut sym_reader = ElfSymbolReader::new(elf_file, load_header, page_size);
+                        map_mut.add_matching_symbols(frames, &mut sym_reader, strings);
+                    }
+
+                    // Go pclntab pass. Unioned with the ELF symbols above; pclntab
+                    // fills functions the ELF symbol table lacks (or is the only
+                    // source when the symbol table has been stripped). Functions
+                    // shared with the ELF pass are dropped automatically.
+                    if let Some(go_file) = go_file {
+                        let load_header = ElfLoadHeader::new(p_offset, p_vaddr);
+                        if let Some(mut go_reader) = GoPclnTabSymbolReader::new(go_file, load_header, page_size) {
+                            map_mut.add_matching_symbols(frames, &mut go_reader, strings);
+                        }
+                    }
                 }
             }
         }
@@ -204,9 +233,30 @@ impl ExportProcessLinuxExt for ExportProcess {
         bin_path: &str,
         metadata: &ElfModuleMetadata,
         sym_types_requested: u32,
-        strings: &InternedStrings) -> Vec<File> {
+        strings: &InternedStrings) -> Vec<(File, u32)> {
         let mut symbol_files = Vec::new();
         let mut sym_types_found = 0u32;
+
+        // ELF symbol tables (symtab/dynsym) can be split into separate debug
+        // files, so a still-missing ELF type justifies continuing to walk the
+        // .dbg/.debug/debug-link chain. The Go pclntab is only ever carried in
+        // the binary itself (the first candidate), so it never justifies
+        // continuing — this keeps non-Go binaries from incurring extra
+        // symbol-file lookups.
+        let searchable_requested = sym_types_requested
+            & (SYMBOL_TYPE_ELF_SYMTAB | SYMBOL_TYPE_ELF_DYNSYM);
+
+        // The search is complete once everything requested is found, or once
+        // every *searchable* requested type is found (any remaining requested
+        // type can't appear in a later file). The `searchable_requested != 0`
+        // guard prevents a request with no searchable types (e.g. Go-only) from
+        // stopping after an arbitrary first hit — it then stops only when the
+        // requested type is actually found.
+        let search_complete = |found: u32| -> bool {
+            (found & sym_types_requested) == sym_types_requested
+                || (searchable_requested != 0
+                    && (found & searchable_requested) == searchable_requested)
+        };
 
         // Keep evaluating symbol files until we find a matching one with a symtab.
         let mut path_buf = PathBuf::new();
@@ -216,9 +266,9 @@ impl ExportProcessLinuxExt for ExportProcess {
         if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
             metadata.build_id(),
             &path_buf) {
-            symbol_files.push(sym_file);
+            symbol_files.push((sym_file, types_found));
             sym_types_found |= types_found;
-            if sym_types_found == sym_types_requested {
+            if search_complete(sym_types_found) {
                 return symbol_files
             }
         }
@@ -230,10 +280,10 @@ impl ExportProcessLinuxExt for ExportProcess {
         if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
             metadata.build_id(),
             &path_buf) {
-            symbol_files.push(sym_file);
+            symbol_files.push((sym_file, types_found));
             sym_types_found |= types_found;
 
-            if sym_types_found == sym_types_requested {
+            if search_complete(sym_types_found) {
                 return symbol_files
             }
         }
@@ -244,9 +294,9 @@ impl ExportProcessLinuxExt for ExportProcess {
         if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
             metadata.build_id(),
             &path_buf) {
-            symbol_files.push(sym_file);
+            symbol_files.push((sym_file, types_found));
             sym_types_found |= types_found;
-            if sym_types_found == sym_types_requested {
+            if search_complete(sym_types_found) {
                 return symbol_files
             }
         }
@@ -260,9 +310,9 @@ impl ExportProcessLinuxExt for ExportProcess {
             if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
                 metadata.build_id(),
                 &path_buf) {
-                symbol_files.push(sym_file);
+                symbol_files.push((sym_file, types_found));
                 sym_types_found |= types_found;
-                if sym_types_found == sym_types_requested {
+                if search_complete(sym_types_found) {
                     return symbol_files
                 }
             }
@@ -281,9 +331,9 @@ impl ExportProcessLinuxExt for ExportProcess {
                 if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
                     metadata.build_id(),
                     &path_buf) {
-                    symbol_files.push(sym_file);
+                    symbol_files.push((sym_file, types_found));
                     sym_types_found |= types_found;
-                    if sym_types_found == sym_types_requested {
+                    if search_complete(sym_types_found) {
                         return symbol_files
                     }
                 }
@@ -297,9 +347,9 @@ impl ExportProcessLinuxExt for ExportProcess {
                 if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
                     metadata.build_id(),
                     &path_buf) {
-                    symbol_files.push(sym_file);
+                    symbol_files.push((sym_file, types_found));
                     sym_types_found |= types_found;
-                    if sym_types_found == sym_types_requested {
+                    if search_complete(sym_types_found) {
                         return symbol_files
                     }
                 }
@@ -313,9 +363,9 @@ impl ExportProcessLinuxExt for ExportProcess {
                 if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
                     metadata.build_id(),
                     &path_buf) {
-                    symbol_files.push(sym_file);
+                    symbol_files.push((sym_file, types_found));
                     sym_types_found |= types_found;
-                    if sym_types_found == sym_types_requested {
+                    if search_complete(sym_types_found) {
                         return symbol_files
                     }
                 }
@@ -341,9 +391,9 @@ impl ExportProcessLinuxExt for ExportProcess {
             if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
                 metadata.build_id(),
                 &path_buf) {
-                symbol_files.push(sym_file);
+                symbol_files.push((sym_file, types_found));
                 sym_types_found |= types_found;
-                if sym_types_found == sym_types_requested {
+                if search_complete(sym_types_found) {
                     return symbol_files
                 }
             }
@@ -358,9 +408,9 @@ impl ExportProcessLinuxExt for ExportProcess {
         if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
             metadata.build_id(),
             &path_buf) {
-            symbol_files.push(sym_file);
+            symbol_files.push((sym_file, types_found));
             sym_types_found |= types_found;
-            if sym_types_found == sym_types_requested {
+            if search_complete(sym_types_found) {
                 return symbol_files
             }
         }
@@ -374,9 +424,9 @@ impl ExportProcessLinuxExt for ExportProcess {
         if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
             metadata.build_id(),
             &path_buf) {
-            symbol_files.push(sym_file);
+            symbol_files.push((sym_file, types_found));
             sym_types_found |= types_found;
-            if sym_types_found == sym_types_requested {
+            if search_complete(sym_types_found) {
                 return symbol_files
             }
         }
@@ -391,9 +441,9 @@ impl ExportProcessLinuxExt for ExportProcess {
             if let Some((sym_file, types_found)) = self.check_candidate_symbol_file(
                 metadata.build_id(),
                 &path_buf) {
-                symbol_files.push(sym_file);
+                symbol_files.push((sym_file, types_found));
                 sym_types_found |= types_found;
-                if sym_types_found == sym_types_requested {
+                if search_complete(sym_types_found) {
                     return symbol_files
                 }
             }
@@ -465,6 +515,10 @@ impl ExportProcessLinuxExt for ExportProcess {
             }
             if !sections.is_empty() {
                 sym_flags |= SYMBOL_TYPE_ELF_DYNSYM;
+            }
+
+            if has_go_pclntab(&mut reader) || has_go_build_info(&mut reader) {
+                sym_flags |= SYMBOL_TYPE_GO_PCLNTAB;
             }
 
             if sym_flags != 0 {
