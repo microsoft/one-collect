@@ -19,6 +19,8 @@ impl Default for UniversalDotNetHelper {
 pub(crate) trait UniversalDotNetHelperOSHooks {
     fn os_with_dynamic_symbols(self) -> Self;
 
+    fn os_with_cleanup_timeout(self, timeout: std::time::Duration) -> Self;
+
     fn os_cleanup_dynamic_symbols(&mut self);
 }
 
@@ -31,6 +33,18 @@ impl UniversalDotNetHelper {
 
     pub fn with_dynamic_symbols(mut self) -> Self {
         self.helper = self.helper.os_with_dynamic_symbols();
+
+        self
+    }
+
+    /// Overrides the .NET cleanup budget used during shutdown teardown. Larger
+    /// values favor a cleaner final state (more runtimes disabled) at the cost
+    /// of longer teardown when runtimes are unresponsive. None keeps the
+    /// built-in default.
+    pub fn with_cleanup_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
+        if let Some(timeout) = timeout {
+            self.helper = self.helper.os_with_cleanup_timeout(timeout);
+        }
 
         self
     }

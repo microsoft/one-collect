@@ -49,6 +49,9 @@ struct Args {
     #[arg(long = "cpu", help = "Capture data for the specified CPU.  Multiple cpus can be specified, one per usage of --cpu")]
     target_cpus: Option<Vec<u16>>,
 
+    #[arg(long = "dotnet-cleanup-timeout", value_parser = clap::value_parser!(u64).range(0..=86_400), help = "Total seconds budgeted to disable tracked .NET runtimes at shutdown. Higher values favor a cleaner final state (more runtimes disabled) at the cost of longer teardown when runtimes are unresponsive. Defaults to 60.")]
+    dotnet_cleanup_timeout: Option<u64>,
+
     #[arg(long, help = "Script snippet to run to enable complex configurations")]
     script: Option<String>,
 
@@ -113,6 +116,7 @@ pub struct RecordArgs {
     max_memory_bytes: Option<u64>,
     target_pids: Option<Vec<i32>>,
     target_cpus: Option<Vec<u16>>,
+    dotnet_cleanup_timeout: Option<Duration>,
     script: Option<String>,
     log_filter: Option<String>,
     log_path: Option<String>,
@@ -172,6 +176,7 @@ impl RecordArgs {
             max_memory_bytes: command_args.max_memory.map(|mb| mb.saturating_mul(1024 * 1024)),
             target_pids: command_args.target_pids,
             target_cpus: command_args.target_cpus,
+            dotnet_cleanup_timeout: command_args.dotnet_cleanup_timeout.map(Duration::from_secs),
             script,
             log_filter: command_args.log_filter,
             log_path: command_args.log_path,
@@ -237,6 +242,10 @@ impl RecordArgs {
 
     pub (crate) fn target_cpus(&self) -> &Option<Vec<u16>> {
         &self.target_cpus
+    }
+
+    pub (crate) fn dotnet_cleanup_timeout(&self) -> Option<Duration> {
+        self.dotnet_cleanup_timeout
     }
 
     pub (crate) fn script(&self) -> &Option<String> {
