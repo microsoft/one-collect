@@ -4,20 +4,28 @@
 //! # TDH-Based Dynamic Event Decoder
 //!
 //! This module provides [`TdhDecoder`], a runtime schema decoder for
-//! TraceLogging and TraceLoggingDynamic ETW events.  It uses the Windows
-//! Trace Data Helper (TDH) APIs to discover event schemas on the fly and
-//! converts them into the standard [`EventFormat`] / [`EventData`]
-//! representation used throughout one_collect.
+//! TraceLogging, TraceLoggingDynamic, and manifest-based ETW events.  It
+//! uses the Windows Trace Data Helper (TDH) APIs to discover event schemas
+//! on the fly and converts them into the standard [`EventFormat`] /
+//! [`EventData`] representation used throughout one_collect.
 //!
 //! ## Design
 //!
-//! The decoder caches the [`EventFormat`] directly, keyed by the raw
-//! TraceLogging schema bytes and pointer width.  Because the format uses
-//! the framework's standard `LocationType` conventions (`StaticString`,
-//! `StaticUTF16String`, etc. with `size = 0` for variable-length fields),
-//! the cached `EventFormat` is schema-stable: it doesn't depend on any
-//! particular event's payload bytes.  A cache hit collapses to a hashmap
-//! probe + `EventData::new` — effectively zero per-event overhead.
+//! The decoder caches the [`EventFormat`] directly.  TraceLogging schemas
+//! are keyed by their raw inline schema bytes; manifest schemas by their
+//! `(Provider GUID, Id, Version)` identity.  Both keyspaces are split by
+//! pointer width and index into one shared, append-only arena of decoded
+//! schemas.  Because the format uses the framework's standard `LocationType`
+//! conventions (`StaticString`, `StaticUTF16String`, etc. with `size = 0`
+//! for variable-length fields), the cached `EventFormat` is schema-stable:
+//! it doesn't depend on any particular event's payload bytes.  A cache hit
+//! collapses to a hashmap probe + `EventData::new` — effectively zero
+//! per-event overhead.
+//!
+//! Source selection is transparent: [`TdhDecoder::decode`] takes the
+//! TraceLogging path when an inline SCHEMA_TL item is present and the
+//! manifest path otherwise.  `TdhGetEventInformation` is the same entry
+//! point for both, so the byte-level decoding is entirely source-agnostic.
 //!
 //! Variable-length field resolution (scanning for null terminators, reading
 //! length prefixes) is handled lazily by the framework's existing
@@ -26,15 +34,42 @@
 //!
 //! ## Scope
 //!
-//! - **Supported**: TraceLogging and TraceLoggingDynamic events, nested
-//!   struct fields (flattened with dot-notation names), basic scalar and
-//!   string property types, 32-bit and 64-bit event payloads.
+//! - **Supported**: TraceLogging, TraceLoggingDynamic, and manifest-based
+//!   events, nested struct fields (flattened with dot-notation names), basic
+//!   scalar and string property types, 32-bit and 64-bit event payloads.
 //!
-//! - **Not yet supported** (future work): manifest-based event decoding,
-//!   map / enum value resolution, array-typed properties, and properties
-//!   whose length or count is given by another property.
+//! - **Not supported**: classic (MOF/WBEM) and WPP events (fast-rejected /
+//!   returned as `Unsupported`).
+//!
+//! - **Not yet supported** (future work): map / enum value resolution,
+//!   array-typed properties, and properties whose length or count is given
+//!   by another property.
+//!
+//! ## "Manifest" here means *OS-registered*, not EventSource in-band
+//!
+//! The manifest path resolves schemas exclusively through
+//! `TdhGetEventInformation`, which consults manifests registered with the OS
+//! (`HKLM\...\WINEVT\Publishers`, the `wevtutil im` model — e.g.
+//! `Microsoft-Windows-Kernel-*` and the .NET runtime providers).  It does
+//! **not** support .NET `EventSource` providers running in their default
+//! manifest mode, where the manifest is *not* OS-registered but is emitted
+//! **in-band** as special chunked "manifest events" (`EVENT_DESCRIPTOR.Id ==
+//! 0xFFFE`, `Opcode == 0xFE`).  For those providers `TdhGetEventInformation`
+//! returns `ERROR_NOT_FOUND`, so `decode()` returns
+//! [`TdhDecodeError::NotFound`].  Decoding them requires capturing and
+//! reassembling the in-band manifest chunks and parsing the XML — a separate
+//! subsystem tracked as future work.  Custom `EventSource` providers that use
+//! *self-describing* (TraceLogging) mode are decoded via the TraceLogging
+//! path and are unaffected.
+//!
+//! Manifest decoding requires the provider's manifest to be registered on
+//! the *decoding* machine; if it isn't, `TdhGetEventInformation` returns
+//! `ERROR_NOT_FOUND` and `decode()` returns [`TdhDecodeError::NotFound`].
+//! Negative results are not cached, so a manifest registered after the
+//! decoder starts is picked up on the next matching event.
 
 use super::abi::{EVENT_RECORD, EventRecordExt};
+use crate::Guid;
 use crate::event::{EventData, EventField, EventFormat, LocationType};
 
 use std::collections::HashMap;
@@ -49,6 +84,11 @@ use windows_sys::Win32::System::Diagnostics::Etw::{
     EVENT_PROPERTY_INFO,
     TdhGetEventInformation,
     EVENT_HEADER_EXT_TYPE_EVENT_SCHEMA_TL,
+
+    // Decoding-source discrimination (TraceLogging vs. manifest/WPP).
+    DECODING_SOURCE,
+    DecodingSourceTlg,
+    DecodingSourceXMLFile,
 
     TDH_INTYPE_UNICODESTRING,
     TDH_INTYPE_ANSISTRING,
@@ -89,6 +129,15 @@ use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_NOT_FOUND}
 /// `EVENT_HEADER_FLAG_32_BIT_HEADER` from the Windows SDK.
 const EVENT_HEADER_FLAG_32_BIT_HEADER: u16 = 0x0020;
 
+/// `EVENT_HEADER_FLAG_CLASSIC_HEADER` from the Windows SDK.
+///
+/// Set for classic (MOF/WBEM) events, whose identity is an event-class
+/// GUID + Opcode rather than the `(Provider, Id, Version)` tuple used for
+/// manifest events.  Such events must never take the manifest path: their
+/// `EVENT_DESCRIPTOR.Id` is commonly `0`, so multiple distinct classic
+/// events from one provider would collapse onto the same `ManifestKey`.
+const EVENT_HEADER_FLAG_CLASSIC_HEADER: u16 = 0x0100;
+
 // Aliases for PROPERTY_FLAGS constants (i32 in windows-sys) to keep
 // call-site flag checks concise.
 const PROPERTY_STRUCT: i32       = PropertyStruct;
@@ -103,9 +152,19 @@ const PROPERTY_PARAM_COUNT: i32  = PropertyParamCount;
 /// Errors that can occur during TDH-based schema decoding.
 #[derive(Debug)]
 pub enum TdhDecodeError {
-    /// No `EVENT_HEADER_EXT_TYPE_EVENT_SCHEMA_TL` extended-data item was
-    /// found on the event.
+    /// No decodable schema was found for the event.
+    ///
+    /// For TraceLogging this means no inline
+    /// `EVENT_HEADER_EXT_TYPE_EVENT_SCHEMA_TL` extended-data item was
+    /// present.  For manifest events this also covers "manifest not
+    /// registered on this machine" (`TdhGetEventInformation` returns
+    /// `ERROR_NOT_FOUND`) and classic (MOF/WBEM) events, which are
+    /// fast-rejected before the manifest path.
     NotFound,
+    /// The event's schema source is recognised but not supported by this
+    /// decoder (e.g. WPP or WBEM decoding sources reached via the manifest
+    /// dispatch path).
+    Unsupported,
     /// A Win32 error code was returned by `TdhGetEventInformation`.
     Win32(u32),
     /// The `TRACE_EVENT_INFO` returned by TDH is structurally invalid.
@@ -115,7 +174,8 @@ pub enum TdhDecodeError {
 impl std::fmt::Display for TdhDecodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotFound => write!(f, "no schema TL extended-data item found on event"),
+            Self::NotFound => write!(f, "no decodable schema found for event"),
+            Self::Unsupported => write!(f, "event schema source is not supported"),
             Self::Win32(code) => write!(f, "TdhGetEventInformation failed with Win32 error {code}"),
             Self::Malformed(msg) => write!(f, "malformed TRACE_EVENT_INFO: {msg}"),
         }
@@ -130,7 +190,7 @@ impl std::error::Error for TdhDecodeError {}
 /// framework's `try_get_field_data_closure` can resolve lazily.
 #[derive(Clone)]
 struct CachedSchema {
-    /// The TraceLogging event name.
+    /// The event name (TraceLogging event name or manifest task name).
     event_name: String,
     /// Schema-stable `EventFormat` — field offsets are absolute for
     /// fixed-size fields, and the framework's skip chain handles
@@ -143,50 +203,85 @@ struct CachedSchema {
 /// Hash builder using XxHash64, matching the rest of the ETW module.
 type XxBuildHasher = BuildHasherDefault<XxHash64>;
 
-/// Schema cache: an append-only `Vec` of decoded schemas plus two maps
-/// (32-bit / 64-bit) that key raw TL bytes to an index into that `Vec`.
+/// Identity of a manifest-based event's schema.
+///
+/// Manifest events do not carry their layout inline; instead the OS holds a
+/// registered manifest that pins the `(Provider GUID, Id, Version)` tuple to
+/// a fixed layout.  That tuple is therefore the natural cache key, mirroring
+/// how TraceLogging keys on its inline schema bytes.
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+struct ManifestKey {
+    /// Provider GUID from `EVENT_HEADER.ProviderId`.
+    provider: Guid,
+    /// Event ID from `EVENT_DESCRIPTOR.Id`.
+    id: u16,
+    /// Manifest version from `EVENT_DESCRIPTOR.Version`.  A layout change
+    /// bumps this, yielding a distinct key.
+    version: u8,
+}
+
+/// Schema cache: one append-only `Vec` arena of decoded schemas shared by
+/// both schema sources, indexed by per-source, per-pointer-width maps.
+///
+/// TraceLogging is keyed by its raw inline schema bytes; manifest events by
+/// their `(Provider, Id, Version)` [`ManifestKey`].  The two sources use
+/// different key *types*, so they need separate maps (a `HashMap` is
+/// monomorphic in its key), but the decoded [`CachedSchema`] is source-
+/// agnostic, so storage stays unified in one arena.  Because the arena is
+/// append-only, an index handed out by any map stays valid for the life of
+/// the cache, and TL and manifest entries can never alias the same slot.
 ///
 /// Storing a `Copy` index (rather than the schema inline in the map) lets the
-/// hot path hash the 50-500 byte key exactly once: the index is copied out,
-/// ending the map borrow, and the schema is then read from `schemas`.  The
-/// previous `get().is_none()` + `get().expect()` pattern hashed the key twice
-/// on every cache hit (a borrow-checker workaround for get-or-insert).
+/// hot path hash the key exactly once: the index is copied out, ending the
+/// map borrow, and the schema is then read from `schemas`.
 struct SchemaCache {
     /// Decoded schemas, indexed by the maps below.  Append-only: entries are
     /// never removed, so an index stays valid for the life of the cache.
     schemas: Vec<CachedSchema>,
-    cache_64: HashMap<Vec<u8>, usize, XxBuildHasher>,
-    cache_32: HashMap<Vec<u8>, usize, XxBuildHasher>,
+    /// TraceLogging schema bytes → arena index (64-bit / 32-bit payloads).
+    tl_64: HashMap<Vec<u8>, usize, XxBuildHasher>,
+    tl_32: HashMap<Vec<u8>, usize, XxBuildHasher>,
+    /// Manifest `(Provider, Id, Version)` → arena index (64/32-bit payloads).
+    manifest_64: HashMap<ManifestKey, usize, XxBuildHasher>,
+    manifest_32: HashMap<ManifestKey, usize, XxBuildHasher>,
 }
 
 impl SchemaCache {
     fn new() -> Self {
         Self {
             schemas: Vec::new(),
-            cache_64: HashMap::with_hasher(XxBuildHasher::default()),
-            cache_32: HashMap::with_hasher(XxBuildHasher::default()),
+            tl_64: HashMap::with_hasher(XxBuildHasher::default()),
+            tl_32: HashMap::with_hasher(XxBuildHasher::default()),
+            manifest_64: HashMap::with_hasher(XxBuildHasher::default()),
+            manifest_32: HashMap::with_hasher(XxBuildHasher::default()),
         }
     }
 
-    /// Returns the index of a cached schema, or `None` on a miss.
-    /// The key is hashed exactly once.
-    fn index_of(&self, key: &[u8], is_32bit: bool) -> Option<usize> {
-        let map = if is_32bit { &self.cache_32 } else { &self.cache_64 };
+    /// Returns the index of a cached TraceLogging schema, or `None` on a
+    /// miss.  The key is hashed exactly once.
+    fn index_of_tl(&self, key: &[u8], is_32bit: bool) -> Option<usize> {
+        let map = if is_32bit { &self.tl_32 } else { &self.tl_64 };
         map.get(key).copied()
     }
 
-    /// Maps `key` to a schema index and returns it.  Intended for the cache
-    /// miss path, where `key` is not yet present.
+    /// Returns the index of a cached manifest schema, or `None` on a miss.
+    fn index_of_manifest(&self, key: &ManifestKey, is_32bit: bool) -> Option<usize> {
+        let map = if is_32bit { &self.manifest_32 } else { &self.manifest_64 };
+        map.get(key).copied()
+    }
+
+    /// Maps a TraceLogging `key` to a schema index and returns it.  Intended
+    /// for the cache miss path, where `key` is not yet present.
     ///
     /// The schema is only pushed onto `schemas` when the key is actually
     /// vacant, so a (contract-violating) duplicate key returns the existing
     /// index without orphaning a freshly built schema.  The key is hashed
     /// once via a single `entry` lookup.
-    fn insert(&mut self, key: Vec<u8>, is_32bit: bool, schema: CachedSchema) -> usize {
+    fn insert_tl(&mut self, key: Vec<u8>, is_32bit: bool, schema: CachedSchema) -> usize {
         use std::collections::hash_map::Entry;
 
         let idx = self.schemas.len();
-        let map = if is_32bit { &mut self.cache_32 } else { &mut self.cache_64 };
+        let map = if is_32bit { &mut self.tl_32 } else { &mut self.tl_64 };
         match map.entry(key) {
             // Already present: return the existing index and drop `schema`.
             Entry::Occupied(e) => *e.get(),
@@ -198,10 +293,28 @@ impl SchemaCache {
         }
     }
 
+    /// Maps a manifest `key` to a schema index and returns it.  See
+    /// [`insert_tl`] for the vacancy / single-hash semantics.
+    fn insert_manifest(&mut self, key: ManifestKey, is_32bit: bool, schema: CachedSchema) -> usize {
+        use std::collections::hash_map::Entry;
+
+        let idx = self.schemas.len();
+        let map = if is_32bit { &mut self.manifest_32 } else { &mut self.manifest_64 };
+        match map.entry(key) {
+            Entry::Occupied(e) => *e.get(),
+            Entry::Vacant(e) => {
+                let assigned = *e.insert(idx); // ends the map borrow
+                self.schemas.push(schema); // only push once actually indexed
+                assigned
+            }
+        }
+    }
+
     /// Reads a cached schema by its index.
     ///
-    /// `idx` always comes from `index_of` or `insert`, and `schemas` is
-    /// append-only (entries are never removed), so the index never dangles.
+    /// `idx` always comes from an `index_of_*` or `insert_*` call, and
+    /// `schemas` is append-only (entries are never removed), so the index
+    /// never dangles.
     fn get(&self, idx: usize) -> &CachedSchema {
         &self.schemas[idx]
     }
@@ -211,24 +324,26 @@ impl SchemaCache {
 
 /// Result of a successful [`TdhDecoder::decode`] call.
 ///
-/// Contains the decoded [`EventData`], the TraceLogging `event_name`,
+/// Contains the decoded [`EventData`], the resolved `event_name`,
 /// and a monotonic [`SchemaId`] that exporters can use as a cheap
 /// lookup key for format registration.
 #[non_exhaustive]
 pub struct TdhDecodedEvent<'a> {
     /// The decoded event data.
     pub event_data: EventData<'a>,
-    /// The TraceLogging event name, or `None` if the schema has no name.
+    /// The resolved event name, or `None` if the schema has no name.
     ///
-    /// This is the primary identity for TraceLogging events (as opposed
-    /// to the event ID, which is often 0).  Consumers can use this for
-    /// OTEL log record naming without a second cache probe.
+    /// For TraceLogging this is the event name (the primary identity, as
+    /// the event ID is often 0); for manifest events it is the task name.
+    /// Consumers can use this for OTEL log record naming without a second
+    /// cache probe.
     pub event_name: Option<&'a str>,
     /// Monotonic identifier for this event's schema.
     ///
-    /// Each distinct `(schema_tl_bytes, pointer_width)` pair gets a unique
-    /// `SchemaId` on first insertion into the cache.  The same ID is
-    /// returned on every subsequent cache hit.  Exporters can use this as
+    /// Each distinct schema (identified by its inline TraceLogging bytes or
+    /// its manifest `(Provider, Id, Version)` tuple, split by pointer width)
+    /// gets a unique `SchemaId` on first insertion into the cache.  The same
+    /// ID is returned on every subsequent cache hit.  Exporters can use this as
     /// a cheap lookup key to avoid re-registering the `EventFormat`:
     ///
     /// ```ignore
@@ -247,7 +362,8 @@ pub struct TdhDecodedEvent<'a> {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SchemaId(u64);
 
-/// Runtime decoder for TraceLogging / TraceLoggingDynamic ETW events.
+/// Runtime decoder for TraceLogging, TraceLoggingDynamic, and
+/// manifest-based ETW events.
 ///
 /// Caches the `EventFormat` directly per schema.  Cache hits are a
 /// hashmap probe + `EventData::new` with no per-event allocation.
@@ -271,8 +387,15 @@ impl TdhDecoder {
 
     /// Decodes an `EVENT_RECORD` into a [`TdhDecodedEvent`].
     ///
+    /// The schema source is selected automatically: an event carrying an
+    /// inline `EVENT_HEADER_EXT_TYPE_EVENT_SCHEMA_TL` item takes the
+    /// TraceLogging path; otherwise the event is treated as manifest-based
+    /// and resolved through its `(Provider, Id, Version)` identity.  Both
+    /// paths converge on the same `TdhGetEventInformation` walker and the
+    /// same [`EventData`] construction.
+    ///
     /// The returned [`TdhDecodedEvent`] contains the decoded
-    /// [`EventData`], the TraceLogging `event_name`, and a monotonic
+    /// [`EventData`], the resolved `event_name`, and a monotonic
     /// [`SchemaId`] that exporters can use as a cheap lookup key for
     /// format registration.
     pub fn decode<'a>(
@@ -280,27 +403,13 @@ impl TdhDecoder {
         record: &'a EVENT_RECORD,
     ) -> Result<TdhDecodedEvent<'a>, TdhDecodeError> {
         let is_32bit = (record.EventHeader.Flags & EVENT_HEADER_FLAG_32_BIT_HEADER) != 0;
-        let schema_tl_bytes = find_schema_tl(record)?;
 
-        // Single hash lookup on the hot path; the miss path builds and inserts,
-        // returning the index of the new schema.
-        let idx = match self.cache.index_of(schema_tl_bytes, is_32bit) {
-            Some(idx) => idx,
-            None => {
-                call_tdh_get_event_information(record, &mut self.tei_buf)?;
-                let mut schema = build_cached_schema(self.tei_buf.as_bytes(), is_32bit)?;
-                let id = self.next_schema_id;
-                self.next_schema_id = id.wrapping_add(1);
-                schema.schema_id = SchemaId(id);
-                debug!(
-                    event_name = %schema.event_name,
-                    field_count = schema.format.fields().len(),
-                    schema_id = id,
-                    is_32bit,
-                    "TDH schema cache miss — new schema cached"
-                );
-                self.cache.insert(schema_tl_bytes.to_vec(), is_32bit, schema)
-            }
+        // Source selection: inline SCHEMA_TL → TraceLogging; otherwise the
+        // event is manifest-based.  `usize` is `Copy`, so the mutable borrow
+        // of `self` in each helper ends before `self.cache.get(idx)` below.
+        let idx = match find_schema_tl(record) {
+            Some(schema_tl_bytes) => self.decode_tracelogging(record, schema_tl_bytes, is_32bit)?,
+            None => self.decode_manifest(record, is_32bit)?,
         };
 
         let schema = self.cache.get(idx);
@@ -322,6 +431,97 @@ impl TdhDecoder {
             event_name,
             schema_id: schema.schema_id,
         })
+    }
+
+    /// TraceLogging cache lookup / miss handling.  Returns the arena index
+    /// of the (possibly newly built) schema.
+    fn decode_tracelogging(
+        &mut self,
+        record: &EVENT_RECORD,
+        schema_tl_bytes: &[u8],
+        is_32bit: bool,
+    ) -> Result<usize, TdhDecodeError> {
+        if let Some(idx) = self.cache.index_of_tl(schema_tl_bytes, is_32bit) {
+            return Ok(idx);
+        }
+        call_tdh_get_event_information(record, &mut self.tei_buf)?;
+        let mut schema = build_cached_schema(self.tei_buf.as_bytes(), is_32bit)?;
+        schema.schema_id = SchemaId(self.assign_schema_id());
+        debug!(
+            event_name = %schema.event_name,
+            field_count = schema.format.fields().len(),
+            schema_id = schema.schema_id.0,
+            is_32bit,
+            "TDH schema cache miss — new TraceLogging schema cached"
+        );
+        Ok(self.cache.insert_tl(schema_tl_bytes.to_vec(), is_32bit, schema))
+    }
+
+    /// Manifest cache lookup / miss handling.  Returns the arena index of
+    /// the (possibly newly built) schema.
+    ///
+    /// Two guards keep non-manifest sources out of the manifest cache:
+    ///
+    /// 1. **Classic/MOF fast reject** — if `EVENT_HEADER_FLAG_CLASSIC_HEADER`
+    ///    is set, the event's identity is a class GUID + Opcode, not the
+    ///    `(Provider, Id, Version)` tuple; its `Id` is commonly `0`, so
+    ///    multiple such events would collapse onto one key.  Reject before
+    ///    calling TDH.
+    /// 2. **Decoding-source check** — after `TdhGetEventInformation`, only a
+    ///    `DecodingSourceXMLFile` result is a genuine XML manifest.  WPP and
+    ///    WBEM results are returned as [`TdhDecodeError::Unsupported`] rather
+    ///    than cached under a `ManifestKey`.
+    fn decode_manifest(
+        &mut self,
+        record: &EVENT_RECORD,
+        is_32bit: bool,
+    ) -> Result<usize, TdhDecodeError> {
+        // Guard 1: classic (MOF/WBEM) events are not manifest events.
+        if (record.EventHeader.Flags & EVENT_HEADER_FLAG_CLASSIC_HEADER) != 0 {
+            return Err(TdhDecodeError::NotFound);
+        }
+
+        let desc = &record.EventHeader.EventDescriptor;
+        let key = ManifestKey {
+            provider: record.provider_guid(),
+            id: desc.Id,
+            version: desc.Version,
+        };
+
+        if let Some(idx) = self.cache.index_of_manifest(&key, is_32bit) {
+            return Ok(idx);
+        }
+
+        call_tdh_get_event_information(record, &mut self.tei_buf)?;
+
+        // Guard 2: only cache genuine XML-manifest schemas.  A `not
+        // TraceLogging` event can still be WPP/WBEM, whose identity semantics
+        // differ from `ManifestKey`; those are unsupported here.
+        let decoding_source = read_decoding_source(self.tei_buf.as_bytes())?;
+        if decoding_source != DecodingSourceXMLFile {
+            debug!(decoding_source, "TDH manifest path — unsupported decoding source");
+            return Err(TdhDecodeError::Unsupported);
+        }
+
+        let mut schema = build_cached_schema(self.tei_buf.as_bytes(), is_32bit)?;
+        schema.schema_id = SchemaId(self.assign_schema_id());
+        debug!(
+            event_name = %schema.event_name,
+            id = key.id,
+            version = key.version,
+            field_count = schema.format.fields().len(),
+            schema_id = schema.schema_id.0,
+            is_32bit,
+            "TDH schema cache miss — new manifest schema cached"
+        );
+        Ok(self.cache.insert_manifest(key, is_32bit, schema))
+    }
+
+    /// Allocates the next monotonic `SchemaId` value.
+    fn assign_schema_id(&mut self) -> u64 {
+        let id = self.next_schema_id;
+        self.next_schema_id = id.wrapping_add(1);
+        id
     }
 }
 
@@ -543,17 +743,31 @@ fn walk_properties(
 // ── Internal helpers ────────────────────────────────────────────────
 
 /// Finds the TraceLogging schema metadata in the event's extended-data.
-fn find_schema_tl<'a>(record: &'a EVENT_RECORD) -> Result<&'a [u8], TdhDecodeError> {
+///
+/// Returns `None` when the event carries no (or an empty) SCHEMA_TL item,
+/// which is the signal for [`TdhDecoder::decode`] to take the manifest path.
+fn find_schema_tl(record: &EVENT_RECORD) -> Option<&[u8]> {
     let item_ptr = record
-        .find_extended_data(EVENT_HEADER_EXT_TYPE_EVENT_SCHEMA_TL as u16)
-        .ok_or(TdhDecodeError::NotFound)?;
+        .find_extended_data(EVENT_HEADER_EXT_TYPE_EVENT_SCHEMA_TL as u16)?;
     let item = unsafe { &*item_ptr };
     if item.DataPtr == 0 || item.DataSize == 0 {
-        return Err(TdhDecodeError::NotFound);
+        return None;
     }
-    Ok(unsafe {
+    Some(unsafe {
         std::slice::from_raw_parts(item.DataPtr as *const u8, item.DataSize as usize)
     })
+}
+
+/// Reads `TRACE_EVENT_INFO.DecodingSource` from a filled TEI buffer.
+///
+/// Used by the manifest dispatch path to reject non-XML-manifest sources
+/// (WPP / WBEM) before they are cached under a `ManifestKey`.
+fn read_decoding_source(tei_buf: &[u8]) -> Result<DECODING_SOURCE, TdhDecodeError> {
+    if tei_buf.len() < std::mem::size_of::<TRACE_EVENT_INFO>() {
+        return Err(TdhDecodeError::Malformed("buffer smaller than TRACE_EVENT_INFO"));
+    }
+    let tei = unsafe { &*(tei_buf.as_ptr() as *const TRACE_EVENT_INFO) };
+    Ok(tei.DecodingSource)
 }
 
 /// Aligned buffer for `TRACE_EVENT_INFO`.
@@ -633,13 +847,24 @@ const _: () = assert!(
     "TRACE_EVENT_INFO_0 union must remain 4 bytes",
 );
 
-/// Reads the TraceLogging event name from `TRACE_EVENT_INFO`.
+/// Reads the event name from `TRACE_EVENT_INFO`, selecting the offset by
+/// decoding source.
+///
+/// TraceLogging carries the name at `EventNameOffset`; manifest and WPP
+/// events instead expose it as the task name at `TaskNameOffset`.  The
+/// dispatch in [`TdhDecoder::decode`] only builds manifest schemas for
+/// `DecodingSourceXMLFile`, so in practice this reads `EventNameOffset` for
+/// TraceLogging and `TaskNameOffset` for manifest events.
 fn read_event_name(tei_buf: &[u8], tei: &TRACE_EVENT_INFO) -> String {
-    // SAFETY: Both arms of `TRACE_EVENT_INFO_0` are `u32` at the same
-    // offset, so either arm always yields a valid bit pattern.  The
-    // const assertion above guards the 4-byte size against future
-    // `windows-sys` layout drift.
-    let name_offset = unsafe { tei.Anonymous1.EventNameOffset } as usize;
+    let name_offset = if tei.DecodingSource == DecodingSourceTlg {
+        // SAFETY: Both arms of `TRACE_EVENT_INFO_0` are `u32` at the same
+        // offset, so either arm always yields a valid bit pattern.  The
+        // const assertion above guards the 4-byte size against future
+        // `windows-sys` layout drift.
+        unsafe { tei.Anonymous1.EventNameOffset as usize }
+    } else {
+        tei.TaskNameOffset as usize
+    };
     read_utf16_at(tei_buf, name_offset)
 }
 
@@ -1095,9 +1320,11 @@ mod tests {
 
     #[test]
     fn tdh_decode_not_found_without_schema_tl() {
-        // An EVENT_RECORD with no extended data items should return
-        // TdhDecodeError::NotFound — the public-API contract for
-        // manifest-based events or records without TraceLogging metadata.
+        // A non-classic EVENT_RECORD with no SCHEMA_TL item takes the
+        // manifest path.  With a zeroed (unregistered) provider GUID,
+        // TdhGetEventInformation returns ERROR_NOT_FOUND, which surfaces as
+        // TdhDecodeError::NotFound — the public-API contract for events
+        // whose schema can't be resolved on this machine.
         let mut record: EVENT_RECORD = unsafe { std::mem::zeroed() };
         record.ExtendedDataCount = 0;
         record.ExtendedData = std::ptr::null_mut();
@@ -1150,5 +1377,103 @@ mod tests {
         record_32b.EventHeader.Flags |= EVENT_HEADER_FLAG_32_BIT_HEADER;
         let r32b = decoder.decode(&record_32b).expect("32-bit cache hit");
         assert_eq!(r32b.schema_id, id_32, "32-bit cache hit should return same ID");
+    }
+
+    // ── Manifest-path tests ─────────────────────────────────────────
+
+    /// Classic (MOF/WBEM) events must be fast-rejected before any TDH call:
+    /// their identity is a class GUID + Opcode, not `(Provider, Id, Version)`,
+    /// and their `Id` is commonly 0, so routing them through the manifest
+    /// cache would collapse distinct events onto one key.
+    #[test]
+    fn tdh_decode_classic_header_rejected_before_tdh() {
+        let mut record: EVENT_RECORD = unsafe { std::mem::zeroed() };
+        record.ExtendedDataCount = 0;
+        record.ExtendedData = std::ptr::null_mut();
+        record.EventHeader.Flags |= EVENT_HEADER_FLAG_CLASSIC_HEADER;
+
+        let mut decoder = TdhDecoder::new();
+        match decoder.decode(&record) {
+            Err(TdhDecodeError::NotFound) => {} // expected — rejected by guard 1
+            Err(other) => panic!("expected NotFound for classic header, got: {other}"),
+            Ok(_) => panic!("expected NotFound error, but decode succeeded"),
+        }
+    }
+
+    /// `read_event_name` must pick `EventNameOffset` for TraceLogging and
+    /// `TaskNameOffset` for manifest events, selected by `DecodingSource`.
+    #[test]
+    fn read_event_name_selects_offset_by_decoding_source() {
+        fn push_utf16(buf: &mut Vec<u8>, s: &str) {
+            for u in s.encode_utf16() {
+                buf.extend_from_slice(&u.to_le_bytes());
+            }
+            buf.extend_from_slice(&[0, 0]); // UTF-16 null terminator
+        }
+
+        // Layout: [TRACE_EVENT_INFO-sized header][EventName][TaskName].
+        let mut buf = vec![0u8; std::mem::size_of::<TRACE_EVENT_INFO>()];
+        let event_off = buf.len();
+        push_utf16(&mut buf, "EventName");
+        let task_off = buf.len();
+        push_utf16(&mut buf, "TaskName");
+
+        let mut tei: TRACE_EVENT_INFO = unsafe { std::mem::zeroed() };
+        tei.TaskNameOffset = task_off as u32;
+        // Writing a union field is safe; only reads are `unsafe`.
+        tei.Anonymous1.EventNameOffset = event_off as u32;
+
+        tei.DecodingSource = DecodingSourceTlg;
+        assert_eq!(read_event_name(&buf, &tei), "EventName");
+
+        tei.DecodingSource = DecodingSourceXMLFile;
+        assert_eq!(read_event_name(&buf, &tei), "TaskName");
+    }
+
+    /// The manifest maps and the TraceLogging maps share one append-only
+    /// arena but are indexed by different key types.  Verify that: entries
+    /// never alias across sources, the 32-/64-bit split is honoured, and a
+    /// duplicate manifest insert returns the existing index.
+    #[test]
+    fn manifest_cache_shared_arena_and_pointer_split() {
+        let mk = |name: &str| CachedSchema {
+            event_name: name.to_string(),
+            format: EventFormat::new(),
+            schema_id: SchemaId(0),
+        };
+        let key = ManifestKey {
+            provider: Guid::from_u128(0x1122_3344_5566_7788_99AA_BBCC_DDEE_FF00),
+            id: 5,
+            version: 2,
+        };
+
+        let mut cache = SchemaCache::new();
+
+        // 64-bit insert, then hit.
+        let idx_a = cache.insert_manifest(key, false, mk("A"));
+        assert_eq!(cache.index_of_manifest(&key, false), Some(idx_a));
+
+        // The 32-bit map is a separate keyspace: same key misses there.
+        assert_eq!(cache.index_of_manifest(&key, true), None);
+        let idx_b = cache.insert_manifest(key, true, mk("B"));
+        assert_ne!(idx_a, idx_b, "32-/64-bit split must yield distinct slots");
+
+        // TraceLogging shares the arena but is indexed separately.
+        let tl_idx = cache.insert_tl(vec![1, 2, 3], false, mk("C"));
+        assert_ne!(tl_idx, idx_a);
+        assert_ne!(tl_idx, idx_b);
+        assert_eq!(cache.index_of_tl(&[1, 2, 3], false), Some(tl_idx));
+
+        // Each index reads back its own schema — no cross-source aliasing.
+        assert_eq!(cache.get(idx_a).event_name, "A");
+        assert_eq!(cache.get(idx_b).event_name, "B");
+        assert_eq!(cache.get(tl_idx).event_name, "C");
+
+        // A duplicate manifest insert returns the existing index and drops
+        // the freshly built schema (no arena orphan).
+        let before = cache.schemas.len();
+        assert_eq!(cache.insert_manifest(key, false, mk("dup")), idx_a);
+        assert_eq!(cache.schemas.len(), before, "duplicate must not grow arena");
+        assert_eq!(cache.get(idx_a).event_name, "A", "original schema preserved");
     }
 }
