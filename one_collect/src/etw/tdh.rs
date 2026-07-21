@@ -72,7 +72,7 @@ use super::abi::{EVENT_RECORD, EventRecordExt};
 use crate::Guid;
 use crate::event::{EventData, EventField, EventFormat, LocationType};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::BuildHasherDefault;
 use tracing::{debug, trace, warn};
 use twox_hash::XxHash64;
@@ -209,6 +209,14 @@ type XxBuildHasher = BuildHasherDefault<XxHash64>;
 /// registered manifest that pins the `(Provider GUID, Id, Version)` tuple to
 /// a fixed layout.  That tuple is therefore the natural cache key, mirroring
 /// how TraceLogging keys on its inline schema bytes.
+///
+/// Note: the derived `Hash` delegates to [`Guid`]'s `Hash` impl, which hashes
+/// only the first three GUID fields (`data1`/`data2`/`data3`), not the
+/// trailing `data4` bytes.  Equality is still full (derived `Eq` compares all
+/// fields), so correctness is unaffected — but two provider GUIDs differing
+/// only in their last 8 bytes share a hash bucket.  Provider GUIDs vary in
+/// their leading fields in practice, so this is benign; it is called out here
+/// so a future change to `Guid`'s `Hash` isn't made without weighing this key.
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 struct ManifestKey {
     /// Provider GUID from `EVENT_HEADER.ProviderId`.
@@ -244,6 +252,14 @@ struct SchemaCache {
     /// Manifest `(Provider, Id, Version)` → arena index (64/32-bit payloads).
     manifest_64: HashMap<ManifestKey, usize, XxBuildHasher>,
     manifest_32: HashMap<ManifestKey, usize, XxBuildHasher>,
+    /// Manifest keys whose decoding source is permanently unsupported
+    /// (WPP / WBEM reached via the manifest dispatch path).  Caching these
+    /// avoids a `TdhGetEventInformation` round trip on every subsequent event
+    /// from a chatty unsupported provider.  Pointer-width independent: the
+    /// decoding source is a property of the provider's registration, not the
+    /// payload width.  Only *permanent* negatives live here — `NotFound` is
+    /// never cached, since a manifest can register after the decoder starts.
+    manifest_unsupported: HashSet<ManifestKey, XxBuildHasher>,
 }
 
 impl SchemaCache {
@@ -254,6 +270,7 @@ impl SchemaCache {
             tl_32: HashMap::with_hasher(XxBuildHasher::default()),
             manifest_64: HashMap::with_hasher(XxBuildHasher::default()),
             manifest_32: HashMap::with_hasher(XxBuildHasher::default()),
+            manifest_unsupported: HashSet::with_hasher(XxBuildHasher::default()),
         }
     }
 
@@ -268,6 +285,16 @@ impl SchemaCache {
     fn index_of_manifest(&self, key: &ManifestKey, is_32bit: bool) -> Option<usize> {
         let map = if is_32bit { &self.manifest_32 } else { &self.manifest_64 };
         map.get(key).copied()
+    }
+
+    /// Returns `true` if `key` has been recorded as permanently unsupported.
+    fn is_manifest_unsupported(&self, key: &ManifestKey) -> bool {
+        self.manifest_unsupported.contains(key)
+    }
+
+    /// Records `key` as permanently unsupported (WPP / WBEM decoding source).
+    fn mark_manifest_unsupported(&mut self, key: ManifestKey) {
+        self.manifest_unsupported.insert(key);
     }
 
     /// Maps a TraceLogging `key` to a schema index and returns it.  Intended
@@ -469,8 +496,11 @@ impl TdhDecoder {
     ///    calling TDH.
     /// 2. **Decoding-source check** — after `TdhGetEventInformation`, only a
     ///    `DecodingSourceXMLFile` result is a genuine XML manifest.  WPP and
-    ///    WBEM results are returned as [`TdhDecodeError::Unsupported`] rather
-    ///    than cached under a `ManifestKey`.
+    ///    WBEM results are returned as [`TdhDecodeError::Unsupported`] and the
+    ///    key is recorded in a negative cache, so a chatty unsupported
+    ///    provider pays the `TdhGetEventInformation` round trip only once
+    ///    rather than on every event.  `NotFound` (unregistered manifest) is
+    ///    *not* negatively cached, since it can flip once a manifest registers.
     fn decode_manifest(
         &mut self,
         record: &EVENT_RECORD,
@@ -492,6 +522,12 @@ impl TdhDecoder {
             return Ok(idx);
         }
 
+        // Negative cache: keys proven permanently unsupported skip the TDH
+        // call entirely.
+        if self.cache.is_manifest_unsupported(&key) {
+            return Err(TdhDecodeError::Unsupported);
+        }
+
         call_tdh_get_event_information(record, &mut self.tei_buf)?;
 
         // Guard 2: only cache genuine XML-manifest schemas.  A `not
@@ -500,6 +536,7 @@ impl TdhDecoder {
         let decoding_source = read_decoding_source(self.tei_buf.as_bytes())?;
         if decoding_source != DecodingSourceXMLFile {
             debug!(decoding_source, "TDH manifest path — unsupported decoding source");
+            self.cache.mark_manifest_unsupported(key);
             return Err(TdhDecodeError::Unsupported);
         }
 
@@ -766,6 +803,16 @@ fn read_decoding_source(tei_buf: &[u8]) -> Result<DECODING_SOURCE, TdhDecodeErro
     if tei_buf.len() < std::mem::size_of::<TRACE_EVENT_INFO>() {
         return Err(TdhDecodeError::Malformed("buffer smaller than TRACE_EVENT_INFO"));
     }
+    // SAFETY: the cast to `*const TRACE_EVENT_INFO` requires the buffer to be
+    // suitably aligned.  Callers pass the `AlignedTeiBuf` backing store, which
+    // is `Vec<u64>`-backed and therefore 8-byte aligned (>= the alignment of
+    // `TRACE_EVENT_INFO`).  The debug assert guards against a future caller
+    // handing in an unaligned slice.
+    debug_assert_eq!(
+        tei_buf.as_ptr() as usize % std::mem::align_of::<TRACE_EVENT_INFO>(),
+        0,
+        "tei_buf must be aligned for TRACE_EVENT_INFO"
+    );
     let tei = unsafe { &*(tei_buf.as_ptr() as *const TRACE_EVENT_INFO) };
     Ok(tei.DecodingSource)
 }
@@ -1475,5 +1522,34 @@ mod tests {
         assert_eq!(cache.insert_manifest(key, false, mk("dup")), idx_a);
         assert_eq!(cache.schemas.len(), before, "duplicate must not grow arena");
         assert_eq!(cache.get(idx_a).event_name, "A", "original schema preserved");
+    }
+
+    /// The negative cache records permanently-unsupported manifest keys and
+    /// is pointer-width independent (the decoding source doesn't depend on
+    /// payload width).  Verify a marked key reports unsupported regardless of
+    /// the `is_32bit` probe and that an unmarked key does not.
+    #[test]
+    fn manifest_unsupported_negative_cache() {
+        let key = ManifestKey {
+            provider: Guid::from_u128(0x0011_2233_4455_6677_8899_AABB_CCDD_EEFF),
+            id: 7,
+            version: 1,
+        };
+        let other = ManifestKey {
+            provider: key.provider,
+            id: 8,
+            version: 1,
+        };
+
+        let mut cache = SchemaCache::new();
+        assert!(!cache.is_manifest_unsupported(&key));
+
+        cache.mark_manifest_unsupported(key);
+        assert!(cache.is_manifest_unsupported(&key), "marked key must report unsupported");
+        assert!(!cache.is_manifest_unsupported(&other), "distinct key unaffected");
+
+        // Marking is not a positive-cache entry: index lookups still miss.
+        assert_eq!(cache.index_of_manifest(&key, false), None);
+        assert_eq!(cache.index_of_manifest(&key, true), None);
     }
 }
