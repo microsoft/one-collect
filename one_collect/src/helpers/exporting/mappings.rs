@@ -208,6 +208,20 @@ impl ExportMapping {
         unique_ips.sort();
         sym_reader.reset();
 
+        // When more than one symbol source is unioned onto the same mapping
+        // (e.g. ELF symtab/dynsym followed by the Go gopclntab), a function
+        // present in multiple sources must not be added twice. We detect this
+        // transparently: if the mapping already holds symbols from an earlier
+        // source, we de-duplicate by start address against them (and against
+        // symbols added during this pass); the first source to add a given
+        // start wins. Single-source callers add onto an empty mapping and take
+        // this cost only when the scenario actually requires it.
+        let mut seen: Option<std::collections::HashSet<u64>> = if initial_symbol_count > 0 {
+            Some(self.symbols.iter().map(|s| s.start()).collect())
+        } else {
+            None
+        };
+
         loop {
             if !sym_reader.next() {
                 break;
@@ -226,6 +240,16 @@ impl ExportMapping {
                         let addr = *unique_ips.get(i).unwrap_or(&0u64);
                         if unique_ips.len() > i && addr <= end_ip {
                             add_sym = true;
+                        }
+                    }
+                }
+
+                // Skip duplicates (by start address) when de-duplicating across
+                // unioned symbol sources.
+                if add_sym {
+                    if let Some(seen) = seen.as_mut() {
+                        if !seen.insert(start_ip) {
+                            add_sym = false;
                         }
                     }
                 }
@@ -585,8 +609,52 @@ mod tests {
     }
 
     #[test]
-    fn lookup() {
-        let mappings = vec!(
+    fn add_matching_symbols_dedup_test() {
+        // Unions two symbol sources (e.g. ELF symtab then Go pclntab) into one
+        // mapping. Functions that appear in both (same start) must not be
+        // duplicated; the first source wins. Distinct functions are all kept.
+        // Dedup is transparent: calling add_matching_symbols a second time on a
+        // mapping that already has symbols de-duplicates automatically.
+        let start = 4096;
+        let end = start + 4096;
+        let file_offset = 1024;
+
+        let mut mapping = ExportMapping::new(0, 0, start, end, file_offset, false, 0, UnwindType::Prolog);
+        let mut strings = InternedStrings::new(32);
+
+        // VA = file - 1024 + 4096. IPs chosen to hit each symbol's start.
+        let mut unique_ips = vec![4096u64, 4222, 4372];
+
+        // Source A (e.g. symtab): two symbols.
+        let source_a = vec![
+            (1024u64, 1100u64, "shared_func".to_string()),   // VA 4096-4172
+            (1150, 1250, "only_in_a".to_string()),           // VA 4222-4322
+        ];
+        let mut reader_a = MockSymbolReader::new(source_a);
+        mapping.add_matching_symbols(&mut unique_ips, &mut reader_a, &mut strings);
+        assert_eq!(2, mapping.symbols().len(), "source A adds 2");
+
+        // Source B (e.g. pclntab): re-lists shared_func (same start) plus a new one.
+        let source_b = vec![
+            (1024u64, 1100u64, "shared_func".to_string()),   // duplicate start -> skipped
+            (1300, 1400, "only_in_b".to_string()),           // VA 4372-4472 -> added
+        ];
+        let mut reader_b = MockSymbolReader::new(source_b);
+        mapping.add_matching_symbols(&mut unique_ips, &mut reader_b, &mut strings);
+
+        // Total should be 3 (shared_func once, only_in_a, only_in_b).
+        assert_eq!(3, mapping.symbols().len(), "duplicate start must be deduped");
+
+        let names: Vec<&str> = mapping.symbols().iter()
+            .map(|s| strings.from_id(s.name_id()).unwrap())
+            .collect();
+        assert!(names.contains(&"shared_func"));
+        assert!(names.contains(&"only_in_a"));
+        assert!(names.contains(&"only_in_b"));
+    }
+
+    #[test]
+    fn lookup() {        let mappings = vec!(
             new_map(0, 0, 1023, 1),
             new_map(0, 2048, 3071, 3),
             new_map(0, 1024, 2047, 2),
