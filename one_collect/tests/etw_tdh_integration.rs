@@ -3,13 +3,21 @@
 
 //! End-to-end integration tests for the runtime TDH decoder.
 //!
-//! These tests register a real TraceLogging ETW provider (using the
+//! Most tests register a real TraceLogging ETW provider (using the
 //! `tracelogging` and `tracelogging_dynamic` crates), emit known events
 //! through ETW, capture them inside an [`EtwSession`], decode them with
 //! [`TdhDecoder`], and assert that the decoded field values match what
 //! was written.
 //!
-//! Both tests are marked `#[ignore]` because the consumer side of ETW
+//! The final test ([`tdh_decodes_manifest_kernel_process_events`])
+//! instead exercises the *manifest* decode path against a live,
+//! always-registered OS provider (`Microsoft-Windows-Kernel-Process`).
+//! It cannot fabricate a registered manifest, so it triggers real
+//! process-lifetime events by spawning short-lived child processes and
+//! asserts that they decode through `TdhGetEventInformation` into a real
+//! `EventFormat` with a Task-derived event name.
+//!
+//! All tests are marked `#[ignore]` because the consumer side of ETW
 //! requires administrative privileges (`SeSystemProfilePrivilege` /
 //! `SeDebugPrivilege`).  Run manually from an elevated shell with:
 //!
@@ -45,6 +53,21 @@ use tracelogging_dynamic as tld;
 /// Keyword used by every event the tests emit (and the value the wide
 /// event subscribes to via `MatchAnyKeyword`).
 const TEST_KEYWORD: u64 = 0x1;
+
+/// GUID of the always-registered `Microsoft-Windows-Kernel-Process`
+/// manifest provider, `{22FB2CD6-0E7B-422B-A0C7-2FAD1FD0E716}`.
+///
+/// Used by the manifest-path integration test: it is present on every
+/// supported Windows SKU, is a normal (non-legacy-kernel-logger) manifest
+/// provider that a user-mode session can enable, and emits Task-bearing
+/// `ProcessStart` / `ProcessStop` events that the test triggers on demand
+/// by spawning child processes.
+const KERNEL_PROCESS_PROVIDER: u128 = 0x22FB2CD6_0E7B_422B_A0C7_2FAD1FD0E716;
+
+/// Task names the Kernel-Process manifest assigns to process-lifetime
+/// events (Ids 1 and 2).  Both carry a Task, so the decoder's
+/// `TaskNameOffset` path must surface them as the event name.
+const KERNEL_PROCESS_TASKS: &[&str] = &["ProcessStart", "ProcessStop"];
 
 /// Hard upper bound on a single test run — should never be reached when
 /// running on a healthy ETW subsystem.
@@ -982,3 +1005,97 @@ fn tdh_decodes_tracelogging_static_nested_struct() {
 
     assert_nested_event(find_event(&captured, "EventNested"));
 }
+
+// ── Test E: manifest decoding (live OS provider) ─────────────────────
+
+/// Verifies the TDH decoder resolves and decodes *manifest-based* events
+/// end-to-end against a live, OS-registered provider.
+///
+/// Unlike the TraceLogging tests, a manifest schema cannot be fabricated
+/// in-process — it lives in an XML manifest registered with the OS.  This
+/// test therefore uses `Microsoft-Windows-Kernel-Process`, which is
+/// always registered, and triggers real `ProcessStart` / `ProcessStop`
+/// events by spawning short-lived child processes.
+///
+/// The capture sink only records events that `TdhDecoder::decode`
+/// returns `Ok` for, so every captured event is proof the manifest path
+/// (classic-header reject → `TdhGetEventInformation` → `DecodingSource ==
+/// DecodingSourceXMLFile` → schema build) succeeded.  The assertions
+/// additionally prove:
+///
+/// * the manifest resolved to a real field layout (non-empty fields), and
+/// * the `TaskNameOffset` event-name path works (a `ProcessStart` /
+///   `ProcessStop` Task name is surfaced).
+#[ignore]
+#[test]
+fn tdh_decodes_manifest_kernel_process_events() {
+    let provider_guid = Guid::from_u128(KERNEL_PROCESS_PROVIDER);
+
+    let (captured, counter, callback) = make_capture_sink();
+
+    let mut session = build_capturing_session(
+        provider_guid,
+        "OneCollect.TdhIntegration.Manifest.Wide",
+        callback,
+    );
+
+    // Trigger process-lifetime events once the session has enabled the
+    // provider.  `started_callback` fires on the parse worker thread
+    // after `EnableTraceEx2` returns for the Kernel-Process provider, so
+    // any child process spawned afterwards is guaranteed to be observed.
+    //
+    // Kernel-Process emits (among others):
+    //
+    //   ProcessStart (Id 1, Task "ProcessStart") — manifest event with
+    //       fields such as ProcessID, ImageName, ...
+    //   ProcessStop  (Id 2, Task "ProcessStop")
+    //
+    // Each `cmd /c exit` produces one start and one stop, so a small
+    // spawn loop comfortably clears the capture threshold.
+    session.add_started_callback(move |_ctx| {
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + TEST_TIMEOUT;
+            while Instant::now() < deadline {
+                let _ = std::process::Command::new("cmd.exe")
+                    .args(["/c", "exit"])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        });
+    });
+
+    // Collect a batch so the sample is very likely to include Task-bearing
+    // ProcessStart / ProcessStop events (rather than only Task-less ones).
+    let captured = drive_to_completion(
+        session,
+        "one_collect_tdh_manifest",
+        &captured,
+        counter,
+        10,
+    );
+
+    // Every captured event already proves an `Ok` manifest decode; assert
+    // at least one resolved to a real manifest field layout.
+    assert!(
+        captured.iter().any(|e| !e.field_names.is_empty()),
+        "expected at least one manifest event with a resolved field layout; \
+         saw names: {:?}",
+        captured.iter().map(|e| &e.name).collect::<Vec<_>>()
+    );
+
+    // Assert the `TaskNameOffset` path surfaced a Task-derived name for a
+    // known process-lifetime event.  This is the manifest-specific
+    // event-name branch (`DecodingSource != DecodingSourceTlg`).
+    assert!(
+        captured
+            .iter()
+            .any(|e| KERNEL_PROCESS_TASKS.contains(&e.name.as_str())),
+        "expected a Task-named ProcessStart/ProcessStop manifest event; \
+         saw names: {:?}",
+        captured.iter().map(|e| &e.name).collect::<Vec<_>>()
+    );
+}
+
