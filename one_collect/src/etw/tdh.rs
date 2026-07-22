@@ -19,7 +19,7 @@
 //! conventions (`StaticString`, `StaticUTF16String`, etc. with `size = 0`
 //! for variable-length fields), the cached `EventFormat` is schema-stable:
 //! it doesn't depend on any particular event's payload bytes.  A cache hit
-//! collapses to a hashmap probe + `EventData::new` — effectively zero
+//! collapses to a hashmap probe + `EventData::new`, effectively zero
 //! per-event overhead.
 //!
 //! Source selection is transparent: [`TdhDecoder::decode`] takes the
@@ -49,7 +49,7 @@
 //!
 //! The manifest path resolves schemas exclusively through
 //! `TdhGetEventInformation`, which consults manifests registered with the OS
-//! (`HKLM\...\WINEVT\Publishers`, the `wevtutil im` model — e.g.
+//! (`HKLM\...\WINEVT\Publishers`, the `wevtutil im` model, e.g.
 //! `Microsoft-Windows-Kernel-*` and the .NET runtime providers).  It does
 //! **not** support .NET `EventSource` providers running in their default
 //! manifest mode, where the manifest is *not* OS-registered but is emitted
@@ -57,7 +57,7 @@
 //! 0xFFFE`, `Opcode == 0xFE`).  For those providers `TdhGetEventInformation`
 //! returns `ERROR_NOT_FOUND`, so `decode()` returns
 //! [`TdhDecodeError::NotFound`].  Decoding them requires capturing and
-//! reassembling the in-band manifest chunks and parsing the XML — a separate
+//! reassembling the in-band manifest chunks and parsing the XML, a separate
 //! subsystem tracked as future work.  Custom `EventSource` providers that use
 //! *self-describing* (TraceLogging) mode are decoded via the TraceLogging
 //! path and are unaffected.
@@ -151,6 +151,7 @@ const PROPERTY_PARAM_COUNT: i32  = PropertyParamCount;
 
 /// Errors that can occur during TDH-based schema decoding.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum TdhDecodeError {
     /// No decodable schema was found for the event.
     ///
@@ -158,12 +159,12 @@ pub enum TdhDecodeError {
     /// `EVENT_HEADER_EXT_TYPE_EVENT_SCHEMA_TL` extended-data item was
     /// present.  For manifest events this also covers "manifest not
     /// registered on this machine" (`TdhGetEventInformation` returns
-    /// `ERROR_NOT_FOUND`) and classic (MOF/WBEM) events, which are
-    /// fast-rejected before the manifest path.
+    /// `ERROR_NOT_FOUND`).
     NotFound,
     /// The event's schema source is recognised but not supported by this
-    /// decoder (e.g. WPP or WBEM decoding sources reached via the manifest
-    /// dispatch path).
+    /// decoder (e.g. classic (MOF/WBEM) events, which are fast-rejected
+    /// before the manifest path, or WPP and WBEM decoding sources reached
+    /// via the manifest dispatch path).
     Unsupported,
     /// A Win32 error code was returned by `TdhGetEventInformation`.
     Win32(u32),
@@ -192,7 +193,7 @@ impl std::error::Error for TdhDecodeError {}
 struct CachedSchema {
     /// The event name (TraceLogging event name or manifest task name).
     event_name: String,
-    /// Schema-stable `EventFormat` — field offsets are absolute for
+    /// Schema-stable `EventFormat`: field offsets are absolute for
     /// fixed-size fields, and the framework's skip chain handles
     /// variable-length fields lazily via `size = 0`.
     format: EventFormat,
@@ -213,7 +214,7 @@ type XxBuildHasher = BuildHasherDefault<XxHash64>;
 /// Note: the derived `Hash` delegates to [`Guid`]'s `Hash` impl, which hashes
 /// only the first three GUID fields (`data1`/`data2`/`data3`), not the
 /// trailing `data4` bytes.  Equality is still full (derived `Eq` compares all
-/// fields), so correctness is unaffected — but two provider GUIDs differing
+/// fields), so correctness is unaffected, but two provider GUIDs differing
 /// only in their last 8 bytes share a hash bucket.  Provider GUIDs vary in
 /// their leading fields in practice, so this is benign; it is called out here
 /// so a future change to `Guid`'s `Hash` isn't made without weighing this key.
@@ -257,7 +258,7 @@ struct SchemaCache {
     /// avoids a `TdhGetEventInformation` round trip on every subsequent event
     /// from a chatty unsupported provider.  Pointer-width independent: the
     /// decoding source is a property of the provider's registration, not the
-    /// payload width.  Only *permanent* negatives live here — `NotFound` is
+    /// payload width.  Only *permanent* negatives live here; `NotFound` is
     /// never cached, since a manifest can register after the decoder starts.
     manifest_unsupported: HashSet<ManifestKey, XxBuildHasher>,
 }
@@ -364,6 +365,12 @@ pub struct TdhDecodedEvent<'a> {
     /// the event ID is often 0); for manifest events it is the task name.
     /// Consumers can use this for OTEL log record naming without a second
     /// cache probe.
+    ///
+    /// Note: for manifest events this is the Task name, which is not unique
+    /// per event (multiple events can share a Task, e.g. Start/Stop/Info
+    /// under one Task all report the same name).  Identity-sensitive
+    /// consumers (dedup, routing, record identity) should use `schema_id`
+    /// (or the event's `Id`/`Opcode`) rather than treating the name as unique.
     pub event_name: Option<&'a str>,
     /// Monotonic identifier for this event's schema.
     ///
@@ -489,12 +496,12 @@ impl TdhDecoder {
     ///
     /// Two guards keep non-manifest sources out of the manifest cache:
     ///
-    /// 1. **Classic/MOF fast reject** — if `EVENT_HEADER_FLAG_CLASSIC_HEADER`
+    /// 1. **Classic/MOF fast reject**: if `EVENT_HEADER_FLAG_CLASSIC_HEADER`
     ///    is set, the event's identity is a class GUID + Opcode, not the
     ///    `(Provider, Id, Version)` tuple; its `Id` is commonly `0`, so
-    ///    multiple such events would collapse onto one key.  Reject before
-    ///    calling TDH.
-    /// 2. **Decoding-source check** — after `TdhGetEventInformation`, only a
+    ///    multiple such events would collapse onto one key.  Rejected as
+    ///    [`TdhDecodeError::Unsupported`] before calling TDH.
+    /// 2. **Decoding-source check**: after `TdhGetEventInformation`, only a
     ///    `DecodingSourceXMLFile` result is a genuine XML manifest.  WPP and
     ///    WBEM results are returned as [`TdhDecodeError::Unsupported`] and the
     ///    key is recorded in a negative cache, so a chatty unsupported
@@ -508,7 +515,7 @@ impl TdhDecoder {
     ) -> Result<usize, TdhDecodeError> {
         // Guard 1: classic (MOF/WBEM) events are not manifest events.
         if (record.EventHeader.Flags & EVENT_HEADER_FLAG_CLASSIC_HEADER) != 0 {
-            return Err(TdhDecodeError::NotFound);
+            return Err(TdhDecodeError::Unsupported);
         }
 
         let desc = &record.EventHeader.EventDescriptor;
@@ -804,22 +811,29 @@ fn read_decoding_source(tei_buf: &[u8]) -> Result<DECODING_SOURCE, TdhDecodeErro
         return Err(TdhDecodeError::Malformed("buffer smaller than TRACE_EVENT_INFO"));
     }
     // SAFETY: the cast to `*const TRACE_EVENT_INFO` requires the buffer to be
-    // suitably aligned.  Callers pass the `AlignedTeiBuf` backing store, which
-    // is `Vec<u64>`-backed and therefore 8-byte aligned (>= the alignment of
-    // `TRACE_EVENT_INFO`).  The debug assert guards against a future caller
-    // handing in an unaligned slice.
-    debug_assert_eq!(
-        tei_buf.as_ptr() as usize % std::mem::align_of::<TRACE_EVENT_INFO>(),
-        0,
-        "tei_buf must be aligned for TRACE_EVENT_INFO"
-    );
+    // suitably aligned.  Callers pass the `AlignedTeiBuf` backing store, whose
+    // element type satisfies `TRACE_EVENT_INFO`'s alignment (guaranteed by the
+    // const assertion next to `AlignedTeiBuf`).
     let tei = unsafe { &*(tei_buf.as_ptr() as *const TRACE_EVENT_INFO) };
     Ok(tei.DecodingSource)
 }
 
+/// Backing element type for [`AlignedTeiBuf`].  Its alignment must satisfy
+/// `TRACE_EVENT_INFO`'s (checked by the const assertion below).
+type TeiBufElem = u64;
+
+// Guarantees every `AlignedTeiBuf` data pointer is suitably aligned for the
+// `*const TRACE_EVENT_INFO` casts in `read_decoding_source` and
+// `build_cached_schema`, so those reads stay sound.  If the backing element
+// type ever changes to something under-aligned, the build fails here.
+const _: () = assert!(
+    std::mem::align_of::<TeiBufElem>() >= std::mem::align_of::<TRACE_EVENT_INFO>(),
+    "AlignedTeiBuf backing element must satisfy TRACE_EVENT_INFO alignment"
+);
+
 /// Aligned buffer for `TRACE_EVENT_INFO`.
 struct AlignedTeiBuf {
-    storage: Vec<u64>,
+    storage: Vec<TeiBufElem>,
     len: usize,
 }
 
@@ -829,9 +843,10 @@ impl AlignedTeiBuf {
     }
 
     fn ensure_capacity(&mut self, byte_count: usize) {
-        let u64_count = (byte_count + 7) / 8;
-        if self.storage.len() < u64_count {
-            self.storage.resize(u64_count, 0u64);
+        let elem_size = std::mem::size_of::<TeiBufElem>();
+        let elem_count = (byte_count + elem_size - 1) / elem_size;
+        if self.storage.len() < elem_count {
+            self.storage.resize(elem_count, 0);
         }
     }
 
@@ -887,11 +902,22 @@ fn call_tdh_get_event_information(
 // `TRACE_EVENT_INFO_0` is a union with two `u32` arms
 // (`EventNameOffset` and `ActivityIDNameOffset`) at the same offset.
 // Either arm always yields a valid bit pattern for a `u32`.
+//
+// Pin the union's layout to `u32`'s (both size *and* alignment) so the
+// `tei.Anonymous1.EventNameOffset` read stays sound: a future `windows-sys`
+// bump that grows the union or changes its alignment fails the build here
+// rather than silently mis-reading the field.
 const _: () = assert!(
     std::mem::size_of::<
         windows_sys::Win32::System::Diagnostics::Etw::TRACE_EVENT_INFO_0
-    >() == 4,
-    "TRACE_EVENT_INFO_0 union must remain 4 bytes",
+    >() == std::mem::size_of::<u32>(),
+    "TRACE_EVENT_INFO_0 union must stay the size of a u32",
+);
+const _: () = assert!(
+    std::mem::align_of::<
+        windows_sys::Win32::System::Diagnostics::Etw::TRACE_EVENT_INFO_0
+    >() == std::mem::align_of::<u32>(),
+    "TRACE_EVENT_INFO_0 union must stay u32-aligned",
 );
 
 /// Reads the event name from `TRACE_EVENT_INFO`, selecting the offset by
@@ -1019,7 +1045,7 @@ mod tests {
         assert_eq!(intype_to_type_name(999), "unsupported");
     }
 
-    /// `TDH_INTYPE_BOOLEAN` is a Win32 `BOOL` — a 32-bit value
+    /// `TDH_INTYPE_BOOLEAN` is a Win32 `BOOL`, a 32-bit value
     /// (TraceLogging `bool32`).  Mapping it as `u8` (its previous
     /// behaviour) would mis-size every subsequent field in the same
     /// event.  TraceLogging encodes 1-byte booleans as
@@ -1441,9 +1467,9 @@ mod tests {
 
         let mut decoder = TdhDecoder::new();
         match decoder.decode(&record) {
-            Err(TdhDecodeError::NotFound) => {} // expected — rejected by guard 1
-            Err(other) => panic!("expected NotFound for classic header, got: {other}"),
-            Ok(_) => panic!("expected NotFound error, but decode succeeded"),
+            Err(TdhDecodeError::Unsupported) => {} // expected — rejected by guard 1
+            Err(other) => panic!("expected Unsupported for classic header, got: {other}"),
+            Ok(_) => panic!("expected Unsupported error, but decode succeeded"),
         }
     }
 
