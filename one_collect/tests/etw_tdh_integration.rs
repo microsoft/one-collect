@@ -36,7 +36,7 @@ use std::cell::RefCell;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use one_collect::{Guid, Writable};
@@ -1052,10 +1052,17 @@ fn tdh_decodes_manifest_kernel_process_events() {
     //
     // Each `cmd /c exit` produces one start and one stop, so a small
     // spawn loop comfortably clears the capture threshold.
+    //
+    // A shared stop flag lets the spawner exit the instant capture is
+    // done, so we spawn only a handful of processes instead of hundreds.
+    // The `TEST_TIMEOUT` deadline remains as a backstop.
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_for_thread = stop.clone();
     session.add_started_callback(move |_ctx| {
+        let stop = stop_for_thread.clone();
         std::thread::spawn(move || {
             let deadline = Instant::now() + TEST_TIMEOUT;
-            while Instant::now() < deadline {
+            while !stop.load(Ordering::Relaxed) && Instant::now() < deadline {
                 let _ = std::process::Command::new("cmd.exe")
                     .args(["/c", "exit"])
                     .stdin(std::process::Stdio::null())
@@ -1076,6 +1083,9 @@ fn tdh_decodes_manifest_kernel_process_events() {
         counter,
         10,
     );
+
+    // Capture is complete; signal the spawner to stop immediately.
+    stop.store(true, Ordering::Relaxed);
 
     // Every captured event already proves an `Ok` manifest decode; assert
     // at least one resolved to a real manifest field layout.
