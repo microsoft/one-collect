@@ -15,7 +15,10 @@ use crate::Guid;
 #[allow(dead_code)]
 mod abi;
 mod events;
+pub mod providers;
 pub mod tdh;
+
+pub use providers::{RegisteredProvider, registered_providers};
 
 use abi::{
     EVENT_RECORD,
