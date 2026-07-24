@@ -717,413 +717,595 @@ pub fn read_debug_link<'a>(
     Ok(None)
 }
 
-/// The ELF section name that holds the Go line table when not stripped.
-const GO_PCLNTAB_SECTION: &str = ".gopclntab";
+mod go {
+    use super::*;
 
-/// Returns true if the ELF file contains a `.gopclntab` section.
-///
-/// Used as a cheap, one-time probe to decide whether a binary carries a Go
-/// line table without reading the (potentially large) section contents.
-pub(crate) fn has_go_pclntab(
-    reader: &mut (impl Read + Seek)) -> bool {
-    let mut sections = Vec::new();
-    let mut section_offsets = Vec::new();
+    /// The ELF section name that holds the Go line table when not stripped.
+    const GO_PCLNTAB_SECTION: &str = ".gopclntab";
+    pub(super) const GO_ELF_SECTION_LIMIT: usize = 2048;
 
-    if enum_section_metadata(reader, None, None, &mut sections).is_err() {
-        return false;
-    }
-    if get_section_offsets(reader, None, &mut section_offsets).is_err() {
-        return false;
-    }
-
-    find_section_by_name(reader, &sections, &section_offsets, GO_PCLNTAB_SECTION).is_some()
-}
-
-/// Finds the metadata for a section by name, if present.
-fn find_section_by_name<'a>(
-    reader: &mut (impl Read + Seek),
-    sections: &'a [SectionMetadata],
-    section_offsets: &[u64],
-    name: &str) -> Option<&'a SectionMetadata> {
-    for section in sections {
-        let mut name_buf: [u8; 256] = [0; 256];
-        if let Ok(sec_name) = read_section_name(reader, section, section_offsets, &mut name_buf) {
-            if sec_name == name {
-                return Some(section);
-            }
+    pub(super) fn go_elf_section_count_allowed(reader: &mut (impl Read + Seek)) -> bool {
+        if reader.seek(SeekFrom::Start(0)).is_err() {
+            return false;
         }
-    }
-    None
-}
-
-/// Reads the `.gopclntab` section bytes and resolves the Go runtime text start.
-///
-/// Returns `(pclntab_bytes, text_start)` when the `.gopclntab` section is
-/// present, or `None` otherwise. `text_start` is the virtual address of
-/// `runtime.text` (the base the line table's PC offsets are relative to), which
-/// is **not** always the `.text` section address — for cgo / externally linked
-/// binaries the first part of `.text` holds C startup stubs and `runtime.text`
-/// is offset past them. It is resolved by priority:
-///
-/// 1. the `runtime.text` symbol (authoritative; present unless stripped),
-/// 2. the pcHeader `textStart` field in the table (set for internally linked
-///    binaries; zero/relocated otherwise),
-/// 3. the `.text` section address (best-effort fallback).
-///
-/// The returned function virtual addresses are in the same space as ELF symbol
-/// `st_value`, so the caller applies the usual load-header relocation.
-pub(crate) fn read_go_pclntab(
-    reader: &mut (impl Read + Seek)) -> Option<(Vec<u8>, u64)> {
-    let mut sections = Vec::new();
-    let mut section_offsets = Vec::new();
-
-    enum_section_metadata(reader, None, None, &mut sections).ok()?;
-    get_section_offsets(reader, None, &mut section_offsets).ok()?;
-
-    let pclntab = find_section_by_name(reader, &sections, &section_offsets, GO_PCLNTAB_SECTION)?;
-    let pclntab_offset = pclntab.offset;
-    let pclntab_size = pclntab.size as usize;
-    let pclntab_vaddr = pclntab.address;
-
-    // Optional .text address for the fallback.
-    let text_vaddr = find_section_by_name(reader, &sections, &section_offsets, ".text")
-        .map(|s| s.address);
-
-    let mut data = vec![0u8; pclntab_size];
-    reader.seek(SeekFrom::Start(pclntab_offset)).ok()?;
-    reader.read_exact(&mut data).ok()?;
-
-    let text_start = resolve_go_text_start(reader, &data, Some(pclntab_vaddr), text_vaddr)?;
-
-    debug!(
-        "read_go_pclntab: pclntab size={} text_start={:#x}",
-        pclntab_size, text_start);
-
-    Some((data, text_start))
-}
-
-/// Resolves the Go `runtime.text` virtual address (the line table PC base).
-///
-/// `pclntab_vaddr`, when known, is the virtual address at which the line table
-/// is mapped; it is used to look up the PIE relocation that supplies
-/// `runtime.text` when the in-table field is unrelocated (zero).
-fn resolve_go_text_start(
-    reader: &mut (impl Read + Seek),
-    pclntab: &[u8],
-    pclntab_vaddr: Option<u64>,
-    text_vaddr: Option<u64>) -> Option<u64> {
-    // 1. The runtime.text symbol is authoritative when present.
-    if let Some(value) = find_symbol_value(reader, "runtime.text") {
-        if value != 0 {
-            return Some(value);
-        }
-    }
-
-    let ptr_size = if pclntab.len() >= 8 { pclntab[7] as usize } else { 0 };
-
-    // 2. The pcHeader textStart field (offset 8 + 2*ptrSize). Non-zero for
-    //    internally linked binaries; zero/relocated for externally linked ones.
-    if ptr_size == 4 || ptr_size == 8 {
-        let off = 8 + 2 * ptr_size;
-        let header_text_start = match ptr_size {
-            8 if pclntab.len() >= off + 8 => Some(u64::from_le_bytes(
-                pclntab[off..off + 8].try_into().unwrap())),
-            4 if pclntab.len() >= off + 4 => Some(u32::from_le_bytes(
-                pclntab[off..off + 4].try_into().unwrap()) as u64),
-            _ => None,
+        let ident = match get_ident(reader) {
+            Ok(ident) => ident,
+            Err(_) => return false,
         };
-        if let Some(ts) = header_text_start {
-            if ts != 0 {
-                return Some(ts);
-            }
+        if reader.seek(SeekFrom::Start(16)).is_err() {
+            return false;
         }
 
-        // 3. For PIE binaries the field above is zero and relocated at load. The
-        //    relocation that targets the field carries runtime.text as its addend.
-        if let Some(base) = pclntab_vaddr {
-            let field_vaddr = base + off as u64;
-            if let Some(addend) = find_relative_reloc_addend(reader, field_vaddr) {
-                if addend != 0 {
-                    return Some(addend);
+        let section_count = match ident[EI_CLASS] {
+            ELFCLASS32 => {
+                let mut header = ElfHeader32::default();
+                unsafe {
+                    if reader
+                        .read_exact(slice::from_raw_parts_mut(
+                            &mut header as *mut _ as *mut u8,
+                            size_of::<ElfHeader32>(),
+                        ))
+                        .is_err()
+                    {
+                        return false;
+                    }
+                }
+                if header.e_shnum != 0 || header.e_shoff == 0 {
+                    header.e_shnum as usize
+                } else {
+                    if reader.seek(SeekFrom::Start(header.e_shoff as u64)).is_err() {
+                        return false;
+                    }
+                    let mut section = ElfSectionHeader32::default();
+                    if get_section_header32(reader, &mut section).is_err() {
+                        return false;
+                    }
+                    section.sh_size as usize
                 }
             }
-        }
-    }
-
-    // 4. Fall back to the .text section address.
-    text_vaddr
-}
-
-/// Finds the addend of an `R_*_RELATIVE` relocation targeting `target_vaddr`.
-///
-/// Used to recover `runtime.text` for position-independent Go binaries, where
-/// the pcHeader `textStart` field is zero on disk and supplied by this
-/// relocation at load time.
-fn find_relative_reloc_addend(
-    reader: &mut (impl Read + Seek),
-    target_vaddr: u64) -> Option<u64> {
-    let mut sections = Vec::new();
-    if get_section_metadata(reader, None, SHT_RELA, &mut sections).is_err() {
-        return None;
-    }
-
-    // Elf64_Rela: r_offset (u64), r_info (u64), r_addend (i64) = 24 bytes.
-    const RELA_SIZE: usize = 24;
-    let mut buf: Vec<u8> = Vec::new();
-
-    for section in &sections {
-        // Only 64-bit RELA is handled (sufficient for the supported targets).
-        if section.class != ELFCLASS64 || section.entry_size as usize != RELA_SIZE {
-            continue;
-        }
-        if section.size == 0 {
-            continue;
-        }
-
-        buf.resize(section.size as usize, 0);
-        if reader.seek(SeekFrom::Start(section.offset)).is_err() {
-            continue;
-        }
-        if reader.read_exact(&mut buf).is_err() {
-            continue;
-        }
-
-        let count = buf.len() / RELA_SIZE;
-        for i in 0..count {
-            let base = i * RELA_SIZE;
-            let r_offset = u64::from_le_bytes(buf[base..base + 8].try_into().unwrap());
-            if r_offset != target_vaddr {
-                continue;
+            ELFCLASS64 => {
+                let mut header = ElfHeader64::default();
+                unsafe {
+                    if reader
+                        .read_exact(slice::from_raw_parts_mut(
+                            &mut header as *mut _ as *mut u8,
+                            size_of::<ElfHeader64>(),
+                        ))
+                        .is_err()
+                    {
+                        return false;
+                    }
+                }
+                if header.e_shnum != 0 || header.e_shoff == 0 {
+                    header.e_shnum as usize
+                } else {
+                    if reader.seek(SeekFrom::Start(header.e_shoff)).is_err() {
+                        return false;
+                    }
+                    let mut section = ElfSectionHeader64::default();
+                    if get_section_header64(reader, &mut section).is_err() {
+                        return false;
+                    }
+                    match usize::try_from(section.sh_size) {
+                        Ok(count) => count,
+                        Err(_) => return false,
+                    }
+                }
             }
-            let r_info = u64::from_le_bytes(buf[base + 8..base + 16].try_into().unwrap());
-            let r_type = (r_info & 0xffff_ffff) as u32;
-            if r_type == R_X86_64_RELATIVE || r_type == R_AARCH64_RELATIVE {
-                let r_addend = i64::from_le_bytes(buf[base + 16..base + 24].try_into().unwrap());
-                return Some(r_addend as u64);
-            }
-        }
-    }
-
-    None
-}
-
-
-/// Finds the value (`st_value`) of a named ELF symbol in `.symtab` or `.dynsym`.
-///
-/// Unlike the function-symbol iterator this matches symbols of any type (e.g.
-/// `runtime.text`, which is not `STT_FUNC`). Returns the first match.
-fn find_symbol_value(
-    reader: &mut (impl Read + Seek),
-    name: &str) -> Option<u64> {
-    let mut sections = Vec::new();
-    let mut section_offsets = Vec::new();
-
-    get_section_offsets(reader, None, &mut section_offsets).ok()?;
-    get_section_metadata(reader, None, SHT_SYMTAB, &mut sections).ok()?;
-    get_section_metadata(reader, None, SHT_DYNSYM, &mut sections).ok()?;
-
-    let target = name.as_bytes();
-    let mut name_buf = vec![0u8; target.len() + 1];
-
-    for section in &sections {
-        if section.entry_size == 0 {
-            continue;
-        }
-        let strtab_off = match section_offsets.get(section.link as usize) {
-            Some(off) => *off,
-            None => continue,
+            _ => return false,
         };
 
-        let count = section.size / section.entry_size;
-        for i in 0..count {
-            let entry_pos = section.offset + i * section.entry_size;
-            if reader.seek(SeekFrom::Start(entry_pos)).is_err() {
-                break;
-            }
+        section_count <= GO_ELF_SECTION_LIMIT
+    }
 
-            // st_name is the first 4 bytes in both ELF32 and ELF64.
-            let mut name_off_buf = [0u8; 4];
-            if reader.read_exact(&mut name_off_buf).is_err() {
-                break;
-            }
-            let st_name = u32::from_le_bytes(name_off_buf) as u64;
-
-            // st_value: ELF64 at entry+8 (u64); ELF32 at entry+4 (u32).
-            let st_value = match section.class {
-                ELFCLASS64 => {
-                    if reader.seek(SeekFrom::Start(entry_pos + 8)).is_err() {
-                        break;
-                    }
-                    let mut v = [0u8; 8];
-                    if reader.read_exact(&mut v).is_err() {
-                        break;
-                    }
-                    u64::from_le_bytes(v)
-                }
-                _ => {
-                    if reader.seek(SeekFrom::Start(entry_pos + 4)).is_err() {
-                        break;
-                    }
-                    let mut v = [0u8; 4];
-                    if reader.read_exact(&mut v).is_err() {
-                        break;
-                    }
-                    u32::from_le_bytes(v) as u64
-                }
-            };
-
-            // Compare the name (exact length, NUL-terminated).
-            if reader.seek(SeekFrom::Start(strtab_off + st_name)).is_err() {
-                continue;
-            }
-            if reader.read_exact(&mut name_buf).is_err() {
-                continue;
-            }
-            if name_buf[target.len()] == 0 && &name_buf[..target.len()] == target {
-                return Some(st_value);
-            }
+    /// Returns true if the ELF file contains a `.gopclntab` section.
+    ///
+    /// Used as a cheap, one-time probe to decide whether a binary carries a Go
+    /// line table without reading the (potentially large) section contents.
+    pub(crate) fn has_go_pclntab(reader: &mut (impl Read + Seek)) -> bool {
+        if !go_elf_section_count_allowed(reader) {
+            return false;
         }
-    }
 
-    None
-}
-
-/// Returns true if the ELF file carries a Go build-info marker section.
-///
-/// `.go.buildinfo` (and `.note.go.buildid`) are allocated and survive `strip`,
-/// so they remain even when the `.gopclntab` section header has been removed.
-/// This is used as a cheap gate before attempting the (more expensive) scan to
-/// recover a stripped line table: non-Go binaries lack these markers and never
-/// pay for the scan.
-pub(crate) fn has_go_build_info(
-    reader: &mut (impl Read + Seek)) -> bool {
-    let mut sections = Vec::new();
-    let mut section_offsets = Vec::new();
-
-    if enum_section_metadata(reader, None, None, &mut sections).is_err() {
-        return false;
-    }
-    if get_section_offsets(reader, None, &mut section_offsets).is_err() {
-        return false;
-    }
-
-    find_section_by_name(reader, &sections, &section_offsets, ".go.buildinfo").is_some()
-        || find_section_by_name(reader, &sections, &section_offsets, ".note.go.buildid").is_some()
-}
-
-/// Magic prefix bytes shared by the supported pclntab versions: the low byte
-/// (`0xf0`/`0xf1`) varies, the upper three bytes are `0xff`.
-const PCLNTAB_MAGIC_GO118: [u8; 4] = [0xf0, 0xff, 0xff, 0xff];
-const PCLNTAB_MAGIC_GO120: [u8; 4] = [0xf1, 0xff, 0xff, 0xff];
-
-/// Recovers a Go line table whose `.gopclntab` section header has been stripped.
-///
-/// Scans the read-only `PT_LOAD` segments for a supported pclntab magic,
-/// validates and parses each candidate, and returns the first table that parses
-/// cleanly together with its resolved `runtime.text`. Only 64-bit ELF is
-/// supported; returns `None` otherwise (callers fall back to ELF symbols).
-///
-/// Callers should gate this behind [`has_go_build_info`] and the absence of a
-/// `.gopclntab` section so non-Go binaries never incur the scan.
-pub(crate) fn recover_go_pclntab(
-    reader: &mut (impl Read + Seek)) -> Option<(Vec<u8>, u64)> {
-    use crate::ruwind::go_pclntab::GoPclnTab;
-
-    // Determine class; only 64-bit recovery is supported.
-    reader.seek(SeekFrom::Start(0)).ok()?;
-    let ident = get_ident(reader).ok()?;
-    if ident[..4] != ELF_MAGIC || ident[EI_CLASS] != ELFCLASS64 {
-        return None;
-    }
-
-    // Read the ELF header for program-header table location. The ElfHeader64
-    // struct begins after the 16-byte e_ident, so seek past it first.
-    reader.seek(SeekFrom::Start(16)).ok()?;
-    let mut header = ElfHeader64::default();
-    unsafe {
-        reader.read_exact(
-            slice::from_raw_parts_mut(
-                &mut header as *mut _ as *mut u8,
-                size_of::<ElfHeader64>())).ok()?;
-    }
-
-    // Optional .text address (fallback for text_start resolution).
-    let text_vaddr = {
         let mut sections = Vec::new();
         let mut section_offsets = Vec::new();
-        enum_section_metadata(reader, None, None, &mut sections).ok();
-        get_section_offsets(reader, None, &mut section_offsets).ok();
-        find_section_by_name(reader, &sections, &section_offsets, ".text").map(|s| s.address)
-    };
 
-    // Collect read-only PT_LOAD segments (where the line table lives).
-    let mut segments: Vec<(u64, u64, u64)> = Vec::new(); // (p_offset, p_filesz, p_vaddr)
-    let mut ph_offset = header.e_phoff;
-    for _ in 0..header.e_phnum {
-        reader.seek(SeekFrom::Start(ph_offset)).ok()?;
-        let mut ph = ElfProgramHeader64::default();
-        if get_program_header64(reader, &mut ph).is_err() {
-            break;
+        if enum_section_metadata(reader, None, None, &mut sections).is_err() {
+            return false;
         }
-        ph_offset += header.e_phentsize as u64;
+        if get_section_offsets(reader, None, &mut section_offsets).is_err() {
+            return false;
+        }
 
-        // Loadable, non-executable segment (the line table is read-only data,
-        // but on PIE binaries it lives in a writable data-rel-ro segment, so we
-        // only exclude executable segments here).
-        if ph.p_type == PT_LOAD
-            && (ph.p_flags & PF_X) == 0
-            && ph.p_filesz > 0 {
-            segments.push((ph.p_offset, ph.p_filesz, ph.p_vaddr));
-        }
+        find_section_by_name(reader, &sections, &section_offsets, GO_PCLNTAB_SECTION).is_some()
     }
 
-    for (seg_offset, seg_filesz, seg_vaddr) in segments {
-        let mut bytes = vec![0u8; seg_filesz as usize];
-        if reader.seek(SeekFrom::Start(seg_offset)).is_err() {
-            continue;
+    /// Finds the metadata for a section by name, if present.
+    fn find_section_by_name<'a>(
+        reader: &mut (impl Read + Seek),
+        sections: &'a [SectionMetadata],
+        section_offsets: &[u64],
+        name: &str,
+    ) -> Option<&'a SectionMetadata> {
+        for section in sections {
+            let mut name_buf: [u8; 256] = [0; 256];
+            if let Ok(sec_name) = read_section_name(reader, section, section_offsets, &mut name_buf)
+            {
+                if sec_name == name {
+                    return Some(section);
+                }
+            }
         }
-        if reader.read_exact(&mut bytes).is_err() {
-            continue;
+        None
+    }
+
+    /// Locates the `.gopclntab` section and resolves the Go runtime text start.
+    ///
+    /// Returns bounded file metadata when the `.gopclntab` section is present, or
+    /// `None` otherwise. `text_start` is the virtual address of
+    /// `runtime.text` (the base the line table's PC offsets are relative to), which
+    /// is **not** always the `.text` section address — for cgo / externally linked
+    /// binaries the first part of `.text` holds C startup stubs and `runtime.text`
+    /// is offset past them. It is resolved by priority:
+    ///
+    /// 1. the `runtime.text` symbol (authoritative; present unless stripped),
+    /// 2. the pcHeader `textStart` field in the table (set for internally linked
+    ///    binaries; zero/relocated otherwise),
+    /// 3. the `.text` section address (best-effort fallback).
+    ///
+    /// The returned function virtual addresses are in the same space as ELF symbol
+    /// `st_value`, so the caller applies the usual load-header relocation.
+    pub(crate) fn read_go_pclntab(
+        reader: &mut (impl Read + Seek),
+    ) -> Option<crate::ruwind::go_pclntab::GoPclnTabLocation> {
+        if !go_elf_section_count_allowed(reader) {
+            return None;
         }
 
-        // Scan for a candidate magic.
-        let mut i = 0usize;
-        while i + 8 <= bytes.len() {
-            let b = bytes[i];
-            if (b == 0xf0 || b == 0xf1)
-                && bytes[i..i + 4] == (if b == 0xf0 { PCLNTAB_MAGIC_GO118 } else { PCLNTAB_MAGIC_GO120 })
-                // Header bytes 4,5 must be zero; minLC and ptrSize must be sane.
-                && bytes[i + 4] == 0
-                && bytes[i + 5] == 0
-                && matches!(bytes[i + 6], 1 | 2 | 4)
-                && matches!(bytes[i + 7], 4 | 8) {
+        let mut sections = Vec::new();
+        let mut section_offsets = Vec::new();
 
-                let candidate_vaddr = seg_vaddr + i as u64;
-                let slice = bytes[i..].to_vec();
-                let text_start = resolve_go_text_start(reader, &slice, Some(candidate_vaddr), text_vaddr)
-                    .unwrap_or(0);
+        enum_section_metadata(reader, None, None, &mut sections).ok()?;
+        get_section_offsets(reader, None, &mut section_offsets).ok()?;
 
-                if let Some(tab) = GoPclnTab::parse(slice, text_start) {
-                    // Sanity-check: a real table has many functions whose first
-                    // and last entries decode to non-empty names.
-                    if tab.len() > 16
-                        && tab.func(0).map(|(_, _, n)| !n.is_empty()).unwrap_or(false)
-                        && tab.func(tab.len() - 1).map(|(_, _, n)| !n.is_empty()).unwrap_or(false) {
-                        debug!(
-                            "recover_go_pclntab: recovered {} funcs at vaddr={:#x} text_start={:#x}",
-                            tab.len(), candidate_vaddr, text_start);
-                        // Return the recovered table bytes; parse consumed the
-                        // first copy, so produce a fresh one for the caller.
-                        return Some((bytes[i..].to_vec(), text_start));
+        let pclntab =
+            find_section_by_name(reader, &sections, &section_offsets, GO_PCLNTAB_SECTION)?;
+        let pclntab_offset = pclntab.offset;
+        let pclntab_size = pclntab.size;
+        let pclntab_vaddr = pclntab.address;
+
+        // Optional .text address for the fallback.
+        let text_vaddr =
+            find_section_by_name(reader, &sections, &section_offsets, ".text").map(|s| s.address);
+
+        let header_len = usize::try_from(
+            pclntab_size.min(crate::ruwind::go_pclntab::GO_PCLNTAB_HEADER_MAX as u64),
+        )
+        .ok()?;
+        let mut header = [0u8; crate::ruwind::go_pclntab::GO_PCLNTAB_HEADER_MAX];
+        reader.seek(SeekFrom::Start(pclntab_offset)).ok()?;
+        reader.read_exact(&mut header[..header_len]).ok()?;
+
+        let text_start = resolve_go_text_start(
+            reader,
+            &header[..header_len],
+            Some(pclntab_vaddr),
+            text_vaddr,
+        )?;
+
+        debug!(
+            "read_go_pclntab: pclntab size={} text_start={:#x}",
+            pclntab_size, text_start
+        );
+
+        Some(crate::ruwind::go_pclntab::GoPclnTabLocation::new(
+            pclntab_offset,
+            pclntab_size,
+            text_start,
+        ))
+    }
+
+    /// Resolves the Go `runtime.text` virtual address (the line table PC base).
+    ///
+    /// `pclntab_vaddr`, when known, is the virtual address at which the line table
+    /// is mapped; it is used to look up the PIE relocation that supplies
+    /// `runtime.text` when the in-table field is unrelocated (zero).
+    fn resolve_go_text_start(
+        reader: &mut (impl Read + Seek),
+        pclntab: &[u8],
+        pclntab_vaddr: Option<u64>,
+        text_vaddr: Option<u64>,
+    ) -> Option<u64> {
+        // 1. The runtime.text symbol is authoritative when present.
+        if let Some(value) = find_symbol_value(reader, "runtime.text") {
+            if value != 0 {
+                return Some(value);
+            }
+        }
+
+        let ptr_size = if pclntab.len() >= 8 {
+            pclntab[7] as usize
+        } else {
+            0
+        };
+
+        // 2. The pcHeader textStart field (offset 8 + 2*ptrSize). Non-zero for
+        //    internally linked binaries; zero/relocated for externally linked ones.
+        if ptr_size == 4 || ptr_size == 8 {
+            let off = 8 + 2 * ptr_size;
+            let header_text_start = match ptr_size {
+                8 if pclntab.len() >= off + 8 => Some(u64::from_le_bytes(
+                    pclntab[off..off + 8].try_into().unwrap(),
+                )),
+                4 if pclntab.len() >= off + 4 => {
+                    Some(u32::from_le_bytes(pclntab[off..off + 4].try_into().unwrap()) as u64)
+                }
+                _ => None,
+            };
+            if let Some(ts) = header_text_start {
+                if ts != 0 {
+                    return Some(ts);
+                }
+            }
+
+            // 3. For PIE binaries the field above is zero and relocated at load. The
+            //    relocation that targets the field carries runtime.text as its addend.
+            if let Some(base) = pclntab_vaddr {
+                let field_vaddr = base + off as u64;
+                if let Some(addend) = find_relative_reloc_addend(reader, field_vaddr) {
+                    if addend != 0 {
+                        return Some(addend);
                     }
                 }
             }
-            i += 1;
         }
+
+        // 4. Fall back to the .text section address.
+        text_vaddr
     }
 
-    None
+    /// Finds the addend of an `R_*_RELATIVE` relocation targeting `target_vaddr`.
+    ///
+    /// Used to recover `runtime.text` for position-independent Go binaries, where
+    /// the pcHeader `textStart` field is zero on disk and supplied by this
+    /// relocation at load time.
+    fn find_relative_reloc_addend(
+        reader: &mut (impl Read + Seek),
+        target_vaddr: u64,
+    ) -> Option<u64> {
+        let mut sections = Vec::new();
+        if get_section_metadata(reader, None, SHT_RELA, &mut sections).is_err() {
+            return None;
+        }
+
+        // Elf64_Rela: r_offset (u64), r_info (u64), r_addend (i64) = 24 bytes.
+        const RELA_SIZE: usize = 24;
+        for section in &sections {
+            // Only 64-bit RELA is handled (sufficient for the supported targets).
+            if section.class != ELFCLASS64 || section.entry_size as usize != RELA_SIZE {
+                continue;
+            }
+            if section.size == 0 {
+                continue;
+            }
+
+            let count = section.size as usize / RELA_SIZE;
+            let mut entry = [0u8; RELA_SIZE];
+            for i in 0..count {
+                let entry_offset = match section.offset.checked_add((i * RELA_SIZE) as u64) {
+                    Some(offset) => offset,
+                    None => break,
+                };
+                if reader.seek(SeekFrom::Start(entry_offset)).is_err()
+                    || reader.read_exact(&mut entry).is_err()
+                {
+                    break;
+                }
+
+                let r_offset = u64::from_le_bytes(entry[..8].try_into().unwrap());
+                if r_offset != target_vaddr {
+                    continue;
+                }
+                let r_info = u64::from_le_bytes(entry[8..16].try_into().unwrap());
+                let r_type = (r_info & 0xffff_ffff) as u32;
+                if r_type == R_X86_64_RELATIVE || r_type == R_AARCH64_RELATIVE {
+                    let r_addend = i64::from_le_bytes(entry[16..24].try_into().unwrap());
+                    return Some(r_addend as u64);
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Finds the value (`st_value`) of a named ELF symbol in `.symtab` or `.dynsym`.
+    ///
+    /// Unlike the function-symbol iterator this matches symbols of any type (e.g.
+    /// `runtime.text`, which is not `STT_FUNC`). Returns the first match.
+    fn find_symbol_value(reader: &mut (impl Read + Seek), name: &str) -> Option<u64> {
+        let mut sections = Vec::new();
+        let mut section_offsets = Vec::new();
+
+        get_section_offsets(reader, None, &mut section_offsets).ok()?;
+        get_section_metadata(reader, None, SHT_SYMTAB, &mut sections).ok()?;
+        get_section_metadata(reader, None, SHT_DYNSYM, &mut sections).ok()?;
+
+        let target = name.as_bytes();
+        let mut name_buf = vec![0u8; target.len() + 1];
+
+        for section in &sections {
+            if section.entry_size == 0 {
+                continue;
+            }
+            let strtab_off = match section_offsets.get(section.link as usize) {
+                Some(off) => *off,
+                None => continue,
+            };
+
+            let count = section.size / section.entry_size;
+            for i in 0..count {
+                let entry_pos = section.offset + i * section.entry_size;
+                if reader.seek(SeekFrom::Start(entry_pos)).is_err() {
+                    break;
+                }
+
+                // st_name is the first 4 bytes in both ELF32 and ELF64.
+                let mut name_off_buf = [0u8; 4];
+                if reader.read_exact(&mut name_off_buf).is_err() {
+                    break;
+                }
+                let st_name = u32::from_le_bytes(name_off_buf) as u64;
+
+                // st_value: ELF64 at entry+8 (u64); ELF32 at entry+4 (u32).
+                let st_value = match section.class {
+                    ELFCLASS64 => {
+                        if reader.seek(SeekFrom::Start(entry_pos + 8)).is_err() {
+                            break;
+                        }
+                        let mut v = [0u8; 8];
+                        if reader.read_exact(&mut v).is_err() {
+                            break;
+                        }
+                        u64::from_le_bytes(v)
+                    }
+                    _ => {
+                        if reader.seek(SeekFrom::Start(entry_pos + 4)).is_err() {
+                            break;
+                        }
+                        let mut v = [0u8; 4];
+                        if reader.read_exact(&mut v).is_err() {
+                            break;
+                        }
+                        u32::from_le_bytes(v) as u64
+                    }
+                };
+
+                // Compare the name (exact length, NUL-terminated).
+                if reader.seek(SeekFrom::Start(strtab_off + st_name)).is_err() {
+                    continue;
+                }
+                if reader.read_exact(&mut name_buf).is_err() {
+                    continue;
+                }
+                if name_buf[target.len()] == 0 && &name_buf[..target.len()] == target {
+                    return Some(st_value);
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Returns true if the ELF file carries a Go build-info marker section.
+    ///
+    /// `.go.buildinfo` (and `.note.go.buildid`) are allocated and survive `strip`,
+    /// so they remain even when the `.gopclntab` section header has been removed.
+    /// This is used as a cheap gate before attempting the (more expensive) scan to
+    /// recover a stripped line table: non-Go binaries lack these markers and never
+    /// pay for the scan.
+    pub(crate) fn has_go_build_info(reader: &mut (impl Read + Seek)) -> bool {
+        if !go_elf_section_count_allowed(reader) {
+            return false;
+        }
+
+        let mut sections = Vec::new();
+        let mut section_offsets = Vec::new();
+
+        if enum_section_metadata(reader, None, None, &mut sections).is_err() {
+            return false;
+        }
+        if get_section_offsets(reader, None, &mut section_offsets).is_err() {
+            return false;
+        }
+
+        find_section_by_name(reader, &sections, &section_offsets, ".go.buildinfo").is_some()
+            || find_section_by_name(reader, &sections, &section_offsets, ".note.go.buildid")
+                .is_some()
+    }
+
+    /// Magic prefix bytes shared by the supported pclntab versions: the low byte
+    /// (`0xf0`/`0xf1`) varies, the upper three bytes are `0xff`.
+    const PCLNTAB_MAGIC_GO118: [u8; 4] = [0xf0, 0xff, 0xff, 0xff];
+    const PCLNTAB_MAGIC_GO120: [u8; 4] = [0xf1, 0xff, 0xff, 0xff];
+
+    /// Recovers a Go line table whose `.gopclntab` section header has been stripped.
+    ///
+    /// Scans the read-only `PT_LOAD` segments for a supported pclntab magic,
+    /// validates and parses each candidate, and returns the first table that parses
+    /// cleanly together with its resolved `runtime.text`. Only 64-bit ELF is
+    /// supported; returns `None` otherwise (callers fall back to ELF symbols).
+    ///
+    /// Callers should gate this behind [`has_go_build_info`] and the absence of a
+    /// `.gopclntab` section so non-Go binaries never incur the scan.
+    pub(crate) fn recover_go_pclntab(
+        reader: &mut (impl Read + Seek),
+    ) -> Option<crate::ruwind::go_pclntab::GoPclnTabLocation> {
+        recover_go_pclntab_with_chunk(reader, 64 * 1024)
+    }
+
+    pub(crate) fn recover_go_pclntab_with_chunk(
+        reader: &mut (impl Read + Seek),
+        scan_chunk_size: usize,
+    ) -> Option<crate::ruwind::go_pclntab::GoPclnTabLocation> {
+        if scan_chunk_size < 8 {
+            return None;
+        }
+
+        // Determine class; only 64-bit recovery is supported.
+        reader.seek(SeekFrom::Start(0)).ok()?;
+        let ident = get_ident(reader).ok()?;
+        if ident[..4] != ELF_MAGIC || ident[EI_CLASS] != ELFCLASS64 {
+            return None;
+        }
+
+        // Read the ELF header for program-header table location. The ElfHeader64
+        // struct begins after the 16-byte e_ident, so seek past it first.
+        reader.seek(SeekFrom::Start(16)).ok()?;
+        let mut header = ElfHeader64::default();
+        unsafe {
+            reader
+                .read_exact(slice::from_raw_parts_mut(
+                    &mut header as *mut _ as *mut u8,
+                    size_of::<ElfHeader64>(),
+                ))
+                .ok()?;
+        }
+
+        // Optional .text address (fallback for text_start resolution).
+        let text_vaddr = if go_elf_section_count_allowed(reader) {
+            let mut sections = Vec::new();
+            let mut section_offsets = Vec::new();
+            enum_section_metadata(reader, None, None, &mut sections).ok();
+            get_section_offsets(reader, None, &mut section_offsets).ok();
+            find_section_by_name(reader, &sections, &section_offsets, ".text").map(|s| s.address)
+        } else {
+            None
+        };
+
+        let mut ph_offset = header.e_phoff;
+        for _ in 0..header.e_phnum {
+            reader.seek(SeekFrom::Start(ph_offset)).ok()?;
+            let mut ph = ElfProgramHeader64::default();
+            if get_program_header64(reader, &mut ph).is_err() {
+                break;
+            }
+            ph_offset += header.e_phentsize as u64;
+
+            // Loadable, non-executable segment (the line table is read-only data,
+            // but on PIE binaries it lives in a writable data-rel-ro segment, so we
+            // only exclude executable segments here).
+            if ph.p_type == PT_LOAD && (ph.p_flags & PF_X) == 0 && ph.p_filesz > 0 {
+                if let Some(location) = scan_go_pclntab_segment(
+                    reader,
+                    ph.p_offset,
+                    ph.p_filesz,
+                    ph.p_vaddr,
+                    text_vaddr,
+                    scan_chunk_size,
+                ) {
+                    return Some(location);
+                }
+            }
+        }
+
+        None
+    }
+
+    fn scan_go_pclntab_segment(
+        reader: &mut (impl Read + Seek),
+        seg_offset: u64,
+        seg_filesz: u64,
+        seg_vaddr: u64,
+        text_vaddr: Option<u64>,
+        scan_chunk_size: usize,
+    ) -> Option<crate::ruwind::go_pclntab::GoPclnTabLocation> {
+        const SCAN_OVERLAP: usize = 7;
+
+        let seg_end = seg_offset.checked_add(seg_filesz)?;
+        let mut bytes = vec![0u8; scan_chunk_size.checked_add(SCAN_OVERLAP)?];
+        let mut read_offset = seg_offset;
+        let mut carry = 0usize;
+
+        while read_offset < seg_end {
+            let read_len =
+                usize::try_from((seg_end - read_offset).min(scan_chunk_size as u64)).ok()?;
+            if reader.seek(SeekFrom::Start(read_offset)).is_err()
+                || reader
+                    .read_exact(&mut bytes[carry..carry + read_len])
+                    .is_err()
+            {
+                return None;
+            }
+
+            let buffer_start = read_offset.checked_sub(carry as u64)?;
+            let buffer_len = carry + read_len;
+            let mut i = 0usize;
+            while i + 8 <= buffer_len {
+                let b = bytes[i];
+                if (b == 0xf0 || b == 0xf1)
+                    && bytes[i..i + 4]
+                        == (if b == 0xf0 {
+                            PCLNTAB_MAGIC_GO118
+                        } else {
+                            PCLNTAB_MAGIC_GO120
+                        })
+                    && bytes[i + 4] == 0
+                    && bytes[i + 5] == 0
+                    && matches!(bytes[i + 6], 1 | 2 | 4)
+                    && matches!(bytes[i + 7], 4 | 8)
+                {
+                    let candidate_offset = buffer_start.checked_add(i as u64)?;
+                    let candidate_delta = candidate_offset.checked_sub(seg_offset)?;
+                    let candidate_vaddr = seg_vaddr.checked_add(candidate_delta)?;
+                    let max_len = seg_end.checked_sub(candidate_offset)?;
+                    let header_len = usize::try_from(
+                        max_len.min(crate::ruwind::go_pclntab::GO_PCLNTAB_HEADER_MAX as u64),
+                    )
+                    .ok()?;
+                    let mut header = [0u8; crate::ruwind::go_pclntab::GO_PCLNTAB_HEADER_MAX];
+                    reader.seek(SeekFrom::Start(candidate_offset)).ok()?;
+                    reader.read_exact(&mut header[..header_len]).ok()?;
+
+                    let text_start = resolve_go_text_start(
+                        reader,
+                        &header[..header_len],
+                        Some(candidate_vaddr),
+                        text_vaddr,
+                    )
+                    .unwrap_or(0);
+                    let location = crate::ruwind::go_pclntab::GoPclnTabLocation::new(
+                        candidate_offset,
+                        max_len,
+                        text_start,
+                    );
+
+                    if crate::ruwind::go_pclntab::validate_go_pclntab_location(reader, &location) {
+                        debug!(
+                            "recover_go_pclntab: recovered table at vaddr={:#x} text_start={:#x}",
+                            candidate_vaddr, text_start
+                        );
+                        return Some(location);
+                    }
+                }
+                i += 1;
+            }
+
+            carry = buffer_len.min(SCAN_OVERLAP);
+            bytes.copy_within(buffer_len - carry..buffer_len, 0);
+            read_offset = read_offset.checked_add(read_len as u64)?;
+        }
+
+        None
+    }
 }
+
+#[cfg(test)]
+use go::{go_elf_section_count_allowed, GO_ELF_SECTION_LIMIT};
+pub(crate) use go::{
+    has_go_build_info, has_go_pclntab, read_go_pclntab, recover_go_pclntab,
+};
+#[cfg(test)]
+pub(crate) use go::recover_go_pclntab_with_chunk;
 
 pub fn get_load_header(
     reader: &mut (impl Read + Seek)) -> Result<ElfLoadHeader, Error> {
@@ -1683,6 +1865,23 @@ mod tests {
     use super::*;
     #[cfg(target_os = "linux")]
     use std::fs::File;
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn go_section_limit_handles_extended_numbering() {
+        let path = std::env::current_dir()
+            .unwrap()
+            .join("../test/assets/go/symbol_benchmark_go");
+        let mut bytes = std::fs::read(path).expect("read Go fixture");
+        let section_offset = u64::from_le_bytes(bytes[40..48].try_into().unwrap()) as usize;
+
+        bytes[60..62].copy_from_slice(&0u16.to_le_bytes());
+        bytes[section_offset + 32..section_offset + 40]
+            .copy_from_slice(&((GO_ELF_SECTION_LIMIT + 1) as u64).to_le_bytes());
+
+        let mut reader = std::io::Cursor::new(bytes);
+        assert!(!go_elf_section_count_allowed(&mut reader));
+    }
 
     #[test]
     #[cfg(target_os = "linux")]

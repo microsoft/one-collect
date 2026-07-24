@@ -92,6 +92,10 @@ harness = false
 name = "kallsyms"
 harness = false
 
+[[bench]]
+name = "symbols"
+harness = false
+
 [lints.rust]
 unreachable_pub = "deny"
 
