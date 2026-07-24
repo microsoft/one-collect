@@ -151,6 +151,7 @@ const PROPERTY_PARAM_COUNT: i32  = PropertyParamCount;
 
 /// Errors that can occur during TDH-based schema decoding.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum TdhDecodeError {
     /// No decodable schema was found for the event.
     ///
