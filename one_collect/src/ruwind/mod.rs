@@ -18,6 +18,7 @@ use std::hash::{Hash, Hasher};
 
 pub mod elf;
 pub mod dwarf;
+pub mod go_pclntab;
 
 mod module;
 mod process;
