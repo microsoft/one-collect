@@ -72,6 +72,36 @@ impl Guid {
             ],
         }
     }
+
+    /// Derive the ETW control GUID of a self-describing (EventSource /
+    /// TraceLogging) provider from its *name*.
+    ///
+    /// Unlike manifest / classic providers (whose GUID must be looked up in the
+    /// OS provider database), a self-describing provider's GUID is a
+    /// deterministic hash of its name: the name is upper-cased, encoded as
+    /// UTF-16BE, and v5-hashed over the fixed 16-byte `EventSource` namespace.
+    ///
+    /// This is the single source of truth for that namespace seed and encoding
+    /// convention; the .NET helper and the ETW provider-name resolver both
+    /// delegate here rather than re-embedding the seed (a duplicated seed would
+    /// silently mis-resolve every provider if the copies ever drifted).
+    pub fn from_eventsource_name(name: &str) -> Self {
+        // The fixed namespace `EventSource` uses to hash provider names.
+        const EVENTSOURCE_NAMESPACE: [u8; 16] = [
+            0x48, 0x2C, 0x2D, 0xB2,
+            0xC3, 0x90, 0x47, 0xC8,
+            0x87, 0xF8, 0x1A, 0x15,
+            0xBF, 0xC1, 0x30, 0xFB,
+        ];
+
+        // `EventSource` encodes the (upper-cased) name as UTF-16BE.
+        let mut name_bytes = Vec::with_capacity(name.len() * 2);
+        for c in name.to_uppercase().chars() {
+            name_bytes.extend_from_slice(&(c as u16).to_be_bytes());
+        }
+
+        Self::v5_from_name(&EVENTSOURCE_NAMESPACE, &name_bytes)
+    }
 }
 
 pub mod event;
@@ -155,6 +185,25 @@ mod tests {
     fn v5_from_name_sets_version_nibble_to_5() {
         let guid = Guid::v5_from_name(NS, b"record-trace");
         assert_eq!(guid.data3 & 0xF000, 0x5000);
+    }
+
+    /// Ground-truth vector for the EventSource name-hash, independently
+    /// computed (SHA-1 over the fixed EventSource namespace + upper-cased
+    /// UTF-16BE name, version nibble forced to 5, fields read little-endian as
+    /// `v5_from_name` does).  Locks the namespace seed and encoding.
+    #[test]
+    fn from_eventsource_name_matches_known_vector() {
+        assert_eq!(
+            Guid::from_eventsource_name("OneCollect-Test-Provider").to_bytes(),
+            Guid::from_u128(0xB03CBD70_B6F7_5552_04A1_A17A1FE5F1A4).to_bytes());
+    }
+
+    #[test]
+    fn from_eventsource_name_is_case_insensitive() {
+        // The convention upper-cases before hashing, so casing is irrelevant.
+        assert_eq!(
+            Guid::from_eventsource_name("onecollect-test-provider").to_bytes(),
+            Guid::from_eventsource_name("OneCollect-Test-Provider").to_bytes());
     }
 }
 

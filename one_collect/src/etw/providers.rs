@@ -173,3 +173,83 @@ fn read_utf16z(bytes: &[u8], byte_offset: usize) -> Option<String> {
     }
     Some(String::from_utf16_lossy(&units))
 }
+
+/// Resolve a self-describing (EventSource / TraceLogging) provider *name* to
+/// its ETW control GUID.
+///
+/// Where [`registered_providers`] answers "which GUID is *registered* for this
+/// name?" by consulting the OS provider database, this answers the complement:
+/// self-describing providers are **not** registered — their control GUID is a
+/// deterministic hash of the name.  Together the two cover name → GUID
+/// resolution for every provider model, letting a caller pick a GUID and hand
+/// it to `EtwSession::enable_provider`.
+///
+/// Accepts either:
+/// * a literal `{GUID}` string (returned as-is after parsing), or
+/// * a provider name, hashed via the EventSource convention (see
+///   [`Guid::from_eventsource_name`], the shared source of truth for the
+///   namespace seed and encoding).
+///
+/// # Errors
+///
+/// Returns an error only when a `{...}` literal is not valid GUID hex.  A plain
+/// name never fails: it always hashes to some GUID.
+pub fn guid_from_tracelogging_name(provider_name: &str) -> anyhow::Result<Guid> {
+    if provider_name.starts_with('{') {
+        // Direct `{GUID}` literal: strip braces/dashes and parse the hex.
+        let hex = provider_name.replace(['-', '{', '}'], "");
+        return u128::from_str_radix(hex.trim(), 16)
+            .map(Guid::from_u128)
+            .map_err(|_| anyhow::anyhow!("invalid provider GUID literal: {provider_name}"));
+    }
+
+    // Self-describing provider: name-hash to the control GUID.
+    Ok(Guid::from_eventsource_name(provider_name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Ground-truth vector for the EventSource name-hash, independently
+    /// computed (SHA-1 over the fixed namespace + upper-cased UTF-16BE name,
+    /// version nibble forced to 5, fields read little-endian as
+    /// `Guid::v5_from_name` does).  Locks the namespace seed + encoding so a
+    /// drift in either is caught here.
+    const KNOWN_NAME: &str = "OneCollect-Test-Provider";
+    const KNOWN_GUID: u128 = 0xB03CBD70_B6F7_5552_04A1_A17A1FE5F1A4;
+
+    #[test]
+    fn tracelogging_name_hashes_to_known_guid() {
+        let guid = guid_from_tracelogging_name(KNOWN_NAME).unwrap();
+        assert_eq!(guid.to_bytes(), Guid::from_u128(KNOWN_GUID).to_bytes());
+    }
+
+    #[test]
+    fn tracelogging_name_is_case_insensitive() {
+        // The convention upper-cases before hashing, so any casing of the same
+        // name resolves to the same GUID.
+        let upper = guid_from_tracelogging_name(&KNOWN_NAME.to_uppercase()).unwrap();
+        let lower = guid_from_tracelogging_name(&KNOWN_NAME.to_lowercase()).unwrap();
+        assert_eq!(upper.to_bytes(), Guid::from_u128(KNOWN_GUID).to_bytes());
+        assert_eq!(lower.to_bytes(), Guid::from_u128(KNOWN_GUID).to_bytes());
+    }
+
+    #[test]
+    fn tracelogging_guid_literal_is_parsed_verbatim() {
+        // A `{GUID}` literal is parsed directly, not hashed.
+        let guid = guid_from_tracelogging_name(
+            "{E13C0D23-CCBC-4E12-931B-D9CC2EEE27E4}",
+        )
+        .unwrap();
+        assert_eq!(
+            guid.to_bytes(),
+            Guid::from_u128(0xE13C0D23_CCBC_4E12_931B_D9CC2EEE27E4).to_bytes());
+    }
+
+    #[test]
+    fn tracelogging_invalid_guid_literal_errors() {
+        // A `{...}` that isn't valid hex is a real error, not a silent hash.
+        assert!(guid_from_tracelogging_name("{not-a-guid}").is_err());
+    }
+}
