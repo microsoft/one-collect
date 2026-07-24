@@ -3,7 +3,8 @@
 
 use std::{fs::File, io::{BufRead, BufReader, Seek, SeekFrom}};
 use std::collections::HashSet;
-use crate::ruwind::elf::{ElfLoadHeader, ElfSymbol, ElfSymbolIterator};
+use crate::ruwind::elf::{ElfLoadHeader, ElfSymbol, ElfSymbolIterator, symbol_rva};
+use crate::ruwind::go_pclntab::GoPclnTab;
 use tracing::{info, trace, warn};
 
 use crate::helpers::exporting::ExportMachine;
@@ -409,6 +410,114 @@ pub struct PerfMapSymbolReader {
     name: String,
     done: bool,
 }
+
+/// Symbol reader backed by a Go `gopclntab` line table.
+///
+/// Recovers Go function names from the `.gopclntab` section for binaries whose
+/// ELF symbol table has been stripped (e.g. `go build -ldflags "-s"`, as used
+/// by Kubernetes). Function virtual addresses from the table are translated to
+/// file RVAs via [`symbol_rva`], identical to [`ElfSymbolReader`], so the two
+/// can be layered (unioned) for the same mapping.
+pub(crate) struct GoPclnTabSymbolReader {
+    tab: GoPclnTab,
+    load_header: ElfLoadHeader,
+    page_mask: u64,
+    index: usize,
+    current_start: u64,
+    current_end: u64,
+    current_name: String,
+    valid: bool,
+}
+
+impl GoPclnTabSymbolReader {
+    /// Attempts to build a reader from `file`. Returns `None` if the file has no
+    /// usable `.gopclntab` section or the table cannot be parsed (e.g. an
+    /// unsupported/older Go layout), so callers fall back to ELF symbols.
+    pub(crate) fn new(
+        mut file: File,
+        load_header: ElfLoadHeader,
+        system_page_size: u64) -> Option<Self> {
+        // Prefer the .gopclntab section; fall back to scanning for a stripped
+        // (section-header-removed) line table.
+        let (data, text_start) = crate::ruwind::elf::read_go_pclntab(&mut file)
+            .or_else(|| crate::ruwind::elf::recover_go_pclntab(&mut file))?;
+        let tab = GoPclnTab::parse(data, text_start)?;
+
+        Some(Self {
+            tab,
+            load_header,
+            page_mask: crate::page_size_to_mask(system_page_size),
+            index: 0,
+            current_start: 0,
+            current_end: 0,
+            current_name: String::with_capacity(256),
+            valid: false,
+        })
+    }
+}
+
+impl ExportSymbolReader for GoPclnTabSymbolReader {
+    fn reset(&mut self) {
+        self.index = 0;
+        self.valid = false;
+    }
+
+    fn next(&mut self) -> bool {
+        let p_vaddr = self.load_header.p_vaddr();
+
+        while self.index < self.tab.len() {
+            let i = self.index;
+            self.index += 1;
+
+            if let Some((start_va, end_va, name)) = self.tab.func(i) {
+                // Guard against entries below the loaded segment (would
+                // underflow the RVA translation).
+                if start_va < p_vaddr {
+                    continue;
+                }
+
+                let start = symbol_rva(start_va, &self.load_header, self.page_mask);
+
+                // pclntab end is the next function's entry (exclusive); make it
+                // inclusive to match ElfSymbol semantics and avoid overlapping
+                // the following function's start.
+                let end_exclusive = if end_va > start_va { end_va } else { start_va + 1 };
+                let end = symbol_rva(end_exclusive, &self.load_header, self.page_mask)
+                    .saturating_sub(1)
+                    .max(start);
+
+                self.current_start = start;
+                self.current_end = end;
+                self.current_name.clear();
+                self.current_name.push_str(name);
+                self.valid = true;
+                return true;
+            }
+        }
+
+        self.valid = false;
+        false
+    }
+
+    fn start(&self) -> u64 {
+        if self.valid { self.current_start } else { 0 }
+    }
+
+    fn end(&self) -> u64 {
+        if self.valid { self.current_end } else { 0 }
+    }
+
+    fn name(&self) -> &str {
+        if self.valid { &self.current_name } else { "" }
+    }
+
+    fn demangle(&mut self) -> Option<String> {
+        // Go pclntab names are already in final, human-readable form and must
+        // never be passed through a C++/Rust demangler.
+        None
+    }
+}
+
 
 impl PerfMapSymbolReader {
     pub fn new(file: File) -> Self {
@@ -986,11 +1095,113 @@ mod tests {
         }
     }
 
+    /// Cross-checks the Go pclntab reader against the ELF symbol reader on a
+    /// binary that has both. For every function name present in both sources,
+    /// the start address must match exactly — proving coordinate consistency so
+    /// the two can be unioned. Ignored by default; run with:
+    ///   GO_PCLNTAB_BIN=/path/to/go-binary \
+    ///     cargo test --lib go_pclntab_matches_elf -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    #[cfg(target_os = "linux")]
+    fn go_pclntab_matches_elf() {
+        use std::collections::HashMap;
+
+        let path = std::env::var("GO_PCLNTAB_BIN").expect("set GO_PCLNTAB_BIN");
+        let page = system_page_size();
+
+        // Collect ELF symtab/dynsym function starts by name.
+        let mut elf_starts: HashMap<String, u64> = HashMap::new();
+        {
+            let file = File::open(&path).expect("open binary");
+            let mut reader = ElfSymbolReader::new(file, ElfLoadHeader::new(0, 0), page);
+            reader.reset();
+            while reader.next() {
+                elf_starts.insert(reader.name().to_string(), reader.start());
+            }
+        }
+        assert!(!elf_starts.is_empty(), "binary should have ELF symbols for this test");
+
+        // Walk the Go pclntab reader and compare overlapping names.
+        let file = File::open(&path).expect("open binary");
+        let mut go = GoPclnTabSymbolReader::new(file, ElfLoadHeader::new(0, 0), page)
+            .expect("binary should have a .gopclntab");
+        go.reset();
+
+        let mut compared = 0usize;
+        let mut matched = 0usize;
+        let mut mismatched = 0usize;
+        let mut go_count = 0usize;
+        let mut examples: Vec<String> = Vec::new();
+        while go.next() {
+            go_count += 1;
+            if let Some(&elf_start) = elf_starts.get(go.name()) {
+                compared += 1;
+                assert!(go.start() <= go.end());
+                if elf_start == go.start() {
+                    matched += 1;
+                } else {
+                    mismatched += 1;
+                    if examples.len() < 5 {
+                        examples.push(format!(
+                            "{}: elf={:#x} go={:#x}", go.name(), elf_start, go.start()));
+                    }
+                }
+            }
+        }
+
+        println!(
+            "{}: elf_funcs={} go_funcs={} overlap={} matched={} mismatched={}",
+            path, elf_starts.len(), go_count, compared, matched, mismatched);
+        for e in &examples {
+            println!("  mismatch (expected for ABI wrappers): {}", e);
+        }
+
+        // The vast majority of shared names must agree exactly. A small number
+        // legitimately differ because the ELF symtab and pclntab record distinct
+        // addresses for ABI wrappers that share a name; the union dedups by start
+        // so those become separate, correct entries. A coordinate bug would make
+        // essentially everything mismatch, which this guards against.
+        assert!(compared > 1000, "expected a large overlap, got {}", compared);
+        assert!(
+            matched * 100 >= compared * 95,
+            "expected >=95% start agreement, got {}/{}", matched, compared);
+    }
+
+    /// Exercises the full GoPclnTabSymbolReader over committed fixtures, for both
+    /// the section path and the recovery (renamed-section) path. No network.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn go_pclntab_symbol_reader_fixtures() {
+        let page = system_page_size();
+        for name in ["pclntab_stripped_symbols", "pclntab_section_stripped"] {
+            let path = std::env::current_dir().unwrap()
+                .join("../test/assets/go").join(name);
+            let file = File::open(&path).unwrap_or_else(|_| panic!("open fixture {}", name));
+
+            let mut reader = GoPclnTabSymbolReader::new(file, ElfLoadHeader::new(0, 0), page)
+                .unwrap_or_else(|| panic!("reader should build for {}", name));
+            reader.reset();
+
+            let mut count = 0usize;
+            let mut found_main = false;
+            while reader.next() {
+                count += 1;
+                assert!(reader.start() <= reader.end());
+                assert!(!reader.name().is_empty());
+                assert!(reader.demangle().is_none(), "Go names must not be demangled");
+                if reader.name() == "main.main" {
+                    found_main = true;
+                }
+            }
+            assert!(count > 100, "{}: expected many symbols, got {}", name, count);
+            assert!(found_main, "{}: main.main should resolve", name);
+        }
+    }
+
     #[test]
     fn symbol_page_map() {
-        let mut map = SymbolPageMap::new(256);
-
-        map.mark_ip(0);
+        let mut map = SymbolPageMap::new(256);        map.mark_ip(0);
         map.mark_ip(257);
         map.mark_ip(1024);
 
