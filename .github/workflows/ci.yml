@@ -102,22 +102,27 @@ jobs:
       build-flavor: release
       platform-name: Windows-x64
 
-  # TDH integration tests.  Runs the `tests/etw_tdh_integration.rs`
-  # binary which emits real ETW TraceLogging events and decodes them
-  # through `TdhDecoder`.  Tests are `#[ignore]`'d because they require
-  # elevation to start an ETW session; `windows-latest` runners execute
-  # as `runneradmin`, which satisfies that.  Targeting the binary by
-  # name avoids sweeping up unrelated `#[ignore]`'d unit tests in
-  # `src/**`.  `--test-threads=1` serialises the tests because each one
-  # owns a process-global ETW consumer session.
-  integration_tdh_windows_x64:
-    name: TDH Integration Tests (Windows-x64)
+  # ETW integration tests.  Runs each `tests/etw_*_integration.rs`
+  # binary which starts a real ETW consumer session: `etw_tdh_integration`
+  # emits real ETW TraceLogging events and decodes them through
+  # `TdhDecoder`, while `etw_stats_integration` asserts on the live
+  # loss/health counters returned by `query_stats`.  Tests are
+  # `#[ignore]`'d because they require elevation to start an ETW session;
+  # `windows-latest` runners execute as `runneradmin`, which satisfies
+  # that.  Targeting each binary by name avoids sweeping up unrelated
+  # `#[ignore]`'d unit tests in `src/**`.  `--test-threads=1` serialises
+  # the tests because each one owns a process-global ETW consumer session.
+  integration_etw_windows_x64:
+    name: ETW Integration Tests (Windows-x64)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v3
       - name: Run etw_tdh_integration
         working-directory: one_collect
         run: cargo test --locked --test etw_tdh_integration -- --ignored --nocapture --test-threads=1
+      - name: Run etw_stats_integration
+        working-directory: one_collect
+        run: cargo test --locked --test etw_stats_integration -- --ignored --nocapture --test-threads=1
 
   # Benchmarks ordered by OS (linux, windows) then platform (glibc, musl)
   bench_linux_glibc_x64:
