@@ -33,11 +33,14 @@ const MAGIC_GO120: u32 = 0xfffffff1;
 
 pub(crate) const GO_PCLNTAB_HEADER_MAX: usize = 8 + 8 * 8;
 pub(crate) const GO_PCLNTAB_BUFFER_SIZE: usize = 64 * 1024;
-pub(crate) const GO_PCLNTAB_METADATA_SIZE: usize = 128 * 1024;
 pub(crate) const GO_SYMBOL_NAME_MAX: usize = 4 * 1024;
 
 pub(crate) trait GoPclnTabRead: Read + Seek {
     fn read_exact_at(&mut self, offset: u64, output: &mut [u8]) -> Result<(), Error>;
+
+    fn read_func_exact_at(&mut self, offset: u64, output: &mut [u8]) -> Result<(), Error> {
+        self.read_exact_at(offset, output)
+    }
 
     fn read_name_exact_at(&mut self, offset: u64, output: &mut [u8]) -> Result<(), Error> {
         self.read_exact_at(offset, output)
@@ -69,7 +72,8 @@ impl GoPclnTabRead for Cursor<Vec<u8>> {
 
 pub(crate) struct GoPclnTabFileReader {
     file: File,
-    metadata: ReadWindow,
+    functab: ReadWindow,
+    funcs: ReadWindow,
     names: ReadWindow,
 }
 
@@ -77,7 +81,8 @@ impl GoPclnTabFileReader {
     pub(crate) fn new(file: File, table_offset: u64) -> Self {
         Self {
             file,
-            metadata: ReadWindow::new(GO_PCLNTAB_METADATA_SIZE, table_offset, false),
+            functab: ReadWindow::new(GO_PCLNTAB_BUFFER_SIZE, table_offset, false),
+            funcs: ReadWindow::new(GO_PCLNTAB_BUFFER_SIZE, table_offset, false),
             names: ReadWindow::new(GO_PCLNTAB_BUFFER_SIZE, table_offset, true),
         }
     }
@@ -97,7 +102,11 @@ impl Seek for GoPclnTabFileReader {
 
 impl GoPclnTabRead for GoPclnTabFileReader {
     fn read_exact_at(&mut self, offset: u64, output: &mut [u8]) -> Result<(), Error> {
-        self.metadata.read(&self.file, offset, output)
+        self.functab.read(&self.file, offset, output)
+    }
+
+    fn read_func_exact_at(&mut self, offset: u64, output: &mut [u8]) -> Result<(), Error> {
+        self.funcs.read(&self.file, offset, output)
     }
 
     fn read_name_exact_at(&mut self, offset: u64, output: &mut [u8]) -> Result<(), Error> {
@@ -111,6 +120,8 @@ struct ReadWindow {
     align: bool,
     start: u64,
     len: usize,
+    #[cfg(test)]
+    refills: usize,
 }
 
 impl ReadWindow {
@@ -121,6 +132,8 @@ impl ReadWindow {
             align,
             start: 0,
             len: 0,
+            #[cfg(test)]
+            refills: 0,
         }
     }
 
@@ -128,6 +141,10 @@ impl ReadWindow {
         while !output.is_empty() {
             let window_end = self.start + self.len as u64;
             if offset < self.start || offset >= window_end {
+                #[cfg(test)]
+                {
+                    self.refills += 1;
+                }
                 let capacity = self.data.len() as u64;
                 self.start = if self.align {
                     let relative = offset
@@ -386,7 +403,7 @@ impl<R: GoPclnTabRead> GoPclnTab<R> {
             Some(offset) => offset,
             None => return false,
         };
-        let name_off = match self.read_u32(name_field) {
+        let name_off = match self.read_func_u32(name_field) {
             Some(offset) => offset as u64,
             None => return false,
         };
@@ -434,6 +451,16 @@ impl<R: GoPclnTabRead> GoPclnTab<R> {
                 u32::from_be_bytes(bytes[..4].try_into().ok()?),
                 u32::from_be_bytes(bytes[4..].try_into().ok()?),
             )
+        })
+    }
+
+    fn read_func_u32(&mut self, relative_offset: u64) -> Option<u32> {
+        let mut bytes = [0u8; 4];
+        self.read_func_exact_at(relative_offset, &mut bytes)?;
+        Some(if self.metadata.little_endian {
+            u32::from_le_bytes(bytes)
+        } else {
+            u32::from_be_bytes(bytes)
         })
     }
 
@@ -491,6 +518,15 @@ impl<R: GoPclnTabRead> GoPclnTab<R> {
         }
         let absolute = self.location.file_offset.checked_add(relative_offset)?;
         self.reader.read_exact_at(absolute, output).ok()
+    }
+
+    fn read_func_exact_at(&mut self, relative_offset: u64, output: &mut [u8]) -> Option<()> {
+        let len = u64::try_from(output.len()).ok()?;
+        if relative_offset.checked_add(len)? > self.location.max_len {
+            return None;
+        }
+        let absolute = self.location.file_offset.checked_add(relative_offset)?;
+        self.reader.read_func_exact_at(absolute, output).ok()
     }
 
     #[cfg(test)]
@@ -814,15 +850,15 @@ mod tests {
         assert!(blob.len() > GO_PCLNTAB_BUFFER_SIZE * 3);
 
         let (mut tab, path) = open_file_table(&blob, text, "large");
-        assert!(
-            GO_PCLNTAB_BUFFER_SIZE + GO_PCLNTAB_METADATA_SIZE + GO_SYMBOL_NAME_MAX < 256 * 1024
-        );
+        assert!(GO_PCLNTAB_BUFFER_SIZE * 3 + GO_SYMBOL_NAME_MAX < 256 * 1024);
         for index in 0..FUNCTION_COUNT {
             let (start, end, name) = tab.func(index).expect("read function");
             assert_eq!(start, text + (index as u64) * 16);
             assert_eq!(end, start + 16);
             assert_eq!(name, "pkg.function");
         }
+        assert!(tab.reader.functab.refills < 10);
+        assert!(tab.reader.funcs.refills < 10);
 
         std::fs::remove_file(path).expect("remove temporary pclntab");
     }
