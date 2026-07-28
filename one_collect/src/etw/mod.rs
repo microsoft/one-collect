@@ -18,7 +18,7 @@ mod events;
 pub mod providers;
 pub mod tdh;
 
-pub use providers::{RegisteredProvider, registered_providers};
+pub use providers::{RegisteredProvider, for_each_registered_provider};
 
 use abi::{
     EVENT_RECORD,
