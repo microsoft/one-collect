@@ -36,7 +36,7 @@ use std::cell::RefCell;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use one_collect::{Guid, Writable};
@@ -68,6 +68,17 @@ const KERNEL_PROCESS_PROVIDER: u128 = 0x22FB2CD6_0E7B_422B_A0C7_2FAD1FD0E716;
 /// events (Ids 1 and 2).  Both carry a Task, so the decoder's
 /// `TaskNameOffset` path must surface them as the event name.
 const KERNEL_PROCESS_TASKS: &[&str] = &["ProcessStart", "ProcessStop"];
+
+/// Manifest event Ids for the process-lifetime events the manifest test
+/// validates: `ProcessStart` (Id 1) and `ProcessStop` (Id 2).
+///
+/// These are watched at the *raw-record* level (via the pre-decode
+/// observer), so the test can stop as soon as the events it asserts on are
+/// physically present — regardless of whether TDH decode succeeds.  That
+/// makes a broken decode surface as a clear assertion failure instead of a
+/// `TEST_TIMEOUT` hang, and avoids depending on an arbitrary total event
+/// count that may or may not include the events of interest.
+const KERNEL_PROCESS_EVENT_IDS: &[u16] = &[1, 2];
 
 /// Hard upper bound on a single test run — should never be reached when
 /// running on a healthy ETW subsystem.
@@ -178,10 +189,31 @@ fn tlg_guid_to_oc(g: tlg::Guid) -> Guid {
 fn build_capturing_session<F>(
     provider_guid: Guid,
     wide_name: &str,
-    mut on_decoded: F,
+    on_decoded: F,
 ) -> EtwSession
 where
     F: FnMut(&one_collect::etw::tdh::TdhDecodedEvent<'_>) + 'static,
+{
+    // Most tests don't care about raw-record identity, only successful
+    // decodes — pass a no-op record observer.
+    build_capturing_session_observed(provider_guid, wide_name, on_decoded, |_id| {})
+}
+
+/// Like [`build_capturing_session`], but also invokes `on_record` with the
+/// event Id of *every* record before it is decoded.
+///
+/// The pre-decode observer fires regardless of whether TDH decode later
+/// succeeds, so a test can watch for the presence of specific events (by
+/// Id) even when it cannot rely on those events decoding cleanly.
+fn build_capturing_session_observed<F, R>(
+    provider_guid: Guid,
+    wide_name: &str,
+    mut on_decoded: F,
+    mut on_record: R,
+) -> EtwSession
+where
+    F: FnMut(&one_collect::etw::tdh::TdhDecodedEvent<'_>) + 'static,
+    R: FnMut(u16) + 'static,
 {
     let mut session = EtwSession::new();
     let ancillary = session.ancillary_data();
@@ -204,6 +236,11 @@ where
             Some(r) => r,
             None => return Ok(()),
         };
+
+        // Observe the raw record identity before attempting a decode, so
+        // callers can detect that an event of interest arrived even if the
+        // decode below fails.
+        on_record(ancillary_ref.id());
 
         let mut decoder = decoder.borrow_mut();
 
@@ -309,13 +346,36 @@ fn find_event<'a>(
         })
 }
 
+/// Drives `session` until `stop` returns `true` (or `TEST_TIMEOUT`
+/// elapses), then returns a borrowed snapshot of the captured events.
+///
+/// `stop` runs on the `parse_until` worker thread (see
+/// [`EtwSession::parse_until`]), so it must only read cross-thread-safe
+/// state — e.g. an `Arc<AtomicUsize>`/`Arc<AtomicBool>` updated from the
+/// capture callback.  Takes `session` by value because `parse_until`
+/// consumes `self`.
+fn drive_until<'a>(
+    session: EtwSession,
+    session_name: &str,
+    captured: &'a Writable<Vec<CapturedEvent>>,
+    stop: impl Fn() -> bool + Send + 'static,
+) -> std::cell::Ref<'a, Vec<CapturedEvent>> {
+    let deadline = Instant::now() + TEST_TIMEOUT;
+    session
+        .parse_until(session_name, move || {
+            stop() || Instant::now() >= deadline
+        })
+        .expect("parse_until failed (is the test running elevated?)");
+
+    captured.borrow()
+}
+
 /// Runs `session` until `expected` events have been captured (or
 /// `TEST_TIMEOUT` elapses), then asserts the minimum count and returns a
 /// borrowed snapshot of the captured events.
 ///
 /// Centralises the `parse_until` + deadline + minimum-count assertion
-/// pattern shared by every test in this file.  Takes `session` by value
-/// because [`EtwSession::parse_until`] consumes `self`.
+/// pattern shared by the TraceLogging tests in this file.
 fn drive_to_completion<'a>(
     session: EtwSession,
     session_name: &str,
@@ -323,15 +383,10 @@ fn drive_to_completion<'a>(
     counter: Arc<AtomicUsize>,
     expected: usize,
 ) -> std::cell::Ref<'a, Vec<CapturedEvent>> {
-    let deadline = Instant::now() + TEST_TIMEOUT;
-    session
-        .parse_until(session_name, move || {
-            counter.load(Ordering::Relaxed) >= expected
-                || Instant::now() >= deadline
-        })
-        .expect("parse_until failed (is the test running elevated?)");
+    let snapshot = drive_until(session, session_name, captured, move || {
+        counter.load(Ordering::Relaxed) >= expected
+    });
 
-    let snapshot = captured.borrow();
     assert!(
         snapshot.len() >= expected,
         "expected at least {expected} captured events, got {} ({:?})",
@@ -1026,17 +1081,35 @@ fn tdh_decodes_tracelogging_static_nested_struct() {
 /// * the manifest resolved to a real field layout (non-empty fields), and
 /// * the `TaskNameOffset` event-name path works (a `ProcessStart` /
 ///   `ProcessStop` Task name is surfaced).
+///
+/// For reliability the test does not wait for an arbitrary total event
+/// count: it watches the raw records for the process-lifetime events it
+/// actually validates (`ProcessStart` Id 1 / `ProcessStop` Id 2) and stops
+/// the moment one is observed.  Because that watch fires *before* decode,
+/// a broken decode fails the assertions below with a clear message instead
+/// of spinning until `TEST_TIMEOUT`.
 #[ignore]
 #[test]
 fn tdh_decodes_manifest_kernel_process_events() {
     let provider_guid = Guid::from_u128(KERNEL_PROCESS_PROVIDER);
 
-    let (captured, counter, callback) = make_capture_sink();
+    let (captured, _counter, callback) = make_capture_sink();
 
-    let mut session = build_capturing_session(
+    // Set once a ProcessStart/ProcessStop record is seen on the wire
+    // (independent of decode success), and used as the parse stop
+    // condition below.
+    let saw_target = Arc::new(AtomicBool::new(false));
+    let saw_target_for_cb = saw_target.clone();
+
+    let mut session = build_capturing_session_observed(
         provider_guid,
         "OneCollect.TdhIntegration.Manifest.Wide",
         callback,
+        move |id| {
+            if KERNEL_PROCESS_EVENT_IDS.contains(&id) {
+                saw_target_for_cb.store(true, Ordering::Relaxed);
+            }
+        },
     );
 
     // Trigger process-lifetime events once the session has enabled the
@@ -1050,12 +1123,16 @@ fn tdh_decodes_manifest_kernel_process_events() {
     //       fields such as ProcessID, ImageName, ...
     //   ProcessStop  (Id 2, Task "ProcessStop")
     //
-    // Each `cmd /c exit` produces one start and one stop, so a small
-    // spawn loop comfortably clears the capture threshold.
+    // A shared stop flag lets the spawner exit the instant capture is
+    // done, so we spawn only a handful of processes instead of hundreds.
+    // The `TEST_TIMEOUT` deadline remains as a backstop.
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_for_thread = stop.clone();
     session.add_started_callback(move |_ctx| {
+        let stop = stop_for_thread.clone();
         std::thread::spawn(move || {
             let deadline = Instant::now() + TEST_TIMEOUT;
-            while Instant::now() < deadline {
+            while !stop.load(Ordering::Relaxed) && Instant::now() < deadline {
                 let _ = std::process::Command::new("cmd.exe")
                     .args(["/c", "exit"])
                     .stdin(std::process::Stdio::null())
@@ -1067,15 +1144,19 @@ fn tdh_decodes_manifest_kernel_process_events() {
         });
     });
 
-    // Collect a batch so the sample is very likely to include Task-bearing
-    // ProcessStart / ProcessStop events (rather than only Task-less ones).
-    let captured = drive_to_completion(
+    // Drive until a ProcessStart/ProcessStop record has actually been
+    // observed (or `TEST_TIMEOUT` elapses), rather than waiting for an
+    // arbitrary number of unrelated Kernel-Process events that may not
+    // include the ones this test validates.
+    let captured = drive_until(
         session,
         "one_collect_tdh_manifest",
         &captured,
-        counter,
-        10,
+        move || saw_target.load(Ordering::Relaxed),
     );
+
+    // Capture is complete; signal the spawner to stop immediately.
+    stop.store(true, Ordering::Relaxed);
 
     // Every captured event already proves an `Ok` manifest decode; assert
     // at least one resolved to a real manifest field layout.
