@@ -4,16 +4,18 @@
 //! # Registered ETW provider enumeration
 //!
 //! This module wraps the Windows Trace Data Helper (TDH)
-//! `TdhEnumerateProviders` API to enumerate every provider registered in the
-//! system provider database, returning a case-insensitive
-//! `lowercased-name -> RegisteredProvider` map.
+//! `TdhEnumerateProviders` API to visit every provider registered in the
+//! system provider database, invoking a caller-supplied closure with each
+//! provider's name and [`RegisteredProvider`] details.
 //!
-//! The database is enumerated in a single pass, so resolving N provider names
-//! costs one `TdhEnumerateProviders` call rather than N.  Both manifest-based
-//! providers (`SchemaSource == 0`) and classic MOF providers
-//! (`SchemaSource == 1`) are included.
+//! The database is enumerated in a single pass, so the closure sees every
+//! provider from one `TdhEnumerateProviders` call. The caller decides what to
+//! keep (e.g. matching a configured set of names) and can stop early by
+//! returning [`ControlFlow::Break`], so no full map is ever materialized.
+//! Both manifest-based providers (`SchemaSource == 0`) and classic MOF
+//! providers (`SchemaSource == 1`) are visited.
 
-use std::collections::HashMap;
+use std::ops::ControlFlow;
 
 use crate::Guid;
 
@@ -44,21 +46,27 @@ fn win32_guid_to_guid(g: &windows_sys::core::GUID) -> Guid {
     }
 }
 
-/// Enumerate every provider registered in the system provider database via the
-/// Windows TDH `TdhEnumerateProviders` API, returning a case-insensitive
-/// `lowercased-name -> RegisteredProvider` map.
+/// Visit every provider registered in the system provider database via the
+/// Windows TDH `TdhEnumerateProviders` API, calling `f` with each provider's
+/// name and [`RegisteredProvider`] details.
 ///
-/// The whole database is read **once**; callers should memoize the result so
-/// resolving N configured names costs a single enumeration rather than N.
-/// Includes both manifest-based providers (`SchemaSource == 0`) and classic MOF
-/// providers (`SchemaSource == 1`).  On a duplicate name the first entry wins.
+/// The whole database is read in a **single** enumeration pass; `f` is invoked
+/// once per provider in enumeration order. Provider names are passed lowercased
+/// for case-insensitive matching. The caller decides what to keep and may stop
+/// early by returning [`ControlFlow::Break`] (e.g. once every configured name
+/// has been found), avoiding a full-map allocation. Both manifest-based
+/// providers (`SchemaSource == 0`) and classic MOF providers
+/// (`SchemaSource == 1`) are visited. Duplicate names are visited in
+/// enumeration order, so a caller building a map keeps the first entry per name.
 ///
 /// # Errors
 ///
 /// Returns an error only when the TDH API itself fails unexpectedly, so a
 /// genuine lookup miss is never silently misresolved.
 #[allow(unsafe_code)]
-pub fn registered_providers() -> anyhow::Result<HashMap<String, RegisteredProvider>> {
+pub fn for_each_registered_provider(
+    mut f: impl FnMut(&str, RegisteredProvider) -> ControlFlow<()>,
+) -> anyhow::Result<()> {
     const ERROR_SUCCESS: u32 = 0;
     const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 
@@ -72,7 +80,7 @@ pub fn registered_providers() -> anyhow::Result<HashMap<String, RegisteredProvid
     }
     if (buffer_size as usize) < std::mem::size_of::<PROVIDER_ENUMERATION_INFO>() {
         // Empty or header-less result: nothing to enumerate.
-        return Ok(HashMap::new());
+        return Ok(());
     }
 
     // Allocate a `u32`-aligned buffer: `PROVIDER_ENUMERATION_INFO` and
@@ -125,7 +133,6 @@ pub fn registered_providers() -> anyhow::Result<HashMap<String, RegisteredProvid
     // raw pointer to a place is safe; the later dereferences below are not.
     let array_ptr = (&raw const header.TraceProviderInfoArray).cast::<TRACE_PROVIDER_INFO>();
 
-    let mut map: HashMap<String, RegisteredProvider> = HashMap::with_capacity(count);
     for i in 0..count {
         // SAFETY: `i < count == NumberOfProviders`, so element `i` lies within
         // the buffer TDH populated.
@@ -136,8 +143,8 @@ pub fn registered_providers() -> anyhow::Result<HashMap<String, RegisteredProvid
             continue;
         }
         // Skip empty names: a `ProviderNameOffset` that points straight at a
-        // UTF-16 NUL decodes to `""`, which would otherwise insert a bogus
-        // empty-key lookup target from a malformed/partial TDH entry.
+        // UTF-16 NUL decodes to `""`, which would otherwise hand the caller a
+        // bogus empty-key lookup target from a malformed/partial TDH entry.
         let Some(provider_name) = read_utf16z(bytes, name_offset).filter(|s| !s.is_empty()) else {
             continue;
         };
@@ -145,13 +152,13 @@ pub fn registered_providers() -> anyhow::Result<HashMap<String, RegisteredProvid
             guid: win32_guid_to_guid(&info.ProviderGuid),
             schema_source: info.SchemaSource,
         };
-        // First entry wins on duplicate names.
-        let _ = map
-            .entry(provider_name.to_ascii_lowercase())
-            .or_insert(provider);
+        // Hand the provider to the caller; a `Break` stops enumeration early.
+        if f(&provider_name.to_ascii_lowercase(), provider).is_break() {
+            break;
+        }
     }
 
-    Ok(map)
+    Ok(())
 }
 
 /// Read a null-terminated UTF-16 (little-endian) string starting at
