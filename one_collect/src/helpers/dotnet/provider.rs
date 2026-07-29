@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-use crate::Guid;
+use crate::{Guid, guid_from_provider_name_hash};
 
 pub(crate) fn event_full_name(provider_name: &str, guid: Guid, event_name: &str) -> String {
     use std::fmt::Write;
@@ -55,9 +55,9 @@ pub(crate) fn guid_from_provider(provider_name: &str) -> anyhow::Result<Guid> {
                 }
             } else {
                 /* Event Source: name-hashed control GUID.  Delegates to the
-                 * shared `Guid::from_eventsource_name` so the namespace seed
+                 * shared `guid_from_provider_name_hash` so the namespace seed
                  * and encoding live in exactly one place. */
-                Ok(Guid::from_eventsource_name(provider_name))
+                Ok(guid_from_provider_name_hash(provider_name))
             }
         }
     }
@@ -105,7 +105,7 @@ mod tests {
             Guid::from_u128(0xe13c0d23_ccbc_4e12_931b_d9cc2eee27e4).to_bytes());
     }
 
-    /// A non-special name now delegates to `Guid::from_eventsource_name`; verify
+    /// A non-special name now delegates to `guid_from_provider_name_hash`; verify
     /// the result is byte-identical to that shared primitive (the refactor must
     /// not change any resolved GUID).
     #[test]
@@ -113,7 +113,7 @@ mod tests {
         let name = "OneCollect-Test-Provider";
         assert_eq!(
             guid_from_provider(name).unwrap().to_bytes(),
-            Guid::from_eventsource_name(name).to_bytes());
+            guid_from_provider_name_hash(name).to_bytes());
     }
 
     /// A `{GUID}` literal is still parsed directly.
