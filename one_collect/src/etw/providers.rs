@@ -184,7 +184,7 @@ fn read_utf16z(bytes: &[u8], byte_offset: usize) -> Option<String> {
 /// Resolve a self-describing (EventSource / TraceLogging) provider *name* to
 /// its ETW control GUID.
 ///
-/// Where [`registered_providers`] answers "which GUID is *registered* for this
+/// Where [`for_each_registered_provider`] answers "which GUID is *registered* for this
 /// name?" by consulting the OS provider database, this answers the complement:
 /// self-describing providers are **not** registered — their control GUID is a
 /// deterministic hash of the name.  Together the two cover name → GUID
