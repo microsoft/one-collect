@@ -51,8 +51,9 @@ fn win32_guid_to_guid(g: &windows_sys::core::GUID) -> Guid {
 /// name and [`RegisteredProvider`] details.
 ///
 /// The whole database is read in a **single** enumeration pass; `f` is invoked
-/// once per provider in enumeration order. Provider names are passed lowercased
-/// for case-insensitive matching. The caller decides what to keep and may stop
+/// once per provider in enumeration order. Provider names are passed in
+/// Unicode lowercase (`str::to_lowercase`) for case-insensitive matching. The
+/// caller decides what to keep and may stop
 /// early by returning [`ControlFlow::Break`] (e.g. once every configured name
 /// has been found), avoiding a full-map allocation. Both manifest-based
 /// providers (`SchemaSource == 0`) and classic MOF providers
@@ -83,77 +84,112 @@ pub fn for_each_registered_provider(
         return Ok(());
     }
 
-    // Allocate a `u32`-aligned buffer: `PROVIDER_ENUMERATION_INFO` and
-    // `TRACE_PROVIDER_INFO` both have 4-byte alignment (`u32` / `GUID` fields),
-    // which a `Vec<u32>` satisfies. `Vec<u8>` would only be byte-aligned, which
-    // is undefined behaviour to reinterpret as these structs.
-    let elem_count = (buffer_size as usize).div_ceil(std::mem::size_of::<u32>());
-    let mut buffer: Vec<u32> = vec![0u32; elem_count];
-    let byte_len = buffer.len() * std::mem::size_of::<u32>();
+    // Fill call with a bounded retry: providers can be registered between
+    // probe and fill, causing one transient `ERROR_INSUFFICIENT_BUFFER`.
+    let mut retries_remaining = 1u8;
+    let final_bytes: Vec<u8> = loop {
+        // Allocate a `u32`-aligned buffer: `PROVIDER_ENUMERATION_INFO` and
+        // `TRACE_PROVIDER_INFO` both have 4-byte alignment (`u32` / `GUID`
+        // fields), which a `Vec<u32>` satisfies.
+        let elem_count = (buffer_size as usize).div_ceil(std::mem::size_of::<u32>());
+        let mut buffer: Vec<u32> = vec![0u32; elem_count];
+        let alloc_byte_len = buffer.len() * std::mem::size_of::<u32>();
 
-    // SAFETY: `buffer` is at least `buffer_size` bytes and 4-byte aligned; TDH
-    // fills it with a `PROVIDER_ENUMERATION_INFO` header followed by the
-    // provider array.
-    let status = unsafe {
-        TdhEnumerateProviders(
-            buffer.as_mut_ptr() as *mut PROVIDER_ENUMERATION_INFO,
-            &mut buffer_size,
-        )
-    };
-    if status != ERROR_SUCCESS {
-        // A second `ERROR_INSUFFICIENT_BUFFER` can happen if providers were
-        // registered between the two calls; treat any non-success as a lookup
-        // failure so we never read a partially populated buffer.
+        // SAFETY: `buffer` is writable and 4-byte aligned; TDH writes at most
+        // `query_size` bytes and updates it with the required/used size.
+        let mut query_size = buffer_size;
+        let status = unsafe {
+            TdhEnumerateProviders(
+                buffer.as_mut_ptr() as *mut PROVIDER_ENUMERATION_INFO,
+                &mut query_size,
+            )
+        };
+
+        if status == ERROR_SUCCESS {
+            let used_byte_len = query_size as usize;
+            if used_byte_len > alloc_byte_len {
+                anyhow::bail!(
+                    "TdhEnumerateProviders returned size {used_byte_len} larger than allocation {alloc_byte_len}"
+                );
+            }
+            // Parse only the byte count returned by TDH, not the full
+            // allocation length.
+            // SAFETY: `buffer` owns `alloc_byte_len` valid bytes; `used_byte_len`
+            // is range-checked above.
+            let used = unsafe {
+                std::slice::from_raw_parts(buffer.as_ptr() as *const u8, used_byte_len)
+            };
+            break used.to_vec();
+        }
+
+        if status == ERROR_INSUFFICIENT_BUFFER && retries_remaining > 0 {
+            retries_remaining -= 1;
+            // Use TDH's returned required size when available.
+            if query_size > buffer_size {
+                buffer_size = query_size;
+            }
+            continue;
+        }
+
         anyhow::bail!("TdhEnumerateProviders (fill) failed with Win32 error {status}");
+    };
+
+    for_each_provider_in_buffer(&final_bytes, &mut f)?;
+
+    Ok(())
+}
+
+#[allow(unsafe_code)]
+fn for_each_provider_in_buffer(
+    bytes: &[u8],
+    f: &mut impl FnMut(&str, RegisteredProvider) -> ControlFlow<()>,
+) -> anyhow::Result<()> {
+    if bytes.len() < std::mem::size_of::<PROVIDER_ENUMERATION_INFO>() {
+        return Ok(());
     }
 
-    // Byte view for reading UTF-16 provider names by their buffer offset.
-    // SAFETY: `buffer` owns `byte_len` valid, initialized bytes.
-    let bytes: &[u8] =
-        unsafe { std::slice::from_raw_parts(buffer.as_ptr() as *const u8, byte_len) };
-
-    // SAFETY: the buffer starts with a valid `PROVIDER_ENUMERATION_INFO`
-    // (guaranteed at least header-sized above) and is 4-byte aligned.
-    let header = unsafe { &*(buffer.as_ptr() as *const PROVIDER_ENUMERATION_INFO) };
-    let count = header.NumberOfProviders as usize;
-
-    // Defensive bound: the provider array must fit within the buffer TDH
-    // reported. `count` comes from the OS-populated header; clamp it to what
-    // the buffer can actually hold so the `array_ptr.add(i)` reads below stay
-    // in-bounds even if the header and buffer size were ever inconsistent.
     let array_offset = std::mem::size_of::<PROVIDER_ENUMERATION_INFO>()
         .saturating_sub(std::mem::size_of::<TRACE_PROVIDER_INFO>());
     let max_entries =
-        byte_len.saturating_sub(array_offset) / std::mem::size_of::<TRACE_PROVIDER_INFO>();
-    let count = count.min(max_entries);
+        bytes.len().saturating_sub(array_offset) / std::mem::size_of::<TRACE_PROVIDER_INFO>();
 
-    // Base pointer of the trailing flexible `TRACE_PROVIDER_INFO` array. The
-    // binding types it as `[_; 1]`; take a raw pointer to the field and index
-    // from it rather than materializing an out-of-bounds `&[_; 1]`. Forming a
-    // raw pointer to a place is safe; the later dereferences below are not.
-    let array_ptr = (&raw const header.TraceProviderInfoArray).cast::<TRACE_PROVIDER_INFO>();
+    // SAFETY: We checked the slice is large enough for a header-sized read and
+    // use `read_unaligned` to avoid alignment assumptions.
+    let header: PROVIDER_ENUMERATION_INFO =
+        unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const PROVIDER_ENUMERATION_INFO) };
+    let count = (header.NumberOfProviders as usize).min(max_entries);
 
     for i in 0..count {
-        // SAFETY: `i < count == NumberOfProviders`, so element `i` lies within
-        // the buffer TDH populated.
-        let info = unsafe { &*array_ptr.add(i) };
+        let entry_offset = array_offset + i * std::mem::size_of::<TRACE_PROVIDER_INFO>();
+        if entry_offset + std::mem::size_of::<TRACE_PROVIDER_INFO>() > bytes.len() {
+            break;
+        }
+        // SAFETY: Bounds checked above; `read_unaligned` avoids alignment
+        // assumptions for the borrowed byte slice.
+        let info: TRACE_PROVIDER_INFO = unsafe {
+            std::ptr::read_unaligned(bytes.as_ptr().add(entry_offset) as *const TRACE_PROVIDER_INFO)
+        };
+
         let name_offset = info.ProviderNameOffset as usize;
         // A zero or out-of-range offset means the entry has no usable name.
-        if name_offset == 0 || name_offset >= byte_len {
+        if name_offset == 0 || name_offset >= bytes.len() {
             continue;
         }
+
         // Skip empty names: a `ProviderNameOffset` that points straight at a
         // UTF-16 NUL decodes to `""`, which would otherwise hand the caller a
         // bogus empty-key lookup target from a malformed/partial TDH entry.
         let Some(provider_name) = read_utf16z(bytes, name_offset).filter(|s| !s.is_empty()) else {
             continue;
         };
+
         let provider = RegisteredProvider {
             guid: win32_guid_to_guid(&info.ProviderGuid),
             schema_source: info.SchemaSource,
         };
-        // Hand the provider to the caller; a `Break` stops enumeration early.
-        if f(&provider_name.to_ascii_lowercase(), provider).is_break() {
+
+        // Use Unicode lowercase for case-insensitive matching semantics.
+        if f(&provider_name.to_lowercase(), provider).is_break() {
             break;
         }
     }
@@ -179,4 +215,117 @@ fn read_utf16z(bytes: &[u8], byte_offset: usize) -> Option<String> {
         i += 2;
     }
     Some(String::from_utf16_lossy(&units))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use windows_sys::core::GUID;
+
+    fn write_utf16z(buf: &mut Vec<u8>, s: &str) -> u32 {
+        let off = buf.len() as u32;
+        for u in s.encode_utf16() {
+            buf.extend_from_slice(&u.to_le_bytes());
+        }
+        buf.extend_from_slice(&0u16.to_le_bytes());
+        off
+    }
+
+    #[allow(unsafe_code)]
+    fn make_provider_enum_buffer(entries: &[(GUID, u32, Option<u32>)], names: &[&str]) -> Vec<u8> {
+        let array_offset = std::mem::size_of::<PROVIDER_ENUMERATION_INFO>()
+            .saturating_sub(std::mem::size_of::<TRACE_PROVIDER_INFO>());
+        let entries_bytes = entries.len() * std::mem::size_of::<TRACE_PROVIDER_INFO>();
+
+        let mut out = vec![0u8; array_offset + entries_bytes];
+        let name_offsets: Vec<u32> = names
+            .iter()
+            .map(|name| write_utf16z(&mut out, name))
+            .collect();
+
+        let mut header: PROVIDER_ENUMERATION_INFO = unsafe { std::mem::zeroed() };
+        header.NumberOfProviders = entries.len() as u32;
+        // SAFETY: `out` has at least header size bytes; unaligned write is
+        // accepted for byte buffers.
+        unsafe {
+            std::ptr::write_unaligned(out.as_mut_ptr() as *mut PROVIDER_ENUMERATION_INFO, header)
+        };
+
+        for (i, (guid, schema_source, maybe_name_idx)) in entries.iter().enumerate() {
+            let mut info: TRACE_PROVIDER_INFO = unsafe { std::mem::zeroed() };
+            info.ProviderGuid = *guid;
+            info.SchemaSource = *schema_source;
+            info.ProviderNameOffset = maybe_name_idx
+                .and_then(|idx| name_offsets.get(idx as usize).copied())
+                .unwrap_or(u32::MAX);
+
+            let off = array_offset + i * std::mem::size_of::<TRACE_PROVIDER_INFO>();
+            // SAFETY: `off` is computed within the allocated entry area;
+            // unaligned write is accepted for byte buffers.
+            unsafe {
+                std::ptr::write_unaligned(
+                    out.as_mut_ptr().add(off) as *mut TRACE_PROVIDER_INFO,
+                    info,
+                )
+            };
+        }
+
+        out
+    }
+
+    #[test]
+    fn skips_malformed_name_offsets() {
+        let g1 = GUID {
+            data1: 1,
+            data2: 2,
+            data3: 3,
+            data4: [4; 8],
+        };
+        let g2 = GUID {
+            data1: 9,
+            data2: 8,
+            data3: 7,
+            data4: [6; 8],
+        };
+
+        // First entry points to an invalid offset and must be skipped;
+        // second entry points to "ValidName" and must be delivered.
+        let bytes = make_provider_enum_buffer(&[(g1, 0, None), (g2, 1, Some(0))], &["ValidName"]);
+
+        let mut names = Vec::<String>::new();
+        for_each_provider_in_buffer(&bytes, &mut |name, _| {
+            names.push(name.to_string());
+            ControlFlow::Continue(())
+        })
+        .unwrap();
+
+        assert_eq!(names, vec!["validname".to_string()]);
+    }
+
+    #[test]
+    fn respects_early_break() {
+        let g1 = GUID {
+            data1: 10,
+            data2: 11,
+            data3: 12,
+            data4: [13; 8],
+        };
+        let g2 = GUID {
+            data1: 20,
+            data2: 21,
+            data3: 22,
+            data4: [23; 8],
+        };
+        let bytes = make_provider_enum_buffer(&[(g1, 0, Some(0)), (g2, 1, Some(1))], &["First", "Second"]);
+
+        let mut seen = 0usize;
+        for_each_provider_in_buffer(&bytes, &mut |_name, _| {
+            seen += 1;
+            ControlFlow::Break(())
+        })
+        .unwrap();
+
+        assert_eq!(seen, 1, "Break must stop enumeration at first callback");
+    }
 }
