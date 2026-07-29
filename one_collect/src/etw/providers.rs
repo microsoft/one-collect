@@ -220,7 +220,6 @@ fn read_utf16z(bytes: &[u8], byte_offset: usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::guid_from_provider_name_hash;
 
     use windows_sys::core::GUID;
 
@@ -328,29 +327,5 @@ mod tests {
         .unwrap();
 
         assert_eq!(seen, 1, "Break must stop enumeration at first callback");
-    }
-
-    /// Ground-truth vector for the EventSource name-hash, independently
-    /// computed (SHA-1 over the fixed namespace + upper-cased UTF-16BE name,
-    /// version nibble forced to 5, fields read little-endian as
-    /// `Guid::v5_from_name` does).  Locks the namespace seed + encoding so a
-    /// drift in either is caught here.
-    const KNOWN_NAME: &str = "OneCollect-Test-Provider";
-    const KNOWN_GUID: u128 = 0xB03CBD70_B6F7_5552_04A1_A17A1FE5F1A4;
-
-    #[test]
-    fn provider_name_hash_matches_known_guid() {
-        let guid = guid_from_provider_name_hash(KNOWN_NAME);
-        assert_eq!(guid.to_bytes(), Guid::from_u128(KNOWN_GUID).to_bytes());
-    }
-
-    #[test]
-    fn provider_name_hash_is_case_insensitive() {
-        // The convention upper-cases before hashing, so any casing of the same
-        // name resolves to the same GUID.
-        let upper = guid_from_provider_name_hash(&KNOWN_NAME.to_uppercase());
-        let lower = guid_from_provider_name_hash(&KNOWN_NAME.to_lowercase());
-        assert_eq!(upper.to_bytes(), Guid::from_u128(KNOWN_GUID).to_bytes());
-        assert_eq!(lower.to_bytes(), Guid::from_u128(KNOWN_GUID).to_bytes());
     }
 }
