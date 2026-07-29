@@ -18,11 +18,8 @@ mod events;
 pub mod providers;
 pub mod tdh;
 
-pub use providers::{
-    RegisteredProvider,
-    for_each_registered_provider,
-    guid_from_tracelogging_name,
-};
+pub use providers::{RegisteredProvider, for_each_registered_provider};
+pub use crate::guid_from_provider_name_hash;
 
 use abi::{
     EVENT_RECORD,
