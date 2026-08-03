@@ -722,6 +722,7 @@ mod go {
 
     /// The ELF section name that holds the Go line table when not stripped.
     const GO_PCLNTAB_SECTION: &str = ".gopclntab";
+    const GO_PCLNTAB_SCAN_OVERLAP: usize = 7;
     pub(super) const GO_ELF_SECTION_LIMIT: usize = 2048;
 
     pub(super) fn go_elf_section_count_allowed(reader: &mut (impl Read + Seek)) -> bool {
@@ -1182,6 +1183,8 @@ mod go {
             None
         };
 
+        let mut scan_buffer =
+            vec![0u8; scan_chunk_size.checked_add(GO_PCLNTAB_SCAN_OVERLAP)?];
         let mut ph_offset = header.e_phoff;
         for _ in 0..header.e_phnum {
             reader.seek(SeekFrom::Start(ph_offset)).ok()?;
@@ -1201,7 +1204,7 @@ mod go {
                     ph.p_filesz,
                     ph.p_vaddr,
                     text_vaddr,
-                    scan_chunk_size,
+                    &mut scan_buffer,
                 ) {
                     return Some(location);
                 }
@@ -1217,12 +1220,10 @@ mod go {
         seg_filesz: u64,
         seg_vaddr: u64,
         text_vaddr: Option<u64>,
-        scan_chunk_size: usize,
+        bytes: &mut [u8],
     ) -> Option<crate::ruwind::go_pclntab::GoPclnTabLocation> {
-        const SCAN_OVERLAP: usize = 7;
-
         let seg_end = seg_offset.checked_add(seg_filesz)?;
-        let mut bytes = vec![0u8; scan_chunk_size.checked_add(SCAN_OVERLAP)?];
+        let scan_chunk_size = bytes.len().checked_sub(GO_PCLNTAB_SCAN_OVERLAP)?;
         let mut read_offset = seg_offset;
         let mut carry = 0usize;
 
@@ -1290,7 +1291,7 @@ mod go {
                 i += 1;
             }
 
-            carry = buffer_len.min(SCAN_OVERLAP);
+            carry = buffer_len.min(GO_PCLNTAB_SCAN_OVERLAP);
             bytes.copy_within(buffer_len - carry..buffer_len, 0);
             read_offset = read_offset.checked_add(read_len as u64)?;
         }
