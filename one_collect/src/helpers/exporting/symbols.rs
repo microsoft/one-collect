@@ -1,10 +1,13 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-use std::{fs::File, io::{BufRead, BufReader, Seek, SeekFrom}};
+use crate::ruwind::elf::{symbol_rva, ElfLoadHeader, ElfSymbol, ElfSymbolIterator};
+use crate::ruwind::go_pclntab::{GoPclnTab, GoPclnTabFileReader};
 use std::collections::HashSet;
-use crate::ruwind::elf::{ElfLoadHeader, ElfSymbol, ElfSymbolIterator, symbol_rva};
-use crate::ruwind::go_pclntab::GoPclnTab;
+use std::{
+    fs::File,
+    io::{BufRead, BufReader, Seek, SeekFrom},
+};
 use tracing::{info, trace, warn};
 
 use crate::helpers::exporting::ExportMachine;
@@ -418,14 +421,13 @@ pub struct PerfMapSymbolReader {
 /// by Kubernetes). Function virtual addresses from the table are translated to
 /// file RVAs via [`symbol_rva`], identical to [`ElfSymbolReader`], so the two
 /// can be layered (unioned) for the same mapping.
-pub(crate) struct GoPclnTabSymbolReader {
-    tab: GoPclnTab,
+#[doc(hidden)]
+pub struct GoPclnTabSymbolReader {
+    tab: GoPclnTab<GoPclnTabFileReader>,
     load_header: ElfLoadHeader,
     page_mask: u64,
-    index: usize,
     current_start: u64,
     current_end: u64,
-    current_name: String,
     valid: bool,
 }
 
@@ -433,24 +435,22 @@ impl GoPclnTabSymbolReader {
     /// Attempts to build a reader from `file`. Returns `None` if the file has no
     /// usable `.gopclntab` section or the table cannot be parsed (e.g. an
     /// unsupported/older Go layout), so callers fall back to ELF symbols.
-    pub(crate) fn new(
-        mut file: File,
-        load_header: ElfLoadHeader,
-        system_page_size: u64) -> Option<Self> {
+    pub fn new(mut file: File, load_header: ElfLoadHeader, system_page_size: u64) -> Option<Self> {
         // Prefer the .gopclntab section; fall back to scanning for a stripped
         // (section-header-removed) line table.
-        let (data, text_start) = crate::ruwind::elf::read_go_pclntab(&mut file)
+        let location = crate::ruwind::elf::read_go_pclntab(&mut file)
             .or_else(|| crate::ruwind::elf::recover_go_pclntab(&mut file))?;
-        let tab = GoPclnTab::parse(data, text_start)?;
+        let tab = GoPclnTab::open(
+            GoPclnTabFileReader::new(file, location.file_offset()),
+            location,
+        )?;
 
         Some(Self {
             tab,
             load_header,
             page_mask: crate::page_size_to_mask(system_page_size),
-            index: 0,
             current_start: 0,
             current_end: 0,
-            current_name: String::with_capacity(256),
             valid: false,
         })
     }
@@ -458,41 +458,41 @@ impl GoPclnTabSymbolReader {
 
 impl ExportSymbolReader for GoPclnTabSymbolReader {
     fn reset(&mut self) {
-        self.index = 0;
+        self.tab.reset();
         self.valid = false;
     }
 
     fn next(&mut self) -> bool {
         let p_vaddr = self.load_header.p_vaddr();
 
-        while self.index < self.tab.len() {
-            let i = self.index;
-            self.index += 1;
+        while self.tab.next() {
+            let start_va = self.tab.start();
+            let end_va = self.tab.end();
 
-            if let Some((start_va, end_va, name)) = self.tab.func(i) {
-                // Guard against entries below the loaded segment (would
-                // underflow the RVA translation).
-                if start_va < p_vaddr {
-                    continue;
-                }
-
-                let start = symbol_rva(start_va, &self.load_header, self.page_mask);
-
-                // pclntab end is the next function's entry (exclusive); make it
-                // inclusive to match ElfSymbol semantics and avoid overlapping
-                // the following function's start.
-                let end_exclusive = if end_va > start_va { end_va } else { start_va + 1 };
-                let end = symbol_rva(end_exclusive, &self.load_header, self.page_mask)
-                    .saturating_sub(1)
-                    .max(start);
-
-                self.current_start = start;
-                self.current_end = end;
-                self.current_name.clear();
-                self.current_name.push_str(name);
-                self.valid = true;
-                return true;
+            // Guard against entries below the loaded segment (would
+            // underflow the RVA translation).
+            if start_va < p_vaddr {
+                continue;
             }
+
+            let start = symbol_rva(start_va, &self.load_header, self.page_mask);
+
+            // pclntab end is the next function's entry (exclusive); make it
+            // inclusive to match ElfSymbol semantics and avoid overlapping
+            // the following function's start.
+            let end_exclusive = if end_va > start_va {
+                end_va
+            } else {
+                start_va + 1
+            };
+            let end = symbol_rva(end_exclusive, &self.load_header, self.page_mask)
+                .saturating_sub(1)
+                .max(start);
+
+            self.current_start = start;
+            self.current_end = end;
+            self.valid = true;
+            return true;
         }
 
         self.valid = false;
@@ -500,15 +500,27 @@ impl ExportSymbolReader for GoPclnTabSymbolReader {
     }
 
     fn start(&self) -> u64 {
-        if self.valid { self.current_start } else { 0 }
+        if self.valid {
+            self.current_start
+        } else {
+            0
+        }
     }
 
     fn end(&self) -> u64 {
-        if self.valid { self.current_end } else { 0 }
+        if self.valid {
+            self.current_end
+        } else {
+            0
+        }
     }
 
     fn name(&self) -> &str {
-        if self.valid { &self.current_name } else { "" }
+        if self.valid {
+            self.tab.name()
+        } else {
+            ""
+        }
     }
 
     fn demangle(&mut self) -> Option<String> {
@@ -1189,19 +1201,82 @@ mod tests {
                 count += 1;
                 assert!(reader.start() <= reader.end());
                 assert!(!reader.name().is_empty());
-                assert!(reader.demangle().is_none(), "Go names must not be demangled");
+                assert!(
+                    reader.demangle().is_none(),
+                    "Go names must not be demangled"
+                );
                 if reader.name() == "main.main" {
                     found_main = true;
                 }
             }
-            assert!(count > 100, "{}: expected many symbols, got {}", name, count);
+            assert!(
+                count > 100,
+                "{}: expected many symbols, got {}",
+                name,
+                count
+            );
             assert!(found_main, "{}: main.main should resolve", name);
         }
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
+    fn symbol_benchmark_fixtures_match() {
+        use std::collections::HashMap;
+
+        let fixture_dir = std::env::current_dir().unwrap().join("../test/assets/go");
+        let elf_path = fixture_dir.join("symbol_benchmark_elf");
+        let go_path = fixture_dir.join("symbol_benchmark_go");
+        let page = system_page_size();
+
+        let mut elf_symbols = HashMap::new();
+        let mut elf = ElfSymbolReader::new(
+            File::open(&elf_path).expect("open ELF benchmark fixture"),
+            ElfLoadHeader::new(0, 0x400000),
+            page,
+        );
+        elf.reset();
+        while elf.next() {
+            elf_symbols.insert(elf.name().to_string(), elf.start());
+        }
+
+        let mut go = GoPclnTabSymbolReader::new(
+            File::open(&go_path).expect("open Go benchmark fixture"),
+            ElfLoadHeader::new(0, 0x400000),
+            page,
+        )
+        .expect("parse Go benchmark fixture");
+        go.reset();
+
+        let mut go_count = 0;
+        let mut shared_count = 0;
+        let mut found_target = false;
+        while go.next() {
+            go_count += 1;
+            if elf_symbols.get(go.name()) == Some(&go.start()) {
+                shared_count += 1;
+            }
+            if go.name() == "main.benchmarkTarget" {
+                found_target = true;
+            }
+        }
+
+        assert!(
+            elf_symbols.len() >= 1000,
+            "expected at least 1000 ELF symbols"
+        );
+        assert!(go_count >= 1000, "expected at least 1000 Go symbols");
+        assert!(
+            shared_count >= 1000,
+            "expected at least 1000 shared symbols"
+        );
+        assert!(found_target, "benchmark target should be present");
+    }
+
+    #[test]
     fn symbol_page_map() {
-        let mut map = SymbolPageMap::new(256);        map.mark_ip(0);
+        let mut map = SymbolPageMap::new(256);
+        map.mark_ip(0);
         map.mark_ip(257);
         map.mark_ip(1024);
 
