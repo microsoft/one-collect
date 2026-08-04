@@ -625,6 +625,13 @@ impl PerfSession {
     /// Borrow the per-CPU perf file descriptors backing this session,
     /// paired with their CPU index.
     ///
+    /// Only the CPUs selected by the builder's
+    /// [`RingBufSessionBuilder::with_target_cpu`] are returned (all CPUs
+    /// when no target is set). All-CPU events such as kernel records and
+    /// `no_cpu_mask` events still land on masked-out CPUs' rings and are
+    /// processed through the normal [`Self::parse_all`] path; they are
+    /// just not exposed as separately wakeable fds here.
+    ///
     /// Intended for consumers that want to wait on the perf fds directly
     /// (for example via `epoll(2)` or `tokio::io::unix::AsyncFd`) instead
     /// of relying on the built-in poll/sleep read loop. Pair this with

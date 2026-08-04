@@ -896,6 +896,22 @@ impl RingBufDataSource {
         Ok(())
     }
 
+    /// CPUs whose leader-ring fd should be exposed by
+    /// [`PerfDataSource::perf_fds`]. CPUs masked out by the builder's
+    /// `target_cpus` are excluded so the exposed fds match the
+    /// configured CPU set. Yields CPUs in `leader_ids` order;
+    /// [`PerfDataSource::perf_fds`] sorts the final result.
+    #[cfg(target_os = "linux")]
+    fn fd_cpus(&self) -> impl Iterator<Item = u32> + '_ {
+        self.leader_ids
+            .keys()
+            .copied()
+            .filter(move |cpu| match &self.target_cpus {
+                Some(target_cpus) => target_cpus.contains(&(*cpu as u16)),
+                None => true,
+            })
+    }
+
     fn read_time<'a>(
         reader: &'a CpuRingReader,
         cursor: &'a mut CpuRingCursor,
@@ -1358,23 +1374,30 @@ impl PerfDataSource for RingBufDataSource {
 
     #[cfg(target_os = "linux")]
     fn perf_fds(&self) -> Vec<(u32, BorrowedFd<'_>)> {
-        /* Walk leader_ids in CPU order so consumers get a deterministic
-         * iteration order. Each leader's per-CPU ring is the one the
-         * kernel marks readable; non-leader event types redirect into
-         * the same ring via `PERF_EVENT_IOC_SET_OUTPUT`, so their fds are
-         * not separately wakeable and are intentionally not exposed. */
-        let mut cpus: Vec<u32> = self.leader_ids.keys().copied().collect();
-        cpus.sort_unstable();
+        /* Each leader's per-CPU ring is the one the kernel marks
+         * readable; non-leader event types redirect into the same ring
+         * via `PERF_EVENT_IOC_SET_OUTPUT`, so their fds are not
+         * separately wakeable and are intentionally not exposed.
+         *
+         * Only CPUs selected by the builder's `target_cpus` are
+         * returned. Leader rings exist on every CPU (all-CPU events such
+         * as kernel records and `no_cpu_mask` events redirect into
+         * them), but a consumer that masked CPUs out should not be handed
+         * fds for them; that data still flows through the normal
+         * `parse_all` path. */
+        let mut fds: Vec<(u32, BorrowedFd<'_>)> = self
+            .fd_cpus()
+            .filter_map(|cpu| {
+                let leader_id = self.leader_ids[&cpu];
+                self.ring_bufs
+                    .get(&leader_id)
+                    .and_then(|buf| buf.borrowed_fd())
+                    .map(|fd| (cpu, fd))
+            })
+            .collect();
 
-        let mut fds = Vec::with_capacity(cpus.len());
-        for cpu in cpus {
-            let leader_id = self.leader_ids[&cpu];
-            if let Some(buf) = self.ring_bufs.get(&leader_id) {
-                if let Some(fd) = buf.borrowed_fd() {
-                    fds.push((cpu, fd));
-                }
-            }
-        }
+        /* Deterministic ascending CPU order for consumers. */
+        fds.sort_unstable_by_key(|(cpu, _)| *cpu);
         fds
     }
 
@@ -1409,6 +1432,56 @@ mod tests {
             .with_page_count(1)
             .with_kernel_events(kernel)
             .with_profiling_events(profiling);
+    }
+
+    #[test]
+    fn perf_fds_respects_target_cpus() {
+        /* Leader rings are created for every CPU (all-CPU events redirect
+         * into them), but fd_cpus must only select the CPUs in the
+         * builder's target_cpus. */
+        let mut source = RingBufDataSource::new(
+            1,
+            None,
+            Some(vec![3u16, 1u16]),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None);
+
+        for cpu in 0..4u32 {
+            source.leader_ids.insert(cpu, cpu as u64);
+        }
+
+        let mut cpus: Vec<u32> = source.fd_cpus().collect();
+        cpus.sort_unstable();
+        assert_eq!(vec![1u32, 3u32], cpus);
+    }
+
+    #[test]
+    fn fd_cpus_returns_all_when_unmasked() {
+        /* With no target_cpus, every leader CPU is selected. */
+        let mut source = RingBufDataSource::new(
+            1,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None);
+
+        for cpu in [2u32, 0u32, 1u32] {
+            source.leader_ids.insert(cpu, cpu as u64);
+        }
+
+        let mut cpus: Vec<u32> = source.fd_cpus().collect();
+        cpus.sort_unstable();
+        assert_eq!(vec![0u32, 1u32, 2u32], cpus);
     }
 
     #[test]
