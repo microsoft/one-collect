@@ -12,8 +12,8 @@
 //! provider from one `TdhEnumerateProviders` call. The caller decides what to
 //! keep (e.g. matching a configured set of names) and can stop early by
 //! returning [`ControlFlow::Break`], so no full map is ever materialized.
-//! Both manifest-based providers (`SchemaSource == 0`) and classic MOF
-//! providers (`SchemaSource == 1`) are visited.
+//! Every registered provider is surfaced regardless of schema source;
+//! unrecognized sources are reported as `ProviderSchemaSource::Unknown`.
 
 use std::ops::ControlFlow;
 
@@ -36,7 +36,7 @@ pub enum ProviderSchemaSource {
 
 impl ProviderSchemaSource {
     /// Return the raw TDH `SchemaSource` value.
-    pub fn as_raw(self) -> u32 {
+    pub const fn as_raw(self) -> u32 {
         match self {
             Self::Manifest => 0,
             Self::Wmi => 1,
@@ -67,7 +67,7 @@ pub struct RegisteredProvider {
 ///
 /// Both types are `#[repr(C)]` with identical `data1/2/3/4` fields, so this is
 /// a straight field copy.
-fn win32_guid_to_guid(g: &windows_sys::core::GUID) -> Guid {
+const fn win32_guid_to_guid(g: &windows_sys::core::GUID) -> Guid {
     Guid {
         data1: g.data1,
         data2: g.data2,
@@ -84,9 +84,9 @@ fn win32_guid_to_guid(g: &windows_sys::core::GUID) -> Guid {
 /// once per provider in enumeration order. Provider names are passed as
 /// registered by the OS. The caller decides what to keep and may stop
 /// early by returning [`ControlFlow::Break`] (e.g. once every configured name
-/// has been found), avoiding a full-map allocation. Both manifest-based
-/// providers (`SchemaSource == 0`) and classic MOF providers
-/// (`SchemaSource == 1`) are visited. Duplicate names are visited in
+/// has been found), avoiding a full-map allocation. Every registered provider
+/// is surfaced regardless of schema source; unrecognized sources are reported
+/// as [`ProviderSchemaSource::Unknown`]. Duplicate names are visited in
 /// enumeration order, so a caller building a map keeps the first entry per name.
 ///
 /// # Errors
@@ -117,7 +117,7 @@ pub fn for_each_registered_provider(
     // probe and fill, causing transient `ERROR_INSUFFICIENT_BUFFER` results.
     const MAX_FILL_RETRIES: u8 = 5;
     let mut retries_remaining = MAX_FILL_RETRIES;
-    let final_bytes: Vec<u8> = loop {
+    loop {
         // Allocate a `u32`-aligned buffer: `PROVIDER_ENUMERATION_INFO` and
         // `TRACE_PROVIDER_INFO` both have 4-byte alignment (`u32` / `GUID`
         // fields), which a `Vec<u32>` satisfies.
@@ -149,7 +149,7 @@ pub fn for_each_registered_provider(
             let used = unsafe {
                 std::slice::from_raw_parts(buffer.as_ptr() as *const u8, used_byte_len)
             };
-            break used.to_vec();
+            return for_each_provider_in_buffer(used, &mut f);
         }
 
         if status == ERROR_INSUFFICIENT_BUFFER && retries_remaining > 0 {
@@ -162,11 +162,7 @@ pub fn for_each_registered_provider(
         }
 
         anyhow::bail!("TdhEnumerateProviders (fill) failed with Win32 error {status}");
-    };
-
-    for_each_provider_in_buffer(&final_bytes, &mut f)?;
-
-    Ok(())
+    }
 }
 
 #[allow(unsafe_code)]
@@ -174,6 +170,14 @@ fn for_each_provider_in_buffer(
     bytes: &[u8],
     f: &mut impl FnMut(&str, RegisteredProvider) -> ControlFlow<()>,
 ) -> anyhow::Result<()> {
+    // Layout facts the unsafe reads below rely on. Alignment is not checked
+    // because every struct read uses `read_unaligned`.
+    const _: () = assert!(
+        std::mem::size_of::<PROVIDER_ENUMERATION_INFO>()
+            >= std::mem::size_of::<TRACE_PROVIDER_INFO>()
+    );
+    const _: () = assert!(std::mem::size_of::<TRACE_PROVIDER_INFO>() > 0);
+
     if bytes.len() < std::mem::size_of::<PROVIDER_ENUMERATION_INFO>() {
         return Ok(());
     }
@@ -233,17 +237,16 @@ fn read_utf16z(bytes: &[u8], byte_offset: usize) -> Option<String> {
     if byte_offset + 1 >= bytes.len() {
         return None;
     }
-    let mut units = Vec::new();
-    let mut i = byte_offset;
-    while i + 1 < bytes.len() {
-        let unit = u16::from_le_bytes([bytes[i], bytes[i + 1]]);
-        if unit == 0 {
-            break;
-        }
-        units.push(unit);
-        i += 2;
-    }
-    Some(String::from_utf16_lossy(&units))
+    let units = bytes[byte_offset..]
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .take_while(|&u| u != 0);
+
+    Some(
+        char::decode_utf16(units)
+            .map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER))
+            .collect(),
+    )
 }
 
 #[cfg(test)]

@@ -15,7 +15,7 @@ use crate::Guid;
 #[allow(dead_code)]
 mod abi;
 mod events;
-pub mod providers;
+mod providers;
 pub mod tdh;
 
 pub use providers::{ProviderSchemaSource, RegisteredProvider, for_each_registered_provider};
