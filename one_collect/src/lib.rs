@@ -86,7 +86,7 @@ impl Guid {
 /// This is a pure name-hash function. It does not parse `{GUID}` literals;
 /// caller policy decides whether input should be treated as a literal GUID or
 /// hashed as a provider name.
-pub fn guid_from_provider_name_hash(name: &str) -> Guid {
+pub fn guid_from_provider_name(name: &str) -> Guid {
     // The fixed namespace `EventSource` uses to hash provider names.
     const EVENTSOURCE_NAMESPACE: [u8; 16] = [
         0x48, 0x2C, 0x2D, 0xB2,
@@ -162,7 +162,7 @@ pub fn io_error(message: &str) -> IOError {
 
 #[cfg(test)]
 mod tests {
-    use super::{Guid, guid_from_provider_name_hash};
+    use super::{Guid, guid_from_provider_name};
 
     const NS: &[u8] = b"one_collect test namespace";
 
@@ -198,18 +198,18 @@ mod tests {
     /// UTF-16BE name, version nibble forced to 5, fields read native-endian as
     /// `v5_from_name` does).  Locks the namespace seed and encoding.
     #[test]
-    fn guid_from_provider_name_hash_matches_known_vector() {
+    fn guid_from_provider_name_matches_known_vector() {
         assert_eq!(
-            guid_from_provider_name_hash("OneCollect-Test-Provider").to_bytes(),
+            guid_from_provider_name("OneCollect-Test-Provider").to_bytes(),
             Guid::from_u128(0xB03CBD70_B6F7_5552_04A1_A17A1FE5F1A4).to_bytes());
     }
 
     #[test]
-    fn guid_from_provider_name_hash_is_case_insensitive() {
+    fn guid_from_provider_name_is_case_insensitive() {
         // The convention upper-cases before hashing, so casing is irrelevant.
         assert_eq!(
-            guid_from_provider_name_hash("onecollect-test-provider").to_bytes(),
-            guid_from_provider_name_hash("OneCollect-Test-Provider").to_bytes());
+            guid_from_provider_name("onecollect-test-provider").to_bytes(),
+            guid_from_provider_name("OneCollect-Test-Provider").to_bytes());
     }
 }
 

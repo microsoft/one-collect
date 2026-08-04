@@ -24,13 +24,43 @@ use windows_sys::Win32::System::Diagnostics::Etw::{
 };
 
 /// A provider found in the OS-registered provider database.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProviderSchemaSource {
+    /// Provider schema comes from an XML manifest (`SchemaSource == 0`).
+    Manifest,
+    /// Provider schema uses classic WMI/MOF (`SchemaSource == 1`).
+    Wmi,
+    /// Any schema source value not currently recognized by this crate.
+    Unknown(u32),
+}
+
+impl ProviderSchemaSource {
+    /// Return the raw TDH `SchemaSource` value.
+    pub fn as_raw(self) -> u32 {
+        match self {
+            Self::Manifest => 0,
+            Self::Wmi => 1,
+            Self::Unknown(value) => value,
+        }
+    }
+}
+
+impl From<u32> for ProviderSchemaSource {
+    fn from(value: u32) -> Self {
+        match value {
+            0 => Self::Manifest,
+            1 => Self::Wmi,
+            other => Self::Unknown(other),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct RegisteredProvider {
     /// Control GUID of the registered provider.
     pub guid: Guid,
-    /// TDH schema source: `0` = XML manifest, `1` = classic WMI/MOF.  Retained
-    /// so callers can report which decoding model a matched provider uses.
-    pub schema_source: u32,
+    /// TDH schema source for the registered provider.
+    pub schema_source: ProviderSchemaSource,
 }
 
 /// Convert a Win32 `GUID` (from `windows-sys`) into a [`Guid`].
@@ -51,9 +81,8 @@ fn win32_guid_to_guid(g: &windows_sys::core::GUID) -> Guid {
 /// name and [`RegisteredProvider`] details.
 ///
 /// The whole database is read in a **single** enumeration pass; `f` is invoked
-/// once per provider in enumeration order. Provider names are passed in
-/// Unicode lowercase (`str::to_lowercase`) for case-insensitive matching. The
-/// caller decides what to keep and may stop
+/// once per provider in enumeration order. Provider names are passed as
+/// registered by the OS. The caller decides what to keep and may stop
 /// early by returning [`ControlFlow::Break`] (e.g. once every configured name
 /// has been found), avoiding a full-map allocation. Both manifest-based
 /// providers (`SchemaSource == 0`) and classic MOF providers
@@ -85,8 +114,9 @@ pub fn for_each_registered_provider(
     }
 
     // Fill call with a bounded retry: providers can be registered between
-    // probe and fill, causing one transient `ERROR_INSUFFICIENT_BUFFER`.
-    let mut retries_remaining = 1u8;
+    // probe and fill, causing transient `ERROR_INSUFFICIENT_BUFFER` results.
+    const MAX_FILL_RETRIES: u8 = 5;
+    let mut retries_remaining = MAX_FILL_RETRIES;
     let final_bytes: Vec<u8> = loop {
         // Allocate a `u32`-aligned buffer: `PROVIDER_ENUMERATION_INFO` and
         // `TRACE_PROVIDER_INFO` both have 4-byte alignment (`u32` / `GUID`
@@ -185,11 +215,10 @@ fn for_each_provider_in_buffer(
 
         let provider = RegisteredProvider {
             guid: win32_guid_to_guid(&info.ProviderGuid),
-            schema_source: info.SchemaSource,
+            schema_source: ProviderSchemaSource::from(info.SchemaSource),
         };
 
-        // Use Unicode lowercase for case-insensitive matching semantics.
-        if f(&provider_name.to_lowercase(), provider).is_break() {
+        if f(&provider_name, provider).is_break() {
             break;
         }
     }
@@ -300,7 +329,55 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(names, vec!["validname".to_string()]);
+        assert_eq!(names, vec!["ValidName".to_string()]);
+    }
+
+    #[test]
+    fn iterates_multiple_providers_happy_path() {
+        let g1 = GUID {
+            data1: 0x11111111,
+            data2: 0x2222,
+            data3: 0x3333,
+            data4: [0x44; 8],
+        };
+        let g2 = GUID {
+            data1: 0xAAAAAAAA,
+            data2: 0xBBBB,
+            data3: 0xCCCC,
+            data4: [0xDD; 8],
+        };
+        let g3 = GUID {
+            data1: 0x01020304,
+            data2: 0x0506,
+            data3: 0x0708,
+            data4: [0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10],
+        };
+
+        let bytes = make_provider_enum_buffer(
+            &[(g1, 0, Some(0)), (g2, 1, Some(1)), (g3, 7, Some(2))],
+            &["Alpha", "Beta", "Gamma"],
+        );
+
+        let mut seen: Vec<(String, Guid, ProviderSchemaSource)> = Vec::new();
+        for_each_provider_in_buffer(&bytes, &mut |name, provider| {
+            seen.push((name.to_string(), provider.guid, provider.schema_source));
+            ControlFlow::Continue(())
+        })
+        .unwrap();
+
+        assert_eq!(seen.len(), 3);
+
+        assert_eq!(seen[0].0, "Alpha");
+        assert!(seen[0].1 == win32_guid_to_guid(&g1));
+        assert_eq!(seen[0].2, ProviderSchemaSource::Manifest);
+
+        assert_eq!(seen[1].0, "Beta");
+        assert!(seen[1].1 == win32_guid_to_guid(&g2));
+        assert_eq!(seen[1].2, ProviderSchemaSource::Wmi);
+
+        assert_eq!(seen[2].0, "Gamma");
+        assert!(seen[2].1 == win32_guid_to_guid(&g3));
+        assert_eq!(seen[2].2, ProviderSchemaSource::Unknown(7));
     }
 
     #[test]
