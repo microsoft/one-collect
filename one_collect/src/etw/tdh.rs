@@ -1644,4 +1644,70 @@ mod tests {
         assert_eq!(cache.index_of_manifest(&key, false), None);
         assert_eq!(cache.index_of_manifest(&key, true), None);
     }
+
+    /// `read_decoding_source` must reject a buffer smaller than
+    /// `TRACE_EVENT_INFO` (its bounds check guards the subsequent
+    /// `*const TRACE_EVENT_INFO` cast) and, for a well-formed buffer,
+    /// return the exact `DecodingSource` value stored in it.
+    #[test]
+    fn read_decoding_source_bounds_and_value() {
+        // Under-sized buffer → Malformed, and (crucially) the cast is never
+        // reached, so an unaligned `Vec<u8>` here is fine.
+        let too_small = vec![0u8; std::mem::size_of::<TRACE_EVENT_INFO>() - 1];
+        match read_decoding_source(&too_small) {
+            Err(TdhDecodeError::Malformed(_)) => {} // expected
+            other => panic!("expected Malformed for under-sized buffer, got: {other:?}"),
+        }
+
+        // Value path: build a real, properly-aligned `TRACE_EVENT_INFO` on the
+        // stack, then view it as bytes.  Deriving the slice from the struct's
+        // own address guarantees the alignment `read_decoding_source` requires.
+        fn tei_bytes(tei: &TRACE_EVENT_INFO) -> &[u8] {
+            // SAFETY: `tei` is a live `TRACE_EVENT_INFO`, so the pointer is
+            // valid, aligned, and spans exactly `size_of::<TRACE_EVENT_INFO>()`
+            // initialized bytes for the borrow's lifetime.
+            unsafe {
+                std::slice::from_raw_parts(
+                    tei as *const TRACE_EVENT_INFO as *const u8,
+                    std::mem::size_of::<TRACE_EVENT_INFO>(),
+                )
+            }
+        }
+
+        let mut tei: TRACE_EVENT_INFO = unsafe { std::mem::zeroed() };
+
+        tei.DecodingSource = DecodingSourceXMLFile;
+        assert_eq!(read_decoding_source(tei_bytes(&tei)).unwrap(), DecodingSourceXMLFile);
+
+        tei.DecodingSource = DecodingSourceTlg;
+        assert_eq!(read_decoding_source(tei_bytes(&tei)).unwrap(), DecodingSourceTlg);
+    }
+
+    /// TraceLogging inserts mirror the manifest single-hash vacancy semantics:
+    /// a duplicate `insert_tl` returns the existing index without growing the
+    /// arena (no orphaned schema), and the 32-/64-bit maps stay separate
+    /// keyspaces for identical bytes.
+    #[test]
+    fn insert_tl_duplicate_key_returns_existing_index() {
+        let mk = |name: &str| CachedSchema {
+            event_name: name.to_string(),
+            format: EventFormat::new(),
+            schema_id: SchemaId(0),
+        };
+
+        let mut cache = SchemaCache::new();
+
+        let idx = cache.insert_tl(vec![9, 8, 7], false, mk("first"));
+        assert_eq!(cache.index_of_tl(&[9, 8, 7], false), Some(idx));
+
+        // Duplicate insert returns the existing index and drops the freshly
+        // built schema — the arena must not grow.
+        let before = cache.schemas.len();
+        assert_eq!(cache.insert_tl(vec![9, 8, 7], false, mk("dup")), idx);
+        assert_eq!(cache.schemas.len(), before, "duplicate must not grow arena");
+        assert_eq!(cache.get(idx).event_name, "first", "original schema preserved");
+
+        // The 32-bit map is a separate keyspace: the same bytes miss there.
+        assert_eq!(cache.index_of_tl(&[9, 8, 7], true), None);
+    }
 }

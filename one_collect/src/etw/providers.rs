@@ -1,0 +1,411 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
+//! # Registered ETW provider enumeration
+//!
+//! This module wraps the Windows Trace Data Helper (TDH)
+//! `TdhEnumerateProviders` API to visit every provider registered in the
+//! system provider database, invoking a caller-supplied closure with each
+//! provider's name and [`RegisteredProvider`] details.
+//!
+//! The database is enumerated in a single pass, so the closure sees every
+//! provider from one `TdhEnumerateProviders` call. The caller decides what to
+//! keep (e.g. matching a configured set of names) and can stop early by
+//! returning [`ControlFlow::Break`], so no full map is ever materialized.
+//! Every registered provider is surfaced regardless of schema source;
+//! unrecognized sources are reported as `ProviderSchemaSource::Unknown`.
+
+use std::ops::ControlFlow;
+
+use crate::Guid;
+
+use windows_sys::Win32::System::Diagnostics::Etw::{
+    PROVIDER_ENUMERATION_INFO, TRACE_PROVIDER_INFO, TdhEnumerateProviders,
+};
+
+/// A provider found in the OS-registered provider database.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProviderSchemaSource {
+    /// Provider schema comes from an XML manifest (`SchemaSource == 0`).
+    Manifest,
+    /// Provider schema uses classic WMI/MOF (`SchemaSource == 1`).
+    Wmi,
+    /// Any schema source value not currently recognized by this crate.
+    Unknown(u32),
+}
+
+impl ProviderSchemaSource {
+    /// Return the raw TDH `SchemaSource` value.
+    pub const fn as_raw(self) -> u32 {
+        match self {
+            Self::Manifest => 0,
+            Self::Wmi => 1,
+            Self::Unknown(value) => value,
+        }
+    }
+}
+
+impl From<u32> for ProviderSchemaSource {
+    fn from(value: u32) -> Self {
+        match value {
+            0 => Self::Manifest,
+            1 => Self::Wmi,
+            other => Self::Unknown(other),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct RegisteredProvider {
+    /// Control GUID of the registered provider.
+    pub guid: Guid,
+    /// TDH schema source for the registered provider.
+    pub schema_source: ProviderSchemaSource,
+}
+
+/// Convert a Win32 `GUID` (from `windows-sys`) into a [`Guid`].
+///
+/// Both types are `#[repr(C)]` with identical `data1/2/3/4` fields, so this is
+/// a straight field copy.
+const fn win32_guid_to_guid(g: &windows_sys::core::GUID) -> Guid {
+    Guid {
+        data1: g.data1,
+        data2: g.data2,
+        data3: g.data3,
+        data4: g.data4,
+    }
+}
+
+/// Visit every provider registered in the system provider database via the
+/// Windows TDH `TdhEnumerateProviders` API, calling `f` with each provider's
+/// name and [`RegisteredProvider`] details.
+///
+/// The whole database is read in a **single** enumeration pass; `f` is invoked
+/// once per provider in enumeration order. Provider names are passed as
+/// registered by the OS. The caller decides what to keep and may stop
+/// early by returning [`ControlFlow::Break`] (e.g. once every configured name
+/// has been found), avoiding a full-map allocation. Every registered provider
+/// is surfaced regardless of schema source; unrecognized sources are reported
+/// as [`ProviderSchemaSource::Unknown`]. Duplicate names are visited in
+/// enumeration order, so a caller building a map keeps the first entry per name.
+///
+/// # Errors
+///
+/// Returns an error only when the TDH API itself fails unexpectedly, so a
+/// genuine lookup miss is never silently misresolved.
+#[allow(unsafe_code)]
+pub fn for_each_registered_provider(
+    mut f: impl FnMut(&str, RegisteredProvider) -> ControlFlow<()>,
+) -> anyhow::Result<()> {
+    const ERROR_SUCCESS: u32 = 0;
+    const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
+
+    // First call with a null buffer to discover the required size.
+    let mut buffer_size: u32 = 0;
+    // SAFETY: The documented size-probe form; TDH writes only through
+    // `p_buffer_size` when the buffer pointer is null.
+    let status = unsafe { TdhEnumerateProviders(std::ptr::null_mut(), &mut buffer_size) };
+    if status != ERROR_INSUFFICIENT_BUFFER && status != ERROR_SUCCESS {
+        anyhow::bail!("TdhEnumerateProviders (size probe) failed with Win32 error {status}");
+    }
+    if (buffer_size as usize) < std::mem::size_of::<PROVIDER_ENUMERATION_INFO>() {
+        // Empty or header-less result: nothing to enumerate.
+        return Ok(());
+    }
+
+    // Fill call with a bounded retry: providers can be registered between
+    // probe and fill, causing transient `ERROR_INSUFFICIENT_BUFFER` results.
+    const MAX_FILL_RETRIES: u8 = 5;
+    let mut retries_remaining = MAX_FILL_RETRIES;
+    loop {
+        // Allocate a `u32`-aligned buffer: `PROVIDER_ENUMERATION_INFO` and
+        // `TRACE_PROVIDER_INFO` both have 4-byte alignment (`u32` / `GUID`
+        // fields), which a `Vec<u32>` satisfies.
+        let elem_count = (buffer_size as usize).div_ceil(std::mem::size_of::<u32>());
+        let mut buffer: Vec<u32> = vec![0u32; elem_count];
+        let alloc_byte_len = buffer.len() * std::mem::size_of::<u32>();
+
+        // SAFETY: `buffer` is writable and 4-byte aligned; TDH writes at most
+        // `query_size` bytes and updates it with the required/used size.
+        let mut query_size = buffer_size;
+        let status = unsafe {
+            TdhEnumerateProviders(
+                buffer.as_mut_ptr() as *mut PROVIDER_ENUMERATION_INFO,
+                &mut query_size,
+            )
+        };
+
+        if status == ERROR_SUCCESS {
+            let used_byte_len = query_size as usize;
+            if used_byte_len > alloc_byte_len {
+                anyhow::bail!(
+                    "TdhEnumerateProviders returned size {used_byte_len} larger than allocation {alloc_byte_len}"
+                );
+            }
+            // Parse only the byte count returned by TDH, not the full
+            // allocation length.
+            // SAFETY: `buffer` owns `alloc_byte_len` valid bytes; `used_byte_len`
+            // is range-checked above.
+            let used = unsafe {
+                std::slice::from_raw_parts(buffer.as_ptr() as *const u8, used_byte_len)
+            };
+            return for_each_provider_in_buffer(used, &mut f);
+        }
+
+        if status == ERROR_INSUFFICIENT_BUFFER && retries_remaining > 0 {
+            retries_remaining -= 1;
+            // Use TDH's returned required size when available.
+            if query_size > buffer_size {
+                buffer_size = query_size;
+            }
+            continue;
+        }
+
+        anyhow::bail!("TdhEnumerateProviders (fill) failed with Win32 error {status}");
+    }
+}
+
+#[allow(unsafe_code)]
+fn for_each_provider_in_buffer(
+    bytes: &[u8],
+    f: &mut impl FnMut(&str, RegisteredProvider) -> ControlFlow<()>,
+) -> anyhow::Result<()> {
+    // Layout facts the unsafe reads below rely on. Alignment is not checked
+    // because every struct read uses `read_unaligned`.
+    const _: () = assert!(
+        std::mem::size_of::<PROVIDER_ENUMERATION_INFO>()
+            >= std::mem::size_of::<TRACE_PROVIDER_INFO>()
+    );
+    const _: () = assert!(std::mem::size_of::<TRACE_PROVIDER_INFO>() > 0);
+
+    if bytes.len() < std::mem::size_of::<PROVIDER_ENUMERATION_INFO>() {
+        return Ok(());
+    }
+
+    let array_offset = std::mem::size_of::<PROVIDER_ENUMERATION_INFO>()
+        .saturating_sub(std::mem::size_of::<TRACE_PROVIDER_INFO>());
+    let max_entries =
+        bytes.len().saturating_sub(array_offset) / std::mem::size_of::<TRACE_PROVIDER_INFO>();
+
+    // SAFETY: We checked the slice is large enough for a header-sized read and
+    // use `read_unaligned` to avoid alignment assumptions.
+    let header: PROVIDER_ENUMERATION_INFO =
+        unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const PROVIDER_ENUMERATION_INFO) };
+    let count = (header.NumberOfProviders as usize).min(max_entries);
+
+    for i in 0..count {
+        let entry_offset = array_offset + i * std::mem::size_of::<TRACE_PROVIDER_INFO>();
+        if entry_offset + std::mem::size_of::<TRACE_PROVIDER_INFO>() > bytes.len() {
+            break;
+        }
+        // SAFETY: Bounds checked above; `read_unaligned` avoids alignment
+        // assumptions for the borrowed byte slice.
+        let info: TRACE_PROVIDER_INFO = unsafe {
+            std::ptr::read_unaligned(bytes.as_ptr().add(entry_offset) as *const TRACE_PROVIDER_INFO)
+        };
+
+        let name_offset = info.ProviderNameOffset as usize;
+        // A zero or out-of-range offset means the entry has no usable name.
+        if name_offset == 0 || name_offset >= bytes.len() {
+            continue;
+        }
+
+        // Skip empty names: a `ProviderNameOffset` that points straight at a
+        // UTF-16 NUL decodes to `""`, which would otherwise hand the caller a
+        // bogus empty-key lookup target from a malformed/partial TDH entry.
+        let Some(provider_name) = read_utf16z(bytes, name_offset).filter(|s| !s.is_empty()) else {
+            continue;
+        };
+
+        let provider = RegisteredProvider {
+            guid: win32_guid_to_guid(&info.ProviderGuid),
+            schema_source: ProviderSchemaSource::from(info.SchemaSource),
+        };
+
+        if f(&provider_name, provider).is_break() {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+/// Read a null-terminated UTF-16 (little-endian) string starting at
+/// `byte_offset` within `bytes`, stopping at the terminator or the end of the
+/// buffer. Returns `None` if the offset leaves no room for even one code unit.
+fn read_utf16z(bytes: &[u8], byte_offset: usize) -> Option<String> {
+    if byte_offset + 1 >= bytes.len() {
+        return None;
+    }
+    let units = bytes[byte_offset..]
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .take_while(|&u| u != 0);
+
+    Some(
+        char::decode_utf16(units)
+            .map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER))
+            .collect(),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use windows_sys::core::GUID;
+
+    fn write_utf16z(buf: &mut Vec<u8>, s: &str) -> u32 {
+        let off = buf.len() as u32;
+        for u in s.encode_utf16() {
+            buf.extend_from_slice(&u.to_le_bytes());
+        }
+        buf.extend_from_slice(&0u16.to_le_bytes());
+        off
+    }
+
+    #[allow(unsafe_code)]
+    fn make_provider_enum_buffer(entries: &[(GUID, u32, Option<u32>)], names: &[&str]) -> Vec<u8> {
+        let array_offset = std::mem::size_of::<PROVIDER_ENUMERATION_INFO>()
+            .saturating_sub(std::mem::size_of::<TRACE_PROVIDER_INFO>());
+        let entries_bytes = entries.len() * std::mem::size_of::<TRACE_PROVIDER_INFO>();
+
+        let mut out = vec![0u8; array_offset + entries_bytes];
+        let name_offsets: Vec<u32> = names
+            .iter()
+            .map(|name| write_utf16z(&mut out, name))
+            .collect();
+
+        let mut header: PROVIDER_ENUMERATION_INFO = unsafe { std::mem::zeroed() };
+        header.NumberOfProviders = entries.len() as u32;
+        // SAFETY: `out` has at least header size bytes; unaligned write is
+        // accepted for byte buffers.
+        unsafe {
+            std::ptr::write_unaligned(out.as_mut_ptr() as *mut PROVIDER_ENUMERATION_INFO, header)
+        };
+
+        for (i, (guid, schema_source, maybe_name_idx)) in entries.iter().enumerate() {
+            let mut info: TRACE_PROVIDER_INFO = unsafe { std::mem::zeroed() };
+            info.ProviderGuid = *guid;
+            info.SchemaSource = *schema_source;
+            info.ProviderNameOffset = maybe_name_idx
+                .and_then(|idx| name_offsets.get(idx as usize).copied())
+                .unwrap_or(u32::MAX);
+
+            let off = array_offset + i * std::mem::size_of::<TRACE_PROVIDER_INFO>();
+            // SAFETY: `off` is computed within the allocated entry area;
+            // unaligned write is accepted for byte buffers.
+            unsafe {
+                std::ptr::write_unaligned(
+                    out.as_mut_ptr().add(off) as *mut TRACE_PROVIDER_INFO,
+                    info,
+                )
+            };
+        }
+
+        out
+    }
+
+    #[test]
+    fn skips_malformed_name_offsets() {
+        let g1 = GUID {
+            data1: 1,
+            data2: 2,
+            data3: 3,
+            data4: [4; 8],
+        };
+        let g2 = GUID {
+            data1: 9,
+            data2: 8,
+            data3: 7,
+            data4: [6; 8],
+        };
+
+        // First entry points to an invalid offset and must be skipped;
+        // second entry points to "ValidName" and must be delivered.
+        let bytes = make_provider_enum_buffer(&[(g1, 0, None), (g2, 1, Some(0))], &["ValidName"]);
+
+        let mut names = Vec::<String>::new();
+        for_each_provider_in_buffer(&bytes, &mut |name, _| {
+            names.push(name.to_string());
+            ControlFlow::Continue(())
+        })
+        .unwrap();
+
+        assert_eq!(names, vec!["ValidName".to_string()]);
+    }
+
+    #[test]
+    fn iterates_multiple_providers_happy_path() {
+        let g1 = GUID {
+            data1: 0x11111111,
+            data2: 0x2222,
+            data3: 0x3333,
+            data4: [0x44; 8],
+        };
+        let g2 = GUID {
+            data1: 0xAAAAAAAA,
+            data2: 0xBBBB,
+            data3: 0xCCCC,
+            data4: [0xDD; 8],
+        };
+        let g3 = GUID {
+            data1: 0x01020304,
+            data2: 0x0506,
+            data3: 0x0708,
+            data4: [0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10],
+        };
+
+        let bytes = make_provider_enum_buffer(
+            &[(g1, 0, Some(0)), (g2, 1, Some(1)), (g3, 7, Some(2))],
+            &["Alpha", "Beta", "Gamma"],
+        );
+
+        let mut seen: Vec<(String, Guid, ProviderSchemaSource)> = Vec::new();
+        for_each_provider_in_buffer(&bytes, &mut |name, provider| {
+            seen.push((name.to_string(), provider.guid, provider.schema_source));
+            ControlFlow::Continue(())
+        })
+        .unwrap();
+
+        assert_eq!(seen.len(), 3);
+
+        assert_eq!(seen[0].0, "Alpha");
+        assert!(seen[0].1 == win32_guid_to_guid(&g1));
+        assert_eq!(seen[0].2, ProviderSchemaSource::Manifest);
+
+        assert_eq!(seen[1].0, "Beta");
+        assert!(seen[1].1 == win32_guid_to_guid(&g2));
+        assert_eq!(seen[1].2, ProviderSchemaSource::Wmi);
+
+        assert_eq!(seen[2].0, "Gamma");
+        assert!(seen[2].1 == win32_guid_to_guid(&g3));
+        assert_eq!(seen[2].2, ProviderSchemaSource::Unknown(7));
+    }
+
+    #[test]
+    fn respects_early_break() {
+        let g1 = GUID {
+            data1: 10,
+            data2: 11,
+            data3: 12,
+            data4: [13; 8],
+        };
+        let g2 = GUID {
+            data1: 20,
+            data2: 21,
+            data3: 22,
+            data4: [23; 8],
+        };
+        let bytes = make_provider_enum_buffer(&[(g1, 0, Some(0)), (g2, 1, Some(1))], &["First", "Second"]);
+
+        let mut seen = 0usize;
+        for_each_provider_in_buffer(&bytes, &mut |_name, _| {
+            seen += 1;
+            ControlFlow::Break(())
+        })
+        .unwrap();
+
+        assert_eq!(seen, 1, "Break must stop enumeration at first callback");
+    }
+}

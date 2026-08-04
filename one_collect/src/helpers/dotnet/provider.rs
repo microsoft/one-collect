@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-use crate::Guid;
+use crate::{Guid, guid_from_provider_name};
 
 pub(crate) fn event_full_name(provider_name: &str, guid: Guid, event_name: &str) -> String {
     use std::fmt::Write;
@@ -54,20 +54,10 @@ pub(crate) fn guid_from_provider(provider_name: &str) -> anyhow::Result<Guid> {
                     Err(_) => { anyhow::bail!("Invalid provider format."); }
                 }
             } else {
-                /* Event Source */
-                let namespace_bytes: [u8; 16] = [
-                    0x48, 0x2C, 0x2D, 0xB2,
-                    0xC3, 0x90, 0x47, 0xC8,
-                    0x87, 0xF8, 0x1A, 0x15,
-                    0xBF, 0xC1, 0x30, 0xFB];
-
-                /* EventSource encodes the name as upper-case UTF-16BE */
-                let mut name_bytes = Vec::with_capacity(provider_name.len() * 2);
-                for c in provider_name.to_uppercase().chars() {
-                    name_bytes.extend_from_slice(&(c as u16).to_be_bytes());
-                }
-
-                Ok(Guid::v5_from_name(&namespace_bytes, &name_bytes))
+                /* Event Source: name-hashed control GUID.  Delegates to the
+                 * shared `guid_from_provider_name` so the namespace seed
+                 * and encoding live in exactly one place. */
+                Ok(guid_from_provider_name(provider_name))
             }
         }
     }
@@ -99,4 +89,38 @@ impl DotNetProviderFlags {
 
     #[allow(dead_code)]
     pub(crate) fn callstack_keywords(&self) -> u64 { self.callstack_keywords }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `.NET` runtime special-cases must keep returning their fixed legacy
+    /// GUIDs (they intentionally override the name-hash, so this guards the
+    /// match arms after the refactor to delegate the generic branch).
+    #[test]
+    fn dotnet_runtime_special_case_is_unchanged() {
+        assert_eq!(
+            guid_from_provider("Microsoft-Windows-DotNETRuntime").unwrap().to_bytes(),
+            Guid::from_u128(0xe13c0d23_ccbc_4e12_931b_d9cc2eee27e4).to_bytes());
+    }
+
+    /// A non-special name now delegates to `guid_from_provider_name`; verify
+    /// the result is byte-identical to that shared primitive (the refactor must
+    /// not change any resolved GUID).
+    #[test]
+    fn generic_name_delegates_to_eventsource_hash() {
+        let name = "OneCollect-Test-Provider";
+        assert_eq!(
+            guid_from_provider(name).unwrap().to_bytes(),
+            guid_from_provider_name(name).to_bytes());
+    }
+
+    /// A `{GUID}` literal is still parsed directly.
+    #[test]
+    fn guid_literal_is_parsed() {
+        assert_eq!(
+            guid_from_provider("{E13C0D23-CCBC-4E12-931B-D9CC2EEE27E4}").unwrap().to_bytes(),
+            Guid::from_u128(0xE13C0D23_CCBC_4E12_931B_D9CC2EEE27E4).to_bytes());
+    }
 }

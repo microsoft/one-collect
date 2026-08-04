@@ -42,7 +42,7 @@ impl Guid {
     ///
     /// Only the version nibble is set (to 5); the variant bits are deliberately
     /// left untouched so the output stays byte-identical to the pre-existing
-    /// `helpers::dotnet::scripting::guid_from_provider` algorithm. This means the
+    /// `helpers::dotnet::provider::guid_from_provider` algorithm. This means the
     /// result is *not* a strictly conformant v5 UUID.
     ///
     /// Callers choose the byte encoding of `name` (UTF-8 for ETW session names,
@@ -72,6 +72,42 @@ impl Guid {
             ],
         }
     }
+
+}
+
+/// Derive the ETW control GUID of a self-describing (EventSource /
+/// TraceLogging) provider from its *name*.
+///
+/// Unlike manifest / classic providers (whose GUID must be looked up in the
+/// OS provider database), a self-describing provider's GUID is a deterministic
+/// hash of its name: the name is upper-cased, encoded as UTF-16BE, and
+/// v5-hashed over the fixed 16-byte `EventSource` namespace.
+///
+/// This is a pure name-hash function. It does not parse `{GUID}` literals;
+/// caller policy decides whether input should be treated as a literal GUID or
+/// hashed as a provider name.
+pub fn guid_from_provider_name(name: &str) -> Guid {
+    // The fixed namespace `EventSource` uses to hash provider names.
+    const EVENTSOURCE_NAMESPACE: [u8; 16] = [
+        0x48, 0x2C, 0x2D, 0xB2,
+        0xC3, 0x90, 0x47, 0xC8,
+        0x87, 0xF8, 0x1A, 0x15,
+        0xBF, 0xC1, 0x30, 0xFB,
+    ];
+
+    // `EventSource` encodes the upper-cased name as UTF-16BE.
+    // Avoid allocating an intermediate upper-cased String; encode directly.
+    let mut name_bytes = Vec::with_capacity(name.len() * 2);
+    for c in name.chars() {
+        for upper in c.to_uppercase() {
+            let mut utf16 = [0u16; 2];
+            for unit in upper.encode_utf16(&mut utf16).iter().copied() {
+                name_bytes.extend_from_slice(&unit.to_be_bytes());
+            }
+        }
+    }
+
+    Guid::v5_from_name(&EVENTSOURCE_NAMESPACE, &name_bytes)
 }
 
 pub mod event;
@@ -126,7 +162,7 @@ pub fn io_error(message: &str) -> IOError {
 
 #[cfg(test)]
 mod tests {
-    use super::Guid;
+    use super::{Guid, guid_from_provider_name};
 
     const NS: &[u8] = b"one_collect test namespace";
 
@@ -155,6 +191,25 @@ mod tests {
     fn v5_from_name_sets_version_nibble_to_5() {
         let guid = Guid::v5_from_name(NS, b"record-trace");
         assert_eq!(guid.data3 & 0xF000, 0x5000);
+    }
+
+    /// Ground-truth vector for the EventSource name-hash, independently
+    /// computed (SHA-1 over the fixed EventSource namespace + upper-cased
+    /// UTF-16BE name, version nibble forced to 5, fields read native-endian as
+    /// `v5_from_name` does).  Locks the namespace seed and encoding.
+    #[test]
+    fn guid_from_provider_name_matches_known_vector() {
+        assert_eq!(
+            guid_from_provider_name("OneCollect-Test-Provider").to_bytes(),
+            Guid::from_u128(0xB03CBD70_B6F7_5552_04A1_A17A1FE5F1A4).to_bytes());
+    }
+
+    #[test]
+    fn guid_from_provider_name_is_case_insensitive() {
+        // The convention upper-cases before hashing, so casing is irrelevant.
+        assert_eq!(
+            guid_from_provider_name("onecollect-test-provider").to_bytes(),
+            guid_from_provider_name("OneCollect-Test-Provider").to_bytes());
     }
 }
 
