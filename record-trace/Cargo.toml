@@ -10,7 +10,6 @@ repository = "https://github.com/microsoft/one-collect"
 ctrlc = "3.2"
 engine = { path = "engine" }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [lints.rust]
 unreachable_pub = "deny"
