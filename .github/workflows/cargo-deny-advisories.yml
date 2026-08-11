@@ -1,0 +1,87 @@
+name: Cargo Deny Advisories
+
+# Scans the full resolved dependency graph for RustSec advisories on a schedule
+# rather than per-PR. This keeps awareness of newly disclosed advisories against
+# existing (already-merged) dependencies without blocking unrelated PRs. The
+# PR-blocking bans/licenses/sources checks live in cargo-deny.yml.
+#
+# On failure this workflow files (or updates) a single tracking issue labeled
+# `cargo-deny-advisories`, assigned to the maintainers, so they get an email and
+# a place to track the fix. A later passing run closes the issue again.
+
+permissions:
+  contents: read
+  issues: write
+
+on:
+  schedule:
+    # Daily at 06:00 UTC.
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  advisories:
+    name: Cargo Deny Advisories
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ISSUE_LABEL: cargo-deny-advisories
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Install cargo-deny
+      run: cargo install cargo-deny --locked
+
+    # Check both crate roots in a single step so record-trace is always scanned
+    # even when one_collect reports an advisory (separate steps would stop at the
+    # first failure). The combined output is saved for the tracking issue.
+    - name: cargo deny check advisories
+      run: |
+        status=0
+        echo "## one_collect" | tee advisory-report.txt
+        cargo deny --manifest-path one_collect/Cargo.toml --config deny.toml check advisories 2>&1 | tee -a advisory-report.txt || status=1
+        echo "" | tee -a advisory-report.txt
+        echo "## record-trace" | tee -a advisory-report.txt
+        cargo deny --manifest-path record-trace/Cargo.toml --config deny.toml check advisories 2>&1 | tee -a advisory-report.txt || status=1
+        exit $status
+
+    # File a single tracking issue (or comment on the existing open one so we do
+    # not open a new issue every day) when advisories are found.
+    - name: File or update tracking issue on failure
+      if: failure()
+      run: |
+        gh label create "$ISSUE_LABEL" --description "cargo-deny advisory scan failures" --color B60205 --force >/dev/null 2>&1 || true
+        run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        {
+          echo "The scheduled \`cargo deny check advisories\` run failed."
+          echo
+          echo "Run: $run_url"
+          echo
+          echo "<details><summary>cargo-deny output</summary>"
+          echo
+          echo '```'
+          cat advisory-report.txt
+          echo '```'
+          echo
+          echo "</details>"
+        } > issue-body.md
+        existing=$(gh issue list --label "$ISSUE_LABEL" --state open --json number --jq '.[0].number')
+        if [ -n "$existing" ]; then
+          gh issue comment "$existing" --body-file issue-body.md
+        else
+          gh issue create --label "$ISSUE_LABEL" --assignee brianrob --assignee beaubelgrave --title "cargo-deny: advisory detected in dependency graph" --body-file issue-body.md
+        fi
+
+    # Self-heal: once a later run passes, close any open tracking issue.
+    - name: Close tracking issue on success
+      if: success()
+      run: |
+        run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        for n in $(gh issue list --label "$ISSUE_LABEL" --state open --json number --jq '.[].number'); do
+          gh issue comment "$n" --body "Latest scheduled \`cargo deny check advisories\` run passed ($run_url). Closing."
+          gh issue close "$n"
+        done
