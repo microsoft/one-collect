@@ -1,0 +1,41 @@
+# cargo-deny configuration for one-collect.
+#
+# cargo-deny audits the dependency graph for security advisories, disallowed or
+# duplicate crates, license compliance, and untrusted sources. See
+# https://embarkstudios.github.io/cargo-deny/ for the configuration reference.
+#
+# There is no workspace-level Cargo.toml, so CI runs cargo-deny once per crate
+# root (one_collect and record-trace) against this shared config.
+
+[advisories]
+# RustSec advisories (vulnerability / unsound / unmaintained) are always errors
+# in this cargo-deny version; `ignore` is the only escape hatch and is left
+# empty on purpose so that the current findings surface as failures.
+ignore = []
+
+[licenses]
+# Permissive licenses only. Dual/tri-licensed crates (e.g. `r-efi` is
+# `MIT OR Apache-2.0 OR LGPL-2.1-or-later`) resolve to one of these, so a
+# copyleft option is never selected.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "MIT",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[bans]
+# Surface duplicate versions of the same crate as a warning.
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+# Only crates.io is trusted.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

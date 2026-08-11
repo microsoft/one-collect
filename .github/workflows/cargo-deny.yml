@@ -1,0 +1,31 @@
+name: Cargo Deny
+
+permissions:
+  contents: read
+
+on:
+  workflow_call:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cargo-deny:
+    name: Cargo Deny
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    # Installed from source to avoid taking on a third-party GitHub Action;
+    # `--locked` keeps the build reproducible.
+    - name: Install cargo-deny
+      run: cargo install cargo-deny --locked
+
+    # There is no workspace-level Cargo.toml, so each crate root is checked
+    # against the shared repo-root deny.toml.
+    - name: 'one_collect: cargo deny check'
+      run: cargo deny --manifest-path one_collect/Cargo.toml --config deny.toml check
+
+    - name: 'record-trace: cargo deny check'
+      run: cargo deny --manifest-path record-trace/Cargo.toml --config deny.toml check

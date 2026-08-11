@@ -12,6 +12,11 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Supply-chain audit (advisories, bans, licenses, sources). Platform-agnostic,
+  # so it runs once rather than per-platform.
+  cargo_deny:
+    uses: ./.github/workflows/cargo-deny.yml
+
   # Clippy lints ordered by platform (glibc, musl, windows)
   clippy_linux_glibc_x64:
     uses: ./.github/workflows/clippy.yml
