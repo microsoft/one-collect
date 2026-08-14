@@ -275,17 +275,27 @@ impl SchemaCache {
         }
     }
 
-    /// Returns the index of a cached TraceLogging schema, or `None` on a
-    /// miss.  The key is hashed exactly once.
-    fn index_of_tl(&self, key: &[u8], is_32bit: bool) -> Option<usize> {
-        let map = if is_32bit { &self.tl_32 } else { &self.tl_64 };
-        map.get(key).copied()
-    }
-
-    /// Returns the index of a cached manifest schema, or `None` on a miss.
-    fn index_of_manifest(&self, key: &ManifestEventKey, is_32bit: bool) -> Option<usize> {
-        let map = if is_32bit { &self.manifest_32 } else { &self.manifest_64 };
-        map.get(key).copied()
+    /// Returns the index of a cached schema, or `None` on a miss.
+    ///
+    /// The source match is kept inside the cache so callers do not need to
+    /// select a source-specific map.  Manifest negative-cache policy stays
+    /// separate because TraceLogging has no equivalent permanent-negative
+    /// state.
+    fn index_of(
+        &self,
+        source: &SchemaSource<'_>,
+        is_32bit: bool,
+    ) -> Option<usize> {
+        match source {
+            SchemaSource::TraceLogging(key) => {
+                let map = if is_32bit { &self.tl_32 } else { &self.tl_64 };
+                map.get(*key).copied()
+            }
+            SchemaSource::Manifest(key) => {
+                let map = if is_32bit { &self.manifest_32 } else { &self.manifest_64 };
+                map.get(key).copied()
+            }
+        }
     }
 
     /// Returns `true` if `key` has been recorded as permanently unsupported.
@@ -298,49 +308,52 @@ impl SchemaCache {
         self.manifest_unsupported.insert(key);
     }
 
-    /// Maps a TraceLogging `key` to a schema index and returns it.  Intended
-    /// for the cache miss path, where `key` is not yet present.
+    /// Maps a schema source to a schema index and returns it.  Intended for
+    /// the cache miss path, where the source is not yet present.
     ///
     /// The schema is only pushed onto `schemas` when the key is actually
     /// vacant, so a (contract-violating) duplicate key returns the existing
     /// index without orphaning a freshly built schema.  The key is hashed
     /// once via a single `entry` lookup.
-    fn insert_tl(&mut self, key: Vec<u8>, is_32bit: bool, schema: CachedSchema) -> usize {
+    fn insert(
+        &mut self,
+        source: SchemaSource<'_>,
+        is_32bit: bool,
+        schema: CachedSchema,
+    ) -> usize {
         use std::collections::hash_map::Entry;
 
         let idx = self.schemas.len();
-        let map = if is_32bit { &mut self.tl_32 } else { &mut self.tl_64 };
-        match map.entry(key) {
-            // Already present: return the existing index and drop `schema`.
-            Entry::Occupied(e) => *e.get(),
-            Entry::Vacant(e) => {
-                let assigned = *e.insert(idx); // ends the map borrow
-                self.schemas.push(schema); // only push once actually indexed
-                assigned
+        match source {
+            SchemaSource::TraceLogging(key) => {
+                let map = if is_32bit { &mut self.tl_32 } else { &mut self.tl_64 };
+                match map.entry(key.to_vec()) {
+                    // Already present: return the existing index and drop `schema`.
+                    Entry::Occupied(e) => *e.get(),
+                    Entry::Vacant(e) => {
+                        let assigned = *e.insert(idx); // ends the map borrow
+                        self.schemas.push(schema); // only push once actually indexed
+                        assigned
+                    }
+                }
             }
-        }
-    }
-
-    /// Maps a manifest `key` to a schema index and returns it.  See
-    /// [`insert_tl`] for the vacancy / single-hash semantics.
-    fn insert_manifest(&mut self, key: ManifestEventKey, is_32bit: bool, schema: CachedSchema) -> usize {
-        use std::collections::hash_map::Entry;
-
-        let idx = self.schemas.len();
-        let map = if is_32bit { &mut self.manifest_32 } else { &mut self.manifest_64 };
-        match map.entry(key) {
-            Entry::Occupied(e) => *e.get(),
-            Entry::Vacant(e) => {
-                let assigned = *e.insert(idx); // ends the map borrow
-                self.schemas.push(schema); // only push once actually indexed
-                assigned
+            SchemaSource::Manifest(key) => {
+                let map = if is_32bit { &mut self.manifest_32 } else { &mut self.manifest_64 };
+                match map.entry(key) {
+                    Entry::Occupied(e) => *e.get(),
+                    Entry::Vacant(e) => {
+                        let assigned = *e.insert(idx); // ends the map borrow
+                        self.schemas.push(schema); // only push once actually indexed
+                        assigned
+                    }
+                }
             }
         }
     }
 
     /// Reads a cached schema by its index.
     ///
-    /// `idx` always comes from an `index_of_*` or `insert_*` call, and
+    /// `idx` always comes from an `index_of` or `insert` call, and
     /// `schemas` is append-only (entries are never removed), so the index
     /// never dangles.
     fn get(&self, idx: usize) -> &CachedSchema {
@@ -487,15 +500,20 @@ impl TdhDecoder {
         // real decode, assigns a `SchemaId`, and inserts under the key.  The
         // `usize` index is `Copy`, so every `self` borrow ends before the
         // `self.cache.get(idx)` read below.
-        let idx = match self.lookup_cached(&source, is_32bit)? {
+        let idx = match self.cache.index_of(&source, is_32bit) {
             Some(idx) => idx,
             None => {
+                if let SchemaSource::Manifest(key) = &source {
+                    if self.cache.is_manifest_unsupported(key) {
+                        return Err(TdhDecodeError::Unsupported);
+                    }
+                }
                 let mut schema = match &source {
                     SchemaSource::TraceLogging(_) => self.decode_tracelogging(record, is_32bit)?,
                     SchemaSource::Manifest(key) => self.decode_manifest(record, is_32bit, key)?,
                 };
                 schema.schema_id = SchemaId(self.assign_schema_id());
-                self.insert_cached(source, is_32bit, schema)
+                self.cache.insert(source, is_32bit, schema)
             }
         };
 
@@ -518,49 +536,6 @@ impl TdhDecoder {
             event_name,
             schema_id: schema.schema_id,
         })
-    }
-
-    /// Looks up a classified schema `source` in the cache.
-    ///
-    /// Returns `Ok(Some(idx))` on a hit, `Ok(None)` on a miss (the caller
-    /// should perform a real decode), or `Err(Unsupported)` when a manifest
-    /// key is present in the negative cache.  The negative cache is checked
-    /// here so a chatty unsupported provider skips the `TdhGetEventInformation`
-    /// round trip on every event after the first.
-    fn lookup_cached(
-        &self,
-        source: &SchemaSource,
-        is_32bit: bool,
-    ) -> Result<Option<usize>, TdhDecodeError> {
-        match source {
-            SchemaSource::TraceLogging(bytes) => Ok(self.cache.index_of_tl(bytes, is_32bit)),
-            SchemaSource::Manifest(key) => {
-                if let Some(idx) = self.cache.index_of_manifest(key, is_32bit) {
-                    Ok(Some(idx))
-                } else if self.cache.is_manifest_unsupported(key) {
-                    Err(TdhDecodeError::Unsupported)
-                } else {
-                    Ok(None)
-                }
-            }
-        }
-    }
-
-    /// Inserts a freshly decoded `schema` under its `source` key and returns
-    /// the assigned arena index.  This is the single positive-cache insertion
-    /// point shared by every schema source.
-    fn insert_cached(
-        &mut self,
-        source: SchemaSource,
-        is_32bit: bool,
-        schema: CachedSchema,
-    ) -> usize {
-        match source {
-            SchemaSource::TraceLogging(bytes) => {
-                self.cache.insert_tl(bytes.to_vec(), is_32bit, schema)
-            }
-            SchemaSource::Manifest(key) => self.cache.insert_manifest(key, is_32bit, schema),
-        }
     }
 
     /// Performs a real TraceLogging decode after a cache miss, returning the
@@ -1589,19 +1564,22 @@ mod tests {
         let mut cache = SchemaCache::new();
 
         // 64-bit insert, then hit.
-        let idx_a = cache.insert_manifest(key, false, mk("A"));
-        assert_eq!(cache.index_of_manifest(&key, false), Some(idx_a));
+        let idx_a = cache.insert(SchemaSource::Manifest(key), false, mk("A"));
+        assert_eq!(cache.index_of(&SchemaSource::Manifest(key), false), Some(idx_a));
 
         // The 32-bit map is a separate keyspace: same key misses there.
-        assert_eq!(cache.index_of_manifest(&key, true), None);
-        let idx_b = cache.insert_manifest(key, true, mk("B"));
+        assert_eq!(cache.index_of(&SchemaSource::Manifest(key), true), None);
+        let idx_b = cache.insert(SchemaSource::Manifest(key), true, mk("B"));
         assert_ne!(idx_a, idx_b, "32-/64-bit split must yield distinct slots");
 
         // TraceLogging shares the arena but is indexed separately.
-        let tl_idx = cache.insert_tl(vec![1, 2, 3], false, mk("C"));
+        let tl_idx = cache.insert(SchemaSource::TraceLogging(&[1, 2, 3]), false, mk("C"));
         assert_ne!(tl_idx, idx_a);
         assert_ne!(tl_idx, idx_b);
-        assert_eq!(cache.index_of_tl(&[1, 2, 3], false), Some(tl_idx));
+        assert_eq!(
+            cache.index_of(&SchemaSource::TraceLogging(&[1, 2, 3]), false),
+            Some(tl_idx)
+        );
 
         // Each index reads back its own schema — no cross-source aliasing.
         assert_eq!(cache.get(idx_a).event_name, "A");
@@ -1611,7 +1589,10 @@ mod tests {
         // A duplicate manifest insert returns the existing index and drops
         // the freshly built schema (no arena orphan).
         let before = cache.schemas.len();
-        assert_eq!(cache.insert_manifest(key, false, mk("dup")), idx_a);
+        assert_eq!(
+            cache.insert(SchemaSource::Manifest(key), false, mk("dup")),
+            idx_a
+        );
         assert_eq!(cache.schemas.len(), before, "duplicate must not grow arena");
         assert_eq!(cache.get(idx_a).event_name, "A", "original schema preserved");
     }
@@ -1641,8 +1622,8 @@ mod tests {
         assert!(!cache.is_manifest_unsupported(&other), "distinct key unaffected");
 
         // Marking is not a positive-cache entry: index lookups still miss.
-        assert_eq!(cache.index_of_manifest(&key, false), None);
-        assert_eq!(cache.index_of_manifest(&key, true), None);
+        assert_eq!(cache.index_of(&SchemaSource::Manifest(key), false), None);
+        assert_eq!(cache.index_of(&SchemaSource::Manifest(key), true), None);
     }
 
     /// `read_decoding_source` must reject a buffer smaller than
@@ -1684,11 +1665,11 @@ mod tests {
     }
 
     /// TraceLogging inserts mirror the manifest single-hash vacancy semantics:
-    /// a duplicate `insert_tl` returns the existing index without growing the
+    /// a duplicate `insert` returns the existing index without growing the
     /// arena (no orphaned schema), and the 32-/64-bit maps stay separate
     /// keyspaces for identical bytes.
     #[test]
-    fn insert_tl_duplicate_key_returns_existing_index() {
+    fn tracelogging_duplicate_key_returns_existing_index() {
         let mk = |name: &str| CachedSchema {
             event_name: name.to_string(),
             format: EventFormat::new(),
@@ -1697,17 +1678,23 @@ mod tests {
 
         let mut cache = SchemaCache::new();
 
-        let idx = cache.insert_tl(vec![9, 8, 7], false, mk("first"));
-        assert_eq!(cache.index_of_tl(&[9, 8, 7], false), Some(idx));
+        let idx = cache.insert(SchemaSource::TraceLogging(&[9, 8, 7]), false, mk("first"));
+        assert_eq!(
+            cache.index_of(&SchemaSource::TraceLogging(&[9, 8, 7]), false),
+            Some(idx)
+        );
 
         // Duplicate insert returns the existing index and drops the freshly
         // built schema — the arena must not grow.
         let before = cache.schemas.len();
-        assert_eq!(cache.insert_tl(vec![9, 8, 7], false, mk("dup")), idx);
+        assert_eq!(
+            cache.insert(SchemaSource::TraceLogging(&[9, 8, 7]), false, mk("dup")),
+            idx
+        );
         assert_eq!(cache.schemas.len(), before, "duplicate must not grow arena");
         assert_eq!(cache.get(idx).event_name, "first", "original schema preserved");
 
         // The 32-bit map is a separate keyspace: the same bytes miss there.
-        assert_eq!(cache.index_of_tl(&[9, 8, 7], true), None);
+        assert_eq!(cache.index_of(&SchemaSource::TraceLogging(&[9, 8, 7]), true), None);
     }
 }
