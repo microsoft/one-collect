@@ -1817,6 +1817,15 @@ impl UniversalExporterOSHooks for UniversalExporter {
             session.disable()?;
             exporter.borrow_mut().mark_end();
 
+            /* When the session is disabled very early (for example, because
+             * the memory limit is reached immediately), the environment-capture
+             * thread may spend several minutes waiting for ring-buffer space on
+             * systems with many processes or modules. Continue parsing
+             * concurrently so the writer can finish promptly. */
+            while !env_handle.is_finished() {
+                session.parse_all()?;
+            }
+
             /* Wait for the background capture to finish */
             let _ = env_handle.join();
 
