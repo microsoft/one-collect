@@ -1,0 +1,66 @@
+# cargo-deny configuration for one-collect.
+#
+# cargo-deny audits the dependency graph for security advisories, disallowed or
+# duplicate crates, license compliance, and untrusted sources. See
+# https://embarkstudios.github.io/cargo-deny/ for the configuration reference.
+#
+# There is no workspace-level Cargo.toml, so CI runs cargo-deny once per crate
+# root (one_collect and record-trace) against this shared config.
+
+[graph]
+# Restrict the audited graph to the platforms one-collect actually ships and
+# tests in CI. This drops target-specific dependencies that never build here
+# (e.g. the wasm-only `instant` pulled in by rhai).
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "x86_64-pc-windows-msvc",
+]
+
+[advisories]
+# RustSec advisories (vulnerability / unsound / unmaintained) are always errors
+# in this cargo-deny version; entries below are the only accepted exceptions and
+# each one must be justified.
+ignore = [
+    # smartstring is unmaintained (repo archived) with no maintained drop-in.
+    # It is a transitive dependency of rhai, which has no released version that
+    # removes it. Re-evaluate whenever rhai drops or replaces smartstring.
+    "RUSTSEC-2026-0249",
+]
+
+[licenses]
+# Permissive licenses only, limited to those actually selected in the targeted
+# dependency graphs. Crates offering these only as alternatives to MIT/Apache-2.0
+# (e.g. adler2 `0BSD OR MIT OR Apache-2.0`) resolve to MIT or Apache-2.0, so the
+# extra options are intentionally left out to force explicit review if a future
+# dependency relies on one of them.
+allow = [
+    "Apache-2.0",
+    "CC0-1.0",
+    "MIT",
+    "Unicode-3.0",
+]
+
+# Per-crate license exceptions for crates not covered by the allow-list above.
+exceptions = [
+    # smartstring (transitive via rhai) is MPL-2.0, a file-level weak copyleft
+    # that imposes no obligations on the rest of the project. Tied to the
+    # RUSTSEC-2026-0249 ignore above; both go away if rhai drops smartstring.
+    { name = "smartstring", allow = ["MPL-2.0"] },
+]
+
+[bans]
+# Surface duplicate versions of the same crate as a warning.
+multiple-versions = "warn"
+# Reject wildcard ("*") version requirements so registry dependencies stay
+# explicit; local path crates (engine, record-trace) are exempt.
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+# Only crates.io is trusted.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

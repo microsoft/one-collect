@@ -1,0 +1,39 @@
+name: Cargo Deny
+
+# PR-blocking supply-chain checks: bans, licenses, sources. These only change
+# when a PR edits dependency manifests or lockfiles, so they never fail an
+# unrelated change. The `advisories` check is deliberately NOT run here because
+# the RustSec database is updated continuously and a newly published advisory
+# against an existing dependency would otherwise block unrelated PRs. Advisories
+# are scanned against the full graph on a schedule instead; see
+# cargo-deny-advisories.yml.
+
+permissions:
+  contents: read
+
+on:
+  workflow_call:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cargo-deny:
+    name: Cargo Deny
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    # Installed from source to avoid taking on a third-party GitHub Action;
+    # `--locked` keeps the build reproducible.
+    - name: Install cargo-deny
+      run: cargo install cargo-deny --locked
+
+    # There is no workspace-level Cargo.toml, so each crate root is checked
+    # against the shared repo-root deny.toml.
+    - name: 'one_collect: cargo deny check'
+      run: cargo deny --manifest-path one_collect/Cargo.toml --config deny.toml check bans licenses sources
+
+    - name: 'record-trace: cargo deny check'
+      run: cargo deny --manifest-path record-trace/Cargo.toml --config deny.toml check bans licenses sources

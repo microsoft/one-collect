@@ -12,6 +12,13 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Supply-chain checks that gate PRs: bans, licenses, sources. Platform-agnostic,
+  # so it runs once rather than per-platform. Advisories are scanned on a schedule
+  # in cargo-deny-advisories.yml so a newly published advisory against an existing
+  # dependency does not block unrelated PRs.
+  cargo_deny:
+    uses: ./.github/workflows/cargo-deny.yml
+
   # Clippy lints ordered by platform (glibc, musl, windows)
   clippy_linux_glibc_x64:
     uses: ./.github/workflows/clippy.yml

@@ -64,7 +64,7 @@ features = ["Win32_Foundation", "Win32_System_Diagnostics_Etw"]
 libc = "0.2.153"
 
 [dev-dependencies]
-criterion = "0.3"
+criterion = "0.5"
 
 # Windows-only dev-deps used by the TDH decoder integration tests under
 # `tests/etw_tdh_integration.rs`. These crates emit real ETW TraceLogging
