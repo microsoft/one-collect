@@ -1180,3 +1180,537 @@ fn tdh_decodes_manifest_kernel_process_events() {
     );
 }
 
+// ── Test F: manifest decoding of a compiled-at-test-time manifest ─────
+//
+// Unlike Test E (which drives a live OS provider), this test owns its
+// provider end to end: it compiles the checked-in WES manifest
+// (`test_assets/manifest/one_collect_test.man`) with the Windows SDK
+// (`mc.exe` -> `rc.exe` -> `link.exe`), registers it with the OS
+// (`wevtutil im`), emits one event per template through the live ETW
+// runtime via `EventRegister`/`EventWrite`, and asserts that every inType
+// the decoder supports round-trips through the manifest path.
+//
+// This is the comprehensive counterpart to Test E and is the only test
+// that exercises the manifest counted-string inTypes
+// (`win:CountedUnicodeString` / `win:CountedAnsiString` ->
+// `TDH_INTYPE_MANIFEST_COUNTEDSTRING`/`ANSISTRING`).
+//
+// It requires elevation (for `wevtutil im` and the ETW consumer session)
+// and the Windows SDK + MSVC tools on `PATH`.  When those tools are
+// absent it prints a `SKIP` line and returns `Ok` rather than failing, so
+// a non-elevated / SDK-less dev box still passes `cargo test`.  CI puts
+// the tools on `PATH` (see `msvc-dev-cmd` in the ETW integration job) and
+// runs elevated as `runneradmin`.
+//
+// Scope: x64 only.  The link step hard-codes `/MACHINE:X64` and the
+// payload assumes an 8-byte `win:Pointer`, matching the x64 Windows CI
+// runner; a 32-bit build would need a different machine flag and pointer
+// width.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use windows_sys::Win32::System::Diagnostics::Etw::{
+    EventRegister, EventUnregister, EventWrite,
+    EVENT_DATA_DESCRIPTOR, EVENT_DESCRIPTOR,
+};
+
+/// `u128` form of the test provider GUID, used to build the framework
+/// `Guid` the capturing session subscribes to.
+const TEST_MANIFEST_PROVIDER: u128 = 0x4948EF3B_4F28_4747_9BB9_649008E2EDEF;
+
+/// `windows_sys` form of the same GUID, used by `EventRegister`.
+const PROVIDER_GUID_SYS: windows_sys::core::GUID = windows_sys::core::GUID {
+    data1: 0x4948EF3B,
+    data2: 0x4F28,
+    data3: 0x4747,
+    data4: [0x9B, 0xB9, 0x64, 0x90, 0x08, 0xE2, 0xED, 0xEF],
+};
+
+// Expected field values (byte-distinct where practical, so any
+// offset/endianness slip fails loudly).
+const EXP_I8: i8 = -2;
+const EXP_U8: u8 = 0xAB;
+const EXP_I16: i16 = -12_345;
+const EXP_U16: u16 = 0xABCD;
+const EXP_I32: i32 = -1_234_567;
+const EXP_U32: u32 = 0xDEAD_BEEF;
+const EXP_I64: i64 = -1_234_567_890_123;
+const EXP_U64: u64 = 0x0102_0304_0506_0708;
+const EXP_H32: u32 = 0xCAFE_F00D;
+const EXP_H64: u64 = 0x1122_3344_5566_7788;
+const EXP_F32: f32 = std::f32::consts::PI;
+const EXP_F64: f64 = std::f64::consts::E;
+const EXP_BOOL: u32 = 1;
+/// On-wire bytes of GUID `{11223344-5566-7788-99AA-BBCCDDEEFF00}`:
+/// Data1/2/3 little-endian, Data4 as-is.
+const EXP_GUID_BYTES: [u8; 16] = [
+    0x44, 0x33, 0x22, 0x11, 0x66, 0x55, 0x88, 0x77,
+    0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00,
+];
+const EXP_FILETIME: u64 = 0x01D9_AABB_CCDD_EEFF;
+/// SYSTEMTIME fields: year, month, dayOfWeek, day, hour, minute, second,
+/// milliseconds (each a little-endian `u16`).
+const EXP_SYSTIME: [u16; 8] = [2026, 8, 0, 9, 12, 34, 56, 789];
+const EXP_PTR: u64 = 0x0000_7FF6_1234_5678;
+const EXP_COUNTEDW: &str = "counted-wide";
+const EXP_COUNTEDA: &str = "counted-ansi";
+const EXP_ANSI: &str = "ansi-string";
+const EXP_UNICODE: &str = "unicode-string";
+const EXP_SENTINEL: u32 = 0x5A5A_5A5A;
+const EXP_BLOB: [u8; 4] = [0xDE, 0xAD, 0xBE, 0xEF];
+
+const SCALARS_NAMES: [&str; 17] = [
+    "I8", "U8", "I16", "U16", "I32", "U32", "I64", "U64",
+    "H32", "H64", "F32", "F64", "Bool", "Guid", "FileTime",
+    "SysTime", "Ptr",
+];
+const SCALARS_TYPES: [&str; 17] = [
+    "s8", "u8", "s16", "u16", "s32", "u32", "s64", "u64",
+    "s32", "s64", "float", "double", "u32", "guid", "filetime",
+    "systemtime", "pointer",
+];
+const STRINGS_NAMES: [&str; 5] =
+    ["CountedW", "CountedA", "Ansi", "Unicode", "Sentinel"];
+const STRINGS_TYPES: [&str; 5] =
+    ["counted_wstring", "counted_string", "string", "wstring", "u32"];
+const BLOB_NAMES: [&str; 1] = ["Blob"];
+const BLOB_TYPES: [&str; 1] = ["binary"];
+
+/// Absolute path to the checked-in manifest asset.
+fn manifest_asset_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("test_assets")
+        .join("manifest")
+        .join("one_collect_test.man")
+}
+
+/// Runs an external tool in `cwd`, mapping a missing executable to a
+/// skip-reason and a non-zero exit to a descriptive error.
+fn run_tool(name: &str, args: &[&str], cwd: &Path) -> Result<(), String> {
+    let output = match Command::new(name).args(args).current_dir(cwd).output() {
+        Ok(o) => o,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!(
+                "`{name}` not found on PATH (Windows SDK / MSVC dev \
+                 environment required)"
+            ));
+        }
+        Err(e) => return Err(format!("failed to launch `{name}`: {e}")),
+    };
+    if !output.status.success() {
+        return Err(format!(
+            "`{name} {}` failed ({}):\nstdout: {}\nstderr: {}",
+            args.join(" "),
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        ));
+    }
+    // Surface output on success too, so `--nocapture` runs show what each
+    // build/registration step did.
+    eprintln!(
+        "`{name} {}` ok\nstdout: {}\nstderr: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    Ok(())
+}
+
+/// A registered manifest whose `Drop` unregisters it (`wevtutil um`) and
+/// removes the temp build directory, so cleanup happens even on panic.
+struct RegisteredManifest {
+    man: PathBuf,
+    workdir: PathBuf,
+}
+
+impl Drop for RegisteredManifest {
+    fn drop(&mut self) {
+        let man = self.man.to_string_lossy();
+        if let Err(e) =
+            run_tool("wevtutil.exe", &["um", &man], &self.workdir)
+        {
+            eprintln!("WARN: manifest unregister failed: {e}");
+        }
+        let _ = std::fs::remove_dir_all(&self.workdir);
+    }
+}
+
+/// Compiles the manifest asset into a resource-only DLL and registers it
+/// with the OS.  Returns a guard that cleans up on drop, or a skip-reason
+/// string when the SDK tools are unavailable.  The temp build directory is
+/// removed on every early-return path, not just success.
+fn compile_and_register_manifest() -> Result<RegisteredManifest, String> {
+    let src = manifest_asset_path();
+    if !src.exists() {
+        return Err(format!("manifest asset missing: {}", src.display()));
+    }
+
+    let workdir = std::env::temp_dir()
+        .join(format!("one_collect_manifest_test_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&workdir);
+    std::fs::create_dir_all(&workdir)
+        .map_err(|e| format!("create workdir {}: {e}", workdir.display()))?;
+
+    // Every fallible step below runs through this closure so a failure can
+    // remove `workdir` before propagating, rather than leaking it.
+    let build = || -> Result<PathBuf, String> {
+        let man = workdir.join("one_collect_test.man");
+        std::fs::copy(&src, &man).map_err(|e| format!("copy manifest: {e}"))?;
+
+        // 1. Message Compiler: manifest -> header + .rc + resource .bin files.
+        run_tool("mc.exe", &["one_collect_test.man"], &workdir)?;
+        // 2. Resource Compiler: .rc -> .res.
+        run_tool(
+            "rc.exe",
+            &["/nologo", "/fo", "one_collect_test.res", "one_collect_test.rc"],
+            &workdir,
+        )?;
+        // 3. Linker: .res -> resource-only DLL (no code, no entry point).
+        run_tool(
+            "link.exe",
+            &[
+                "/NOLOGO", "/DLL", "/NOENTRY", "/MACHINE:X64",
+                "/OUT:one_collect_test.dll", "one_collect_test.res",
+            ],
+            &workdir,
+        )?;
+        // 4. Register (requires admin); point both resource + message files
+        //    at the freshly built DLL by absolute path.
+        let dll = workdir.join("one_collect_test.dll");
+        let rf = format!("/rf:{}", dll.display());
+        let mf = format!("/mf:{}", dll.display());
+        run_tool(
+            "wevtutil.exe",
+            &["im", "one_collect_test.man", &rf, &mf],
+            &workdir,
+        )?;
+        Ok(man)
+    };
+
+    match build() {
+        Ok(man) => Ok(RegisteredManifest {
+            man,
+            workdir,
+        }),
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&workdir);
+            Err(e)
+        }
+    }
+}
+
+/// Thin RAII wrapper over an ETW provider registration used to emit the
+/// manifest events.
+struct ManifestEmitter {
+    handle: u64,
+}
+
+impl ManifestEmitter {
+    fn register() -> Result<Self, u32> {
+        let mut handle: u64 = 0;
+        // SAFETY: `PROVIDER_GUID_SYS` outlives the call; no enable
+        // callback or context is supplied.
+        let status = unsafe {
+            EventRegister(
+                &PROVIDER_GUID_SYS as *const windows_sys::core::GUID,
+                None,
+                std::ptr::null(),
+                &mut handle,
+            )
+        };
+        if status == 0 {
+            Ok(Self { handle })
+        } else {
+            Err(status)
+        }
+    }
+
+    /// Writes one manifest event.  The entire payload is supplied as a
+    /// single contiguous buffer (TDH sees the concatenated `UserData`
+    /// regardless of how it is split across data descriptors).
+    fn write(&self, id: u16, task: u16, payload: &[u8]) -> u32 {
+        let desc = EVENT_DESCRIPTOR {
+            Id: id,
+            Version: 0,
+            Channel: 0,
+            Level: 5, // win:Verbose
+            Opcode: 0,
+            Task: task,
+            Keyword: 0,
+        };
+        let data = EVENT_DATA_DESCRIPTOR {
+            Ptr: payload.as_ptr() as u64,
+            Size: payload.len() as u32,
+            // SAFETY: the `Reserved`/anonymous union is zero-initialised,
+            // as required by the ETW ABI for caller-supplied descriptors.
+            Anonymous: unsafe { std::mem::zeroed() },
+        };
+        // SAFETY: `handle` is a live registration; `desc` and `data`
+        // outlive the call; `payload` outlives `data`.  `REGHANDLE` is a
+        // signed 64-bit handle, so the `u64` handle is cast to `i64`.
+        unsafe {
+            EventWrite(
+                self.handle as i64,
+                &desc as *const EVENT_DESCRIPTOR,
+                1,
+                &data as *const EVENT_DATA_DESCRIPTOR,
+            )
+        }
+    }
+}
+
+impl Drop for ManifestEmitter {
+    fn drop(&mut self) {
+        // SAFETY: `handle` was returned by a successful `EventRegister`.
+        unsafe {
+            EventUnregister(self.handle as i64);
+        }
+    }
+}
+
+/// Builds a length-prefixed UTF-16LE counted string (u16 byte-count
+/// prefix + content, no terminator).
+fn counted_utf16(s: &str) -> Vec<u8> {
+    let units: Vec<u16> = s.encode_utf16().collect();
+    let byte_len = (units.len() * 2) as u16;
+    let mut v = byte_len.to_le_bytes().to_vec();
+    for u in units {
+        v.extend_from_slice(&u.to_le_bytes());
+    }
+    v
+}
+
+/// Builds a length-prefixed ANSI counted string (u16 byte-count prefix +
+/// content, no terminator).
+fn counted_ansi(s: &str) -> Vec<u8> {
+    let bytes = s.as_bytes();
+    let mut v = (bytes.len() as u16).to_le_bytes().to_vec();
+    v.extend_from_slice(bytes);
+    v
+}
+
+/// Packs the `ScalarsT` template payload in declared field order.
+fn scalars_payload() -> Vec<u8> {
+    let mut p = Vec::new();
+    p.push(EXP_I8 as u8);
+    p.push(EXP_U8);
+    p.extend_from_slice(&EXP_I16.to_le_bytes());
+    p.extend_from_slice(&EXP_U16.to_le_bytes());
+    p.extend_from_slice(&EXP_I32.to_le_bytes());
+    p.extend_from_slice(&EXP_U32.to_le_bytes());
+    p.extend_from_slice(&EXP_I64.to_le_bytes());
+    p.extend_from_slice(&EXP_U64.to_le_bytes());
+    p.extend_from_slice(&EXP_H32.to_le_bytes());
+    p.extend_from_slice(&EXP_H64.to_le_bytes());
+    p.extend_from_slice(&EXP_F32.to_le_bytes());
+    p.extend_from_slice(&EXP_F64.to_le_bytes());
+    p.extend_from_slice(&EXP_BOOL.to_le_bytes());
+    p.extend_from_slice(&EXP_GUID_BYTES);
+    p.extend_from_slice(&EXP_FILETIME.to_le_bytes());
+    for v in EXP_SYSTIME {
+        p.extend_from_slice(&v.to_le_bytes());
+    }
+    p.extend_from_slice(&EXP_PTR.to_le_bytes());
+    p
+}
+
+/// Packs the `StringsT` template payload in declared field order.
+fn strings_payload() -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&counted_utf16(EXP_COUNTEDW));
+    p.extend_from_slice(&counted_ansi(EXP_COUNTEDA));
+    p.extend_from_slice(EXP_ANSI.as_bytes());
+    p.push(0); // ANSI NUL terminator
+    for u in EXP_UNICODE.encode_utf16() {
+        p.extend_from_slice(&u.to_le_bytes());
+    }
+    p.extend_from_slice(&0u16.to_le_bytes()); // UTF-16 NUL terminator
+    p.extend_from_slice(&EXP_SENTINEL.to_le_bytes());
+    p
+}
+
+/// Packs the `BlobT` template payload (a fixed 4-byte binary).
+fn blob_payload() -> Vec<u8> {
+    EXP_BLOB.to_vec()
+}
+
+/// Returns a captured event's decoded bytes for `name`, resolving the
+/// full (possibly variable-length) field layout.
+fn field_bytes(event: &CapturedEvent, name: &str) -> Vec<u8> {
+    event
+        .format
+        .fields_with_data(&event.payload)
+        .find(|(f, _)| f.name == name)
+        .map(|(_, b)| b.to_vec())
+        .unwrap_or_else(|| panic!("field {name:?} not found in decoded event"))
+}
+
+/// Reads exactly `N` bytes for `name`, asserting the on-wire size.
+fn exact<const N: usize>(event: &CapturedEvent, name: &str) -> [u8; N] {
+    let b = field_bytes(event, name);
+    assert_eq!(b.len(), N, "{name} on-wire size");
+    b.try_into().unwrap()
+}
+
+/// Locates the first captured event whose first field has the given name.
+///
+/// Matching on the schema (rather than the decoded event name) keeps the
+/// lookup robust even if the manifest task name were ever surfaced
+/// differently; the task name is asserted separately.
+fn find_by_first_field<'a>(
+    captured: &'a [CapturedEvent],
+    first: &str,
+) -> &'a CapturedEvent {
+    captured
+        .iter()
+        .find(|e| e.field_names.first().map(|s| s.as_str()) == Some(first))
+        .unwrap_or_else(|| {
+            let seen: Vec<(&String, &Vec<String>)> =
+                captured.iter().map(|e| (&e.name, &e.field_names)).collect();
+            panic!(
+                "no captured event whose first field is {first:?}; saw {seen:?}"
+            )
+        })
+}
+
+#[ignore]
+#[test]
+fn tdh_decodes_compiled_manifest_all_types() {
+    let _guard = match compile_and_register_manifest() {
+        Ok(g) => g,
+        Err(skip) => {
+            eprintln!(
+                "SKIP tdh_decodes_compiled_manifest_all_types: {skip}"
+            );
+            return;
+        }
+    };
+
+    let provider_guid = Guid::from_u128(TEST_MANIFEST_PROVIDER);
+    let (captured, _counter, callback) = make_capture_sink();
+
+    // Track which of the three event Ids we've observed on the wire.
+    let seen = Arc::new([
+        AtomicBool::new(false),
+        AtomicBool::new(false),
+        AtomicBool::new(false),
+    ]);
+    let seen_cb = seen.clone();
+
+    let mut session = build_capturing_session_observed(
+        provider_guid,
+        "OneCollect.TdhIntegration.Manifest.All",
+        callback,
+        move |id| {
+            if (1..=3).contains(&id) {
+                seen_cb[(id - 1) as usize].store(true, Ordering::Relaxed);
+            }
+        },
+    );
+
+    // Emit the events once the provider is enabled.  `started_callback`
+    // fires after `EnableTraceEx2` returns, so writes afterward are
+    // delivered to this session.  Emit in a loop until capture is done to
+    // absorb any startup race.
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_thread = stop.clone();
+    session.add_started_callback(move |_ctx| {
+        let stop = stop_thread.clone();
+        std::thread::spawn(move || {
+            let emitter = match ManifestEmitter::register() {
+                Ok(e) => e,
+                Err(code) => {
+                    eprintln!("WARN: EventRegister failed with {code}");
+                    return;
+                }
+            };
+            let scalars = scalars_payload();
+            let strings = strings_payload();
+            let blob = blob_payload();
+            // Report the first nonzero EventWrite status only, so a genuine
+            // write failure is diagnosable without spamming the retry loop.
+            let mut warned = false;
+            let deadline = Instant::now() + TEST_TIMEOUT;
+            while !stop.load(Ordering::Relaxed) && Instant::now() < deadline {
+                for (id, payload) in
+                    [(1u16, &scalars), (2, &strings), (3, &blob)]
+                {
+                    let status = emitter.write(id, id, payload);
+                    if status != 0 && !warned {
+                        eprintln!(
+                            "WARN: EventWrite for event {id} failed with {status}"
+                        );
+                        warned = true;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        });
+    });
+
+    let seen_drive = seen.clone();
+    let captured = drive_until(
+        session,
+        "one_collect_tdh_manifest_all",
+        &captured,
+        move || seen_drive.iter().all(|b| b.load(Ordering::Relaxed)),
+    );
+    stop.store(true, Ordering::Relaxed);
+
+    // ── Scalars ─────────────────────────────────────────────────────
+    let ev = find_by_first_field(&captured, "I8");
+    assert_eq!(ev.name, "Scalars", "scalars task name");
+    assert_schema(ev, &SCALARS_NAMES, &SCALARS_TYPES, "manifest scalars");
+    assert_eq!(i8::from_le_bytes(exact::<1>(ev, "I8")), EXP_I8);
+    assert_eq!(u8::from_le_bytes(exact::<1>(ev, "U8")), EXP_U8);
+    assert_eq!(i16::from_le_bytes(exact::<2>(ev, "I16")), EXP_I16);
+    assert_eq!(u16::from_le_bytes(exact::<2>(ev, "U16")), EXP_U16);
+    assert_eq!(i32::from_le_bytes(exact::<4>(ev, "I32")), EXP_I32);
+    assert_eq!(u32::from_le_bytes(exact::<4>(ev, "U32")), EXP_U32);
+    assert_eq!(i64::from_le_bytes(exact::<8>(ev, "I64")), EXP_I64);
+    assert_eq!(u64::from_le_bytes(exact::<8>(ev, "U64")), EXP_U64);
+    assert_eq!(u32::from_le_bytes(exact::<4>(ev, "H32")), EXP_H32);
+    assert_eq!(u64::from_le_bytes(exact::<8>(ev, "H64")), EXP_H64);
+    assert_eq!(
+        f32::from_le_bytes(exact::<4>(ev, "F32")).to_bits(),
+        EXP_F32.to_bits()
+    );
+    assert_eq!(
+        f64::from_le_bytes(exact::<8>(ev, "F64")).to_bits(),
+        EXP_F64.to_bits()
+    );
+    assert_eq!(u32::from_le_bytes(exact::<4>(ev, "Bool")), EXP_BOOL);
+    assert_eq!(field_bytes(ev, "Guid"), EXP_GUID_BYTES);
+    assert_eq!(u64::from_le_bytes(exact::<8>(ev, "FileTime")), EXP_FILETIME);
+    let systime: Vec<u8> =
+        EXP_SYSTIME.iter().flat_map(|v| v.to_le_bytes()).collect();
+    assert_eq!(field_bytes(ev, "SysTime"), systime);
+    assert_eq!(u64::from_le_bytes(exact::<8>(ev, "Ptr")), EXP_PTR);
+
+    // ── Strings ─────────────────────────────────────────────────────
+    let ev = find_by_first_field(&captured, "CountedW");
+    assert_eq!(ev.name, "Strings", "strings task name");
+    assert_schema(ev, &STRINGS_NAMES, &STRINGS_TYPES, "manifest strings");
+    let cw = field_bytes(ev, "CountedW");
+    let cw_units: Vec<u16> =
+        cw.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    assert_eq!(String::from_utf16(&cw_units).unwrap(), EXP_COUNTEDW);
+    assert_eq!(field_bytes(ev, "CountedA"), EXP_COUNTEDA.as_bytes());
+    assert_eq!(field_bytes(ev, "Ansi"), EXP_ANSI.as_bytes());
+    let uni = field_bytes(ev, "Unicode");
+    let uni_units: Vec<u16> =
+        uni.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    assert_eq!(String::from_utf16(&uni_units).unwrap(), EXP_UNICODE);
+    // The sentinel proves the four preceding variable-length string fields
+    // each consumed exactly their bytes and kept the following offset
+    // aligned (the counted-string length-prefix regression guard).
+    assert_eq!(u32::from_le_bytes(exact::<4>(ev, "Sentinel")), EXP_SENTINEL);
+
+    // ── Blob ────────────────────────────────────────────────────────
+    let ev = find_by_first_field(&captured, "Blob");
+    assert_eq!(ev.name, "Blobs", "blobs task name");
+    assert_schema(ev, &BLOB_NAMES, &BLOB_TYPES, "manifest blob");
+    assert_eq!(field_bytes(ev, "Blob"), EXP_BLOB);
+}
+

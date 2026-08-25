@@ -75,6 +75,11 @@ criterion = "0.3"
 [target.'cfg(target_os = "windows")'.dev-dependencies]
 tracelogging = "1.2"
 tracelogging_dynamic = "1.2"
+# Used by the manifest-decode integration test
+# (`tdh_decodes_compiled_manifest_all_types`) to emit real manifest-based
+# ETW events via `EventRegister`/`EventWrite`.  Same version as the crate's
+# own windows-sys dependency so Cargo unifies features.
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Diagnostics_Etw"] }
 
 [[bench]]
 name = "event"

@@ -118,8 +118,17 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run etw_tdh_integration
+        # The manifest-decode test (`tdh_decodes_compiled_manifest_all_types`)
+        # compiles a WES manifest at runtime, so mc.exe / rc.exe / link.exe
+        # must be on PATH.  Initialise the VS dev environment via vcvars64
+        # (located with vswhere) rather than a third-party action.
+        # wevtutil.exe is already on PATH and the runner is `runneradmin`.
         working-directory: one_collect
-        run: cargo test --locked --test etw_tdh_integration -- --ignored --nocapture --test-threads=1
+        shell: cmd
+        run: |
+          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do set "VSPATH=%%i"
+          call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat"
+          cargo test --locked --test etw_tdh_integration -- --ignored --nocapture --test-threads=1
       - name: Run etw_stats_integration
         working-directory: one_collect
         run: cargo test --locked --test etw_stats_integration -- --ignored --nocapture --test-threads=1

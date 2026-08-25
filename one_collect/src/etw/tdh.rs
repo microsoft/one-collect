@@ -111,6 +111,12 @@ use windows_sys::Win32::System::Diagnostics::Etw::{
     TDH_INTYPE_SID,
     TDH_INTYPE_HEXINT32,
     TDH_INTYPE_HEXINT64,
+    // Manifest-range counted strings (mc.exe emits these for
+    // `CountedUnicodeString` / `CountedAnsiString`, since 2018).
+    TDH_INTYPE_MANIFEST_COUNTEDSTRING,
+    TDH_INTYPE_MANIFEST_COUNTEDANSISTRING,
+    // WBEM/WMI-range counted strings (same on-wire format, different
+    // numeric constant).
     TDH_INTYPE_COUNTEDSTRING,
     TDH_INTYPE_COUNTEDANSISTRING,
     TDH_INTYPE_REVERSEDCOUNTEDSTRING,
@@ -795,6 +801,8 @@ fn walk_properties(
             in_type,
             TDH_INTYPE_UNICODESTRING
             | TDH_INTYPE_ANSISTRING
+            | TDH_INTYPE_MANIFEST_COUNTEDSTRING
+            | TDH_INTYPE_MANIFEST_COUNTEDANSISTRING
             | TDH_INTYPE_COUNTEDSTRING
             | TDH_INTYPE_COUNTEDANSISTRING
             | TDH_INTYPE_REVERSEDCOUNTEDSTRING
@@ -1063,8 +1071,18 @@ const fn intype_to_field_info(in_type: i32, is_32bit: bool) -> (&'static str, Lo
         TDH_INTYPE_UNICODESTRING                 => ("wstring", LocationType::StaticUTF16String, 0),
 
         // Counted strings (2-byte length prefix + content bytes).
-        TDH_INTYPE_COUNTEDSTRING                 => ("counted_wstring", LocationType::StaticLenPrefixArray, 0),
-        TDH_INTYPE_COUNTEDANSISTRING             => ("counted_string",  LocationType::StaticLenPrefixArray, 0),
+        //
+        // Two numeric families share this identical on-wire layout, so
+        // they decode through the same `StaticLenPrefixArray` path:
+        //   * Manifest range (22/23): emitted by `mc.exe` for manifest
+        //     `CountedUnicodeString` / `CountedAnsiString` fields.
+        //   * WBEM/WMI range (300/301): legacy WMI-sourced schemas.
+        // TraceLogging self-describing events use the same in_type values,
+        // so no separate handling is needed for the two decoding sources.
+        TDH_INTYPE_MANIFEST_COUNTEDSTRING
+        | TDH_INTYPE_COUNTEDSTRING               => ("counted_wstring", LocationType::StaticLenPrefixArray, 0),
+        TDH_INTYPE_MANIFEST_COUNTEDANSISTRING
+        | TDH_INTYPE_COUNTEDANSISTRING           => ("counted_string",  LocationType::StaticLenPrefixArray, 0),
 
         // Reversed-counted strings (length at end of data).
         // For TraceLogging the payload is typically null-terminated,
@@ -1135,6 +1153,26 @@ mod tests {
         // Counted string variants (2-byte length prefix)
         assert_eq!(intype_to_type_name(TDH_INTYPE_COUNTEDSTRING), "counted_wstring");
         assert_eq!(intype_to_type_name(TDH_INTYPE_COUNTEDANSISTRING), "counted_string");
+        // Manifest-range counted strings (22/23) share the same on-wire
+        // layout as the WBEM range (300/301) and map identically.
+        assert_eq!(intype_to_type_name(TDH_INTYPE_MANIFEST_COUNTEDSTRING), "counted_wstring");
+        assert_eq!(intype_to_type_name(TDH_INTYPE_MANIFEST_COUNTEDANSISTRING), "counted_string");
+        // The LocationType is what actually drives decoding: both manifest
+        // and WBEM counted strings must resolve to a 2-byte length-prefixed
+        // array so the length prefix is consumed and following fields keep
+        // their offsets.
+        assert_eq!(
+            intype_to_field_info(TDH_INTYPE_MANIFEST_COUNTEDSTRING, false),
+            ("counted_wstring", LocationType::StaticLenPrefixArray, 0),
+        );
+        assert_eq!(
+            intype_to_field_info(TDH_INTYPE_MANIFEST_COUNTEDANSISTRING, false),
+            ("counted_string", LocationType::StaticLenPrefixArray, 0),
+        );
+        assert_eq!(
+            intype_to_field_info(TDH_INTYPE_COUNTEDSTRING, false),
+            ("counted_wstring", LocationType::StaticLenPrefixArray, 0),
+        );
         // Reversed-counted → null-scan fallback
         assert_eq!(intype_to_type_name(TDH_INTYPE_REVERSEDCOUNTEDSTRING), "wstring");
         assert_eq!(intype_to_type_name(TDH_INTYPE_REVERSEDCOUNTEDANSISTRING), "string");

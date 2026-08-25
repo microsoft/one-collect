@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Copyright (c) Microsoft Corporation.
+  Licensed under the MIT license.
+
+  Instrumentation manifest for the one_collect TDH manifest-decode
+  integration test (`tdh_decodes_compiled_manifest_all_types` in
+  tests/etw_tdh_integration.rs).
+
+  This manifest is compiled with the Windows SDK Message Compiler
+  (mc.exe), linked into a resource-only DLL, and registered with the OS
+  (`wevtutil im`) at test time.  The test then emits one event per
+  template through the live ETW runtime and decodes it back through
+  `TdhDecoder`, asserting that every supported inType round-trips.
+
+  It deliberately covers every inType the decoder maps in
+  `intype_to_field_info`, including win:CountedUnicodeString /
+  win:CountedAnsiString (TDH_INTYPE_MANIFEST_COUNTEDSTRING = 22 /
+  MANIFEST_COUNTEDANSISTRING = 23).  The reversed-counted and
+  non-null-terminated string inTypes are WBEM-only (they have no manifest
+  inType) and are covered by unit tests instead.
+-->
+<instrumentationManifest
+    xmlns="http://schemas.microsoft.com/win/2004/08/events"
+    xmlns:win="http://manifests.microsoft.com/win/2004/08/windows/events"
+    xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <instrumentation>
+    <events>
+      <provider
+          name="OneCollect-Test-Manifest"
+          guid="{4948EF3B-4F28-4747-9BB9-649008E2EDEF}"
+          symbol="ONECOLLECT_TEST_PROVIDER"
+          resourceFileName="one_collect_test.dll"
+          messageFileName="one_collect_test.dll">
+
+        <tasks>
+          <task name="Scalars" value="1" symbol="TASK_SCALARS"/>
+          <task name="Strings" value="2" symbol="TASK_STRINGS"/>
+          <task name="Blobs"   value="3" symbol="TASK_BLOBS"/>
+        </tasks>
+
+        <templates>
+          <!-- Every fixed-size in-type the decoder supports. -->
+          <template tid="ScalarsT">
+            <data name="I8"       inType="win:Int8"/>
+            <data name="U8"       inType="win:UInt8"/>
+            <data name="I16"      inType="win:Int16"/>
+            <data name="U16"      inType="win:UInt16"/>
+            <data name="I32"      inType="win:Int32"/>
+            <data name="U32"      inType="win:UInt32"/>
+            <data name="I64"      inType="win:Int64"/>
+            <data name="U64"      inType="win:UInt64"/>
+            <data name="H32"      inType="win:HexInt32"/>
+            <data name="H64"      inType="win:HexInt64"/>
+            <data name="F32"      inType="win:Float"/>
+            <data name="F64"      inType="win:Double"/>
+            <data name="Bool"     inType="win:Boolean"/>
+            <data name="Guid"     inType="win:GUID"/>
+            <data name="FileTime" inType="win:FILETIME"/>
+            <data name="SysTime"  inType="win:SYSTEMTIME"/>
+            <data name="Ptr"      inType="win:Pointer"/>
+          </template>
+
+          <!-- Every string in-type the decoder supports, with a trailing
+               scalar sentinel to prove the variable-length fields consume
+               exactly their bytes and keep following offsets aligned. -->
+          <template tid="StringsT">
+            <data name="CountedW"  inType="win:CountedUnicodeString"/>
+            <data name="CountedA"  inType="win:CountedAnsiString"/>
+            <data name="Ansi"      inType="win:AnsiString"/>
+            <data name="Unicode"   inType="win:UnicodeString"/>
+            <data name="Sentinel"  inType="win:UInt32"/>
+          </template>
+
+          <!-- Fixed-length binary.  A fixed length is reported by TDH as a
+               literal byte count, so the decoder sizes it correctly.
+               Variable-length binary and win:SID are a separate, known
+               limitation and are not covered here. -->
+          <template tid="BlobT">
+            <data name="Blob" inType="win:Binary" length="4"/>
+          </template>
+        </templates>
+
+        <events>
+          <event value="1" version="0" level="win:Verbose"
+                 task="Scalars" template="ScalarsT" symbol="EVT_SCALARS"/>
+          <event value="2" version="0" level="win:Verbose"
+                 task="Strings" template="StringsT" symbol="EVT_STRINGS"/>
+          <event value="3" version="0" level="win:Verbose"
+                 task="Blobs"   template="BlobT"    symbol="EVT_BLOBS"/>
+        </events>
+      </provider>
+    </events>
+  </instrumentation>
+</instrumentationManifest>
