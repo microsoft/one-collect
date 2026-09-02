@@ -310,6 +310,14 @@ impl Recorder {
                 debug!("Using default configuration");
                 UniversalExporter::new(settings)
             }
+        };
+
+        let universal = match self.args.per_cpu_buffer_size_bytes() {
+            Some(bytes) => {
+                info!("Configuring per-CPU event buffer: bytes={}", bytes);
+                universal.with_per_cpu_buffer_bytes(bytes)
+            },
+            None => universal,
         }.with_dotnet_help(dotnet);
         
         // Start recording.
