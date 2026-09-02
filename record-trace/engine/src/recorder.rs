@@ -25,6 +25,12 @@ use std::fmt::Write;
 
 const DEFAULT_CPU_FREQUENCY: u64 = 1000;
 
+fn per_cpu_buffer_size(
+    total_bytes: usize,
+    cpu_count: u32) -> usize {
+    total_bytes.div_ceil(cpu_count.max(1) as usize)
+}
+
 /// Returns the current process's resident memory usage in bytes, or `None`
 /// if it cannot be determined on this platform.
 #[cfg(target_os = "windows")]
@@ -312,10 +318,14 @@ impl Recorder {
             }
         };
 
-        let universal = match self.args.event_buffer_size_bytes() {
-            Some(bytes) => {
-                info!("Configuring per-CPU event buffer: bytes={}", bytes);
-                universal.with_per_cpu_buffer_bytes(bytes)
+        let universal = match self.args.buffer_size_bytes() {
+            Some(total_bytes) => {
+                let cpu_count = ExportMachine::cpu_count();
+                let per_cpu_bytes = per_cpu_buffer_size(total_bytes, cpu_count);
+                info!(
+                    "Configuring event buffers: total_bytes={}, cpu_count={}, per_cpu_bytes={}",
+                    total_bytes, cpu_count, per_cpu_bytes);
+                universal.with_per_cpu_buffer_bytes(per_cpu_bytes)
             },
             None => universal,
         }.with_dotnet_help(dotnet);
@@ -434,5 +444,20 @@ impl Recorder {
         exporter.cleanup();
 
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn divides_total_buffer_across_cpus() {
+        assert_eq!(2 * 1024 * 1024, per_cpu_buffer_size(8 * 1024 * 1024, 4));
+    }
+
+    #[test]
+    fn rounds_per_cpu_buffer_up() {
+        assert_eq!(3, per_cpu_buffer_size(8, 3));
     }
 }
