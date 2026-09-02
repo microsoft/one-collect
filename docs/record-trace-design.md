@@ -134,3 +134,11 @@ record-trace --on-cpu --pid 42
 ```bash
 record-trace --script-file script.file
 ```
+
+### Increase Event Buffer Capacity
+Use a larger per-CPU event buffer to reduce event loss during bursts. The size is
+specified in megabytes and increases memory usage for each CPU.
+
+```bash
+record-trace --on-cpu --event-buffer-size-mb 8
+```

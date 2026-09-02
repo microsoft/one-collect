@@ -13,6 +13,20 @@ use std::time::Duration;
 
 use crate::export::{Exporter, NetTraceExporter, PerfViewExporter};
 
+const BYTES_PER_MEGABYTE: usize = 1024 * 1024;
+
+fn parse_event_buffer_size_mb(value: &str) -> Result<usize, String> {
+    let megabytes = value.parse::<usize>()
+        .map_err(|_| format!("invalid event buffer size '{value}': expected a positive number of megabytes"))?;
+
+    if megabytes == 0 {
+        return Err("event buffer size must be at least 1 MB".into());
+    }
+
+    megabytes.checked_mul(BYTES_PER_MEGABYTE)
+        .ok_or_else(|| "event buffer size is too large".into())
+}
+
 #[derive(Parser)]
 #[command(name = "record-trace", version = crate_version!(), about, long_about = None)]
 struct Args {
@@ -42,6 +56,9 @@ struct Args {
 
     #[arg(long, help = "Stop collecting once this process uses the specified amount of memory, in megabytes")]
     max_memory: Option<u64>,
+
+    #[arg(long, value_name = "MB", value_parser = parse_event_buffer_size_mb, help = "Size of each per-CPU event buffer, in megabytes. Larger buffers can accommodate event bursts but use more memory. When omitted, the recorder chooses a default based on the enabled features.")]
+    event_buffer_size_mb: Option<usize>,
 
     #[arg(long = "pid", help = "Capture data for the specified process ID.  Multiple pids can be specified, one per usage of --pid")]
     target_pids: Option<Vec<i32>>,
@@ -114,6 +131,7 @@ pub struct RecordArgs {
     live: bool,
     duration: Option<Duration>,
     max_memory_bytes: Option<u64>,
+    event_buffer_size_bytes: Option<usize>,
     target_pids: Option<Vec<i32>>,
     target_cpus: Option<Vec<u16>>,
     dotnet_cleanup_timeout: Option<Duration>,
@@ -174,6 +192,7 @@ impl RecordArgs {
             live: command_args.live,
             duration: command_args.duration.map(Duration::from_secs),
             max_memory_bytes: command_args.max_memory.map(|mb| mb.saturating_mul(1024 * 1024)),
+            event_buffer_size_bytes: command_args.event_buffer_size_mb,
             target_pids: command_args.target_pids,
             target_cpus: command_args.target_cpus,
             dotnet_cleanup_timeout: command_args.dotnet_cleanup_timeout.map(Duration::from_secs),
@@ -236,6 +255,10 @@ impl RecordArgs {
         self.max_memory_bytes
     }
 
+    pub (crate) fn event_buffer_size_bytes(&self) -> Option<usize> {
+        self.event_buffer_size_bytes
+    }
+
     pub (crate) fn target_pids(&self) -> &Option<Vec<i32>> {
         &self.target_pids
     }
@@ -282,6 +305,9 @@ impl RecordArgs {
         if let Some(max_memory_bytes) = self.max_memory_bytes {
             info!("Arguments parsed: max_memory_bytes={}", max_memory_bytes);
         }
+        if let Some(event_buffer_size_bytes) = self.event_buffer_size_bytes {
+            info!("Arguments parsed: event_buffer_size_bytes={}", event_buffer_size_bytes);
+        }
         if let Some(ref pids) = self.target_pids {
             info!("Arguments parsed: target_pids={:?}", pids);
         }
@@ -301,5 +327,27 @@ impl RecordArgs {
             info!("{}", script);
             info!("Arguments parsed: script end");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_event_buffer_size_in_megabytes() {
+        let args = RecordArgs::parse([
+            "record-trace",
+            "--on-cpu",
+            "--event-buffer-size-mb",
+            "8",
+        ]);
+
+        assert_eq!(Some(8 * BYTES_PER_MEGABYTE), args.event_buffer_size_bytes());
+    }
+
+    #[test]
+    fn rejects_zero_event_buffer_size() {
+        assert!(parse_event_buffer_size_mb("0").is_err());
     }
 }
