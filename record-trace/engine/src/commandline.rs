@@ -15,16 +15,16 @@ use crate::export::{Exporter, NetTraceExporter, PerfViewExporter};
 
 const BYTES_PER_MEGABYTE: usize = 1024 * 1024;
 
-fn parse_buffer_size_mb(value: &str) -> Result<usize, String> {
+fn parse_per_cpu_buffer_size_mb(value: &str) -> Result<usize, String> {
     let megabytes = value.parse::<usize>()
-        .map_err(|_| format!("invalid buffer size '{value}': expected a positive number of megabytes"))?;
+        .map_err(|_| format!("invalid per-CPU buffer size '{value}': expected a positive number of megabytes"))?;
 
     if megabytes == 0 {
-        return Err("buffer size must be at least 1 MB".into());
+        return Err("per-CPU buffer size must be at least 1 MB".into());
     }
 
     megabytes.checked_mul(BYTES_PER_MEGABYTE)
-        .ok_or_else(|| "buffer size is too large".into())
+        .ok_or_else(|| "per-CPU buffer size is too large".into())
 }
 
 #[derive(Parser)]
@@ -57,8 +57,8 @@ struct Args {
     #[arg(long, help = "Stop collecting once this process uses the specified amount of memory, in megabytes")]
     max_memory: Option<u64>,
 
-    #[arg(long, value_name = "MB", value_parser = parse_buffer_size_mb, help = "Requested total size of the event buffers, in megabytes. The size is divided across the available CPUs. When omitted, the recorder chooses a default based on the enabled features.")]
-    buffersize: Option<usize>,
+    #[arg(long, value_name = "MB", value_parser = parse_per_cpu_buffer_size_mb, help = "Size of each per-CPU event buffer, in megabytes. Larger buffers can accommodate event bursts but use more memory. When omitted, the recorder chooses a default based on the enabled features.")]
+    per_cpu_buffer_size_mb: Option<usize>,
 
     #[arg(long = "pid", help = "Capture data for the specified process ID.  Multiple pids can be specified, one per usage of --pid")]
     target_pids: Option<Vec<i32>>,
@@ -131,7 +131,7 @@ pub struct RecordArgs {
     live: bool,
     duration: Option<Duration>,
     max_memory_bytes: Option<u64>,
-    buffer_size_bytes: Option<usize>,
+    per_cpu_buffer_size_bytes: Option<usize>,
     target_pids: Option<Vec<i32>>,
     target_cpus: Option<Vec<u16>>,
     dotnet_cleanup_timeout: Option<Duration>,
@@ -192,7 +192,7 @@ impl RecordArgs {
             live: command_args.live,
             duration: command_args.duration.map(Duration::from_secs),
             max_memory_bytes: command_args.max_memory.map(|mb| mb.saturating_mul(1024 * 1024)),
-            buffer_size_bytes: command_args.buffersize,
+            per_cpu_buffer_size_bytes: command_args.per_cpu_buffer_size_mb,
             target_pids: command_args.target_pids,
             target_cpus: command_args.target_cpus,
             dotnet_cleanup_timeout: command_args.dotnet_cleanup_timeout.map(Duration::from_secs),
@@ -255,8 +255,8 @@ impl RecordArgs {
         self.max_memory_bytes
     }
 
-    pub (crate) fn buffer_size_bytes(&self) -> Option<usize> {
-        self.buffer_size_bytes
+    pub (crate) fn per_cpu_buffer_size_bytes(&self) -> Option<usize> {
+        self.per_cpu_buffer_size_bytes
     }
 
     pub (crate) fn target_pids(&self) -> &Option<Vec<i32>> {
@@ -305,8 +305,8 @@ impl RecordArgs {
         if let Some(max_memory_bytes) = self.max_memory_bytes {
             info!("Arguments parsed: max_memory_bytes={}", max_memory_bytes);
         }
-        if let Some(buffer_size_bytes) = self.buffer_size_bytes {
-            info!("Arguments parsed: buffer_size_bytes={}", buffer_size_bytes);
+        if let Some(per_cpu_buffer_size_bytes) = self.per_cpu_buffer_size_bytes {
+            info!("Arguments parsed: per_cpu_buffer_size_bytes={}", per_cpu_buffer_size_bytes);
         }
         if let Some(ref pids) = self.target_pids {
             info!("Arguments parsed: target_pids={:?}", pids);
@@ -335,19 +335,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_buffer_size_in_megabytes() {
+    fn parses_per_cpu_buffer_size_in_megabytes() {
         let args = RecordArgs::parse([
             "record-trace",
             "--on-cpu",
-            "--buffersize",
+            "--per-cpu-buffer-size-mb",
             "8",
         ]);
 
-        assert_eq!(Some(8 * BYTES_PER_MEGABYTE), args.buffer_size_bytes());
+        assert_eq!(Some(8 * BYTES_PER_MEGABYTE), args.per_cpu_buffer_size_bytes());
     }
 
     #[test]
-    fn rejects_zero_buffer_size() {
-        assert!(parse_buffer_size_mb("0").is_err());
+    fn rejects_zero_per_cpu_buffer_size() {
+        assert!(parse_per_cpu_buffer_size_mb("0").is_err());
     }
 }
