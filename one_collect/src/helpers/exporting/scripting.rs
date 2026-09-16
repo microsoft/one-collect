@@ -8,14 +8,33 @@ use crate::event::*;
 use rhai::{CustomType, TypeBuilder, Engine, EvalAltResult};
 use tracing::{info, error};
 
+#[derive(Clone, Copy, PartialEq)]
+enum ScriptBufferSize {
+    PerBuffer,
+    Total,
+}
+
+fn buffer_size_from_script(size: i64) -> Result<usize, Box<EvalAltResult>> {
+    let size = usize::try_from(size)
+        .map_err(|_| "Buffer size must be positive and supported by this platform.")?;
+
+    if size == 0 {
+        return Err("Buffer size must be positive and supported by this platform.".into());
+    }
+
+    Ok(size)
+}
+
 pub struct UniversalExporterSwapper {
     exporter: Option<UniversalExporter>,
+    buffer_size: Option<ScriptBufferSize>,
 }
 
 impl UniversalExporterSwapper {
     pub fn new(settings: ExportSettings) -> Self {
         Self {
             exporter: Some(UniversalExporter::new(settings)),
+            buffer_size: None,
         }
     }
 
@@ -48,6 +67,38 @@ impl UniversalExporterSwapper {
         if let Some(exporter) = self.exporter.take() {
             self.exporter.replace(swap(exporter));
         }
+    }
+
+    /// Applies one of the two mutually exclusive buffer sizing models. Mixing
+    /// them is rejected rather than letting one of the requested sizes be
+    /// silently discarded, which would leave the trace running with a capacity
+    /// the script never asked for. Repeating the same model overrides the
+    /// previously requested size.
+    fn set_buffer_size(
+        &mut self,
+        kind: ScriptBufferSize,
+        bytes: usize) -> Result<(), Box<EvalAltResult>> {
+        if let Some(existing) = self.buffer_size {
+            if existing != kind {
+                return Err(
+                    "Cannot use both with_buffer_size_bytes and with_per_cpu_buffer_bytes.".into());
+            }
+        }
+
+        self.buffer_size = Some(kind);
+
+        self.swap(|exporter| {
+            match kind {
+                ScriptBufferSize::PerBuffer => {
+                    exporter.with_per_cpu_buffer_bytes(bytes)
+                },
+                ScriptBufferSize::Total => {
+                    exporter.with_buffer_size_bytes(bytes)
+                },
+            }
+        });
+
+        Ok(())
     }
 
     pub fn take(
@@ -910,11 +961,23 @@ impl ScriptedUniversalExporter {
 
         self.rhai_engine().register_fn(
             "with_per_cpu_buffer_bytes",
-            move |size: i64| {
+            move |size: i64| -> Result<(), Box<EvalAltResult>> {
+                let size = buffer_size_from_script(size)?;
                 info!("Setting per-CPU buffer size: bytes={}", size);
-                fn_exporter.borrow_mut().swap(|exporter| {
-                    exporter.with_per_cpu_buffer_bytes(size as usize)
-                });
+                fn_exporter.borrow_mut().set_buffer_size(
+                    ScriptBufferSize::PerBuffer,
+                    size)
+            });
+
+        let fn_exporter = self.export_swapper();
+        self.rhai_engine().register_fn(
+            "with_buffer_size_bytes",
+            move |size: i64| -> Result<(), Box<EvalAltResult>> {
+                let size = buffer_size_from_script(size)?;
+                info!("Setting total buffer size: bytes={}", size);
+                fn_exporter.borrow_mut().set_buffer_size(
+                    ScriptBufferSize::Total,
+                    size)
             });
 
         self.rhai_engine().build_type::<ScriptTimeline>();
@@ -1169,7 +1232,80 @@ mod tests {
 
         let exporter = scripted.from_script("with_per_cpu_buffer_bytes(1234);").expect("Should work");
 
-        assert_eq!(1234, exporter.cpu_buf_bytes());
+        assert_eq!(1234, exporter.per_buffer_size_bytes(1));
+    }
+
+    #[test]
+    fn total_buffer_size() {
+        let scripted = ScriptedUniversalExporter::new(ExportSettings::default());
+
+        let exporter = scripted.from_script("with_buffer_size_bytes(1048576);").expect("Should work");
+
+        assert_eq!(262144, exporter.per_buffer_size_bytes(4));
+        assert_eq!(64 * 1024, exporter.per_buffer_size_bytes(32));
+    }
+
+    #[test]
+    fn rejects_conflicting_buffer_size_settings() {
+        for script in [
+            "with_buffer_size_bytes(1048576); with_per_cpu_buffer_bytes(1234);",
+            "with_per_cpu_buffer_bytes(1234); with_buffer_size_bytes(1048576);",
+        ] {
+            let scripted = ScriptedUniversalExporter::new(ExportSettings::default());
+            let err = scripted.from_script(script).err().expect("Should fail");
+
+            assert!(
+                err.to_string().contains("with_buffer_size_bytes") &&
+                    err.to_string().contains("with_per_cpu_buffer_bytes"),
+                "Unexpected error: {}",
+                err);
+        }
+    }
+
+    #[test]
+    fn repeated_buffer_size_settings_use_the_last_value() {
+        let scripted = ScriptedUniversalExporter::new(ExportSettings::default());
+
+        let exporter = scripted
+            .from_script("with_per_cpu_buffer_bytes(4096); with_per_cpu_buffer_bytes(1234);")
+            .expect("Should work");
+
+        assert_eq!(1234, exporter.per_buffer_size_bytes(4));
+
+        let scripted = ScriptedUniversalExporter::new(ExportSettings::default());
+
+        let exporter = scripted
+            .from_script("with_buffer_size_bytes(8388608); with_buffer_size_bytes(1048576);")
+            .expect("Should work");
+
+        assert_eq!(262144, exporter.per_buffer_size_bytes(4));
+    }
+
+    #[test]
+    fn script_buffer_size_overrides_preconfigured_size() {
+        let scripted = ScriptedUniversalExporter::new(ExportSettings::default());
+        scripted.export_swapper().borrow_mut().swap(|exporter| {
+            exporter.with_buffer_size_bytes(1048576)
+        });
+
+        let exporter = scripted
+            .from_script("with_per_cpu_buffer_bytes(1234);")
+            .expect("Should work");
+
+        assert_eq!(1234, exporter.per_buffer_size_bytes(4));
+    }
+
+    #[test]
+    fn rejects_non_positive_buffer_sizes() {
+        for script in [
+            "with_buffer_size_bytes(0);",
+            "with_buffer_size_bytes(-1);",
+            "with_per_cpu_buffer_bytes(0);",
+            "with_per_cpu_buffer_bytes(-1);",
+        ] {
+            let scripted = ScriptedUniversalExporter::new(ExportSettings::default());
+            assert!(scripted.from_script(script).is_err());
+        }
     }
 
     #[test]
