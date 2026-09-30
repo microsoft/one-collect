@@ -8,10 +8,11 @@ use engine::recorder::Recorder;
 use engine::logger;
 use engine::EngineOutput;
 
+use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-fn main() {
+fn main() -> ExitCode {
     let args = RecordArgs::parse(std::env::args_os());
 
     // Initialize logging before anything else
@@ -55,4 +56,5 @@ fn main() {
 
     let exit_code = recorder.run();
     info!("record-trace exiting: exit_code={}", exit_code);
+    ExitCode::from(exit_code)
 }

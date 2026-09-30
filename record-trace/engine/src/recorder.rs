@@ -83,7 +83,7 @@ impl Recorder {
         }
     }
 
-    pub fn run(&mut self) -> i32 {
+    pub fn run(&mut self) -> u8 {
         let mut format = self.args.format();
         if let Err(e) = format.validate(&self.args) {
             error!("Format validation failed: error={}", e);
