@@ -81,7 +81,7 @@ extern "C" fn RecordTrace(
             record_args,
             output);
 
-        let result = recorder.run();
+        let result = recorder.run() as i32;
         info!("RecordTrace FFI call completed: result={}", result);
         result
     } else {
