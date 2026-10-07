@@ -49,6 +49,8 @@ use one_collect::Guid;
 use one_collect::etw::{query_stats, EtwSession, SessionStats, LEVEL_VERBOSE};
 use one_collect::event::Event;
 use one_collect::event::os::windows::WindowsEventExtension;
+use one_collect::helpers::callstack::CallstackHelper;
+use one_collect::helpers::exporting::{ExportSessionHelp, ExportSettings};
 
 use tracelogging as tlg;
 
@@ -258,6 +260,19 @@ fn query_stats_observes_loss_under_blocked_consumer() {
     // Tiny per-CPU buffers so the bounded delivery queue overflows almost
     // immediately once the consumer stops draining.
     let mut session = EtwSession::new().with_per_cpu_buffer_bytes(1024);
+    let exporter = session
+        .build_exporter(ExportSettings::new(CallstackHelper::new()))
+        .expect("exporter should hook to ETW");
+    let final_stats: Arc<Mutex<Option<SessionStats>>> =
+        Arc::new(Mutex::new(None));
+
+    {
+        let final_stats = final_stats.clone();
+
+        session.add_completed_callback(move |stats| {
+            *final_stats.lock().unwrap() = Some(*stats);
+        });
+    }
 
     // Wide event: park the consumer on the *first* event so `ProcessTrace`
     // stops draining entirely.  Subsequent invocations (after release) just
@@ -401,8 +416,20 @@ fn query_stats_observes_loss_under_blocked_consumer() {
         "writing more events must drive events_lost strictly higher"
     );
 
+    let final_stats = final_stats
+        .lock()
+        .unwrap()
+        .expect("completed callback should receive final stats");
+
+    assert_eq!(
+        final_stats.events_lost as u64,
+        exporter.borrow().lost_events(),
+        "the exporter should retain the exact final ETW EventsLost value"
+    );
+
     eprintln!(
-        "loss test: baseline_events_lost={}",
-        baseline_lost.load(Ordering::SeqCst)
+        "loss test: baseline_events_lost={}, final_events_lost={}",
+        baseline_lost.load(Ordering::SeqCst),
+        final_stats.events_lost
     );
 }

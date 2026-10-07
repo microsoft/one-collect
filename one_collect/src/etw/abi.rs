@@ -888,12 +888,17 @@ pub(super) fn query_stats(handle: u64) -> anyhow::Result<super::SessionStats> {
         anyhow::bail!("ControlTraceW query failed with {}", result);
     }
 
-    Ok(super::SessionStats {
+    Ok(session_stats(&properties))
+}
+
+fn session_stats(
+    properties: &EVENT_TRACE_PROPERTIES) -> super::SessionStats {
+    super::SessionStats {
         events_lost: properties.EventsLost,
         real_time_buffers_lost: properties.RealTimeBuffersLost,
         log_buffers_lost: properties.LogBuffersLost,
         buffers_written: properties.BuffersWritten,
-    })
+    }
 }
 
 pub(crate) fn flush_trace(handle: u64) {
@@ -1052,16 +1057,28 @@ impl TraceSession {
     }
 
     pub(super) fn remote_stop(
-        handle: u64) {
+        handle: u64) -> anyhow::Result<super::SessionStats> {
         let mut properties = EVENT_TRACE_PROPERTIES::for_control();
 
-        unsafe {
+        /*
+         * EVENT_TRACE_CONTROL_STOP writes the session's final counters into
+         * the supplied properties buffer. Reading this result is preferable
+         * to querying immediately before stop because rundown and shutdown
+         * can still change the cumulative loss counters.
+         */
+        let result = unsafe {
             ControlTraceW(
                 handle,
                 std::ptr::null::<u16>(),
                 &mut properties,
-                EVENT_TRACE_CONTROL_STOP);
+                EVENT_TRACE_CONTROL_STOP)
+        };
+
+        if result != 0 {
+            anyhow::bail!("ControlTraceW stop failed with {}", result);
         }
+
+        Ok(session_stats(&properties))
     }
 
     pub(super) fn stop(
