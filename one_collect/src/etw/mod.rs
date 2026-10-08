@@ -101,6 +101,8 @@ pub struct SessionStats {
 /// # Example
 ///
 /// ```no_run
+/// # #[cfg(target_os = "windows")]
+/// # fn main() {
 /// use std::sync::Arc;
 /// use std::sync::atomic::{AtomicU64, Ordering};
 /// use one_collect::etw::{EtwSession, query_stats};
@@ -124,6 +126,9 @@ pub struct SessionStats {
 ///         let _ = stats.events_lost;
 ///     }
 /// }
+/// # }
+/// # #[cfg(not(target_os = "windows"))]
+/// # fn main() {}
 /// ```
 pub fn query_stats(handle: u64) -> anyhow::Result<SessionStats> {
     if handle == 0 {
