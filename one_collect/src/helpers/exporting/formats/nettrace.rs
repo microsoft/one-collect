@@ -1539,9 +1539,13 @@ impl NetTraceWriter {
             /*
              * If N events from the final block are present and L were lost,
              * reporting N + L makes readers infer exactly L missing sequence
-             * numbers. Nettrace sequence numbers are 32-bit and wrap.
+             * numbers. Nettrace sequence numbers are 32-bit and wrap, but
+             * readers report loss as a signed 32-bit count. Clamp larger
+             * aggregates so a full 32-bit wrap cannot appear as zero loss.
              */
-            Some(self.last_event_count.wrapping_add(lost_events as u32))
+            let lost_events = lost_events.min(i32::MAX as u64) as u32;
+
+            Some(self.last_event_count.wrapping_add(lost_events))
         }
     }
 }
@@ -1804,6 +1808,18 @@ mod tests {
             write_loss_trace("loss-wrap", u32::MAX, 2);
 
         assert_eq!((1, Some((0, 1))), sequence_point);
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn final_sequence_point_clamps_unrepresentable_loss() {
+        let (path, sequence_point) =
+            write_loss_trace("loss-clamp", 10, u64::MAX);
+
+        assert_eq!(
+            (1, Some((0, 10u32.wrapping_add(i32::MAX as u32)))),
+            sequence_point);
 
         std::fs::remove_file(path).unwrap();
     }
