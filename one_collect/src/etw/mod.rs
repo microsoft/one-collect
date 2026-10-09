@@ -444,8 +444,14 @@ const REAL_SYSTEM_PAGE_FAULT_PROVIDER: Guid = Guid::from_u128(0x3d6fa8d3_fe05_11
 
 const SYSTEM_MEMORY_KW_HARD_FAULTS: u64 = 2u64;
 const SYSTEM_MEMORY_KW_ALL_FAULTS: u64 = 4u64;
+const MIN_BUFFER_SIZE_KB: usize = 4;
+const MAX_BUFFER_SIZE_KB: usize = 16 * 1024;
 
 impl EtwSession {
+    pub(crate) fn maximum_buffer_count() -> u32 {
+        abi::buffer_counts().maximum
+    }
+
     pub fn new() -> Self {
         Self {
             enabled: HashMap::default(),
@@ -503,10 +509,17 @@ impl EtwSession {
         self
     }
 
+    /// Sets the size of each buffer in the ETW session buffer pool.
+    ///
+    /// ETW fails to start a session whose buffer size falls outside its
+    /// supported range, so the requested size is clamped instead of being
+    /// passed through. See `EVENT_TRACE_PROPERTIES`:
+    /// <https://learn.microsoft.com/en-us/windows/win32/api/evntrace/ns-evntrace-event_trace_properties>
     pub fn with_per_cpu_buffer_bytes(
         mut self,
         bytes: usize) -> Self {
-        self.cpu_buf_kb = (bytes / 1024) as u32;
+        self.cpu_buf_kb = (bytes / 1024)
+            .clamp(MIN_BUFFER_SIZE_KB, MAX_BUFFER_SIZE_KB) as u32;
         self
     }
 
@@ -1400,6 +1413,20 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::Duration;
+
+    #[test]
+    fn buffer_size_stays_within_etw_bounds() {
+        assert_eq!(4, EtwSession::new().with_per_cpu_buffer_bytes(0).cpu_buf_kb);
+        assert_eq!(
+            4,
+            EtwSession::new().with_per_cpu_buffer_bytes(1024).cpu_buf_kb);
+        assert_eq!(
+            64,
+            EtwSession::new().with_per_cpu_buffer_bytes(64 * 1024).cpu_buf_kb);
+        assert_eq!(
+            16 * 1024,
+            EtwSession::new().with_per_cpu_buffer_bytes(usize::MAX).cpu_buf_kb);
+    }
 
     #[test]
     fn query_stats_rejects_zero_handle() {
