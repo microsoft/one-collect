@@ -185,6 +185,9 @@ pub trait ExportSymbolReader {
     fn demangle(&mut self) -> Option<String>;
 }
 
+/// Infers symbol extents from the following kallsyms entry.
+/// Without an increasing successor, `end()` equals `start()` so range-based
+/// attribution cannot extend into unrelated code.
 pub struct KernelSymbolReader {
     reader: Option<BufReader<File>>,
     buffer: String,
@@ -266,7 +269,7 @@ impl KernelSymbolReader {
                 }
 
                 if self.current_end.is_none() && self.current_ip != 0 {
-                    self.current_end = Some(addr - 1);
+                    self.current_end = Some(addr.saturating_sub(1).max(self.current_ip));
                 }
 
                 /* Skip non-method symbols */
@@ -332,7 +335,7 @@ impl ExportSymbolReader for KernelSymbolReader {
     fn end(&self) -> u64 {
         match self.current_end {
             Some(end) => { end },
-            None => { 0xFFFFFFFFFFFFFFFF },
+            None => { self.current_ip },
         }
     }
 
@@ -933,7 +936,7 @@ mod tests {
             /* method3 */
             assert!(reader.next());
             assert_eq!(0xBB, reader.start());
-            assert_eq!(0xFFFFFFFFFFFFFFFF, reader.end());
+            assert_eq!(0xBB, reader.end());
             assert_eq!("method3", reader.name());
 
             /* End */
@@ -942,6 +945,43 @@ mod tests {
             /* Reset */
             reader.reset();
         }
+    }
+
+    #[test]
+    fn kernel_symbol_reader_unknown_tail() {
+        let kern_syms_path = std::env::current_dir().unwrap().join(
+            "../test/assets/kernel/symbols.map");
+        let mut reader = KernelSymbolReader::new();
+        reader.set_file(File::open(kern_syms_path).unwrap());
+
+        for _ in 0..3 {
+            assert!(reader.next());
+        }
+        assert_eq!("method3", reader.name());
+
+        for ip in [reader.start(), 0x1000, u64::MAX - 1] {
+            assert!(!(reader.start()..reader.end()).contains(&ip));
+        }
+        assert!(!reader.next());
+    }
+
+    #[test]
+    fn kernel_symbol_reader_zero_address_boundary() {
+        let kern_syms_path = std::env::current_dir().unwrap().join(
+            "../test/assets/kernel/symbols-zero-boundary.map");
+        let mut reader = KernelSymbolReader::new();
+        reader.set_file(File::open(kern_syms_path).unwrap());
+
+        assert!(reader.next());
+        assert_eq!(0x1000, reader.start());
+        assert_eq!(reader.start(), reader.end());
+        assert_eq!("method_before_zero", reader.name());
+
+        assert!(reader.next());
+        assert_eq!(0x2000, reader.start());
+        assert_eq!(0x20FF, reader.end());
+        assert_eq!("method_after_zero", reader.name());
+        assert!(!reader.next());
     }
 
     #[test]

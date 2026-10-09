@@ -1,0 +1,4 @@
+0000000000001000 t method_before_zero
+0000000000000000 a zero_data
+0000000000002000 t method_after_zero
+0000000000002100 a boundary
