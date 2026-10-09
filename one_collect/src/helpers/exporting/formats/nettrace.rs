@@ -281,6 +281,26 @@ struct NetTraceWriter {
     saved_callstacks: HashMap<SavedCallstackKey, u32>,
     saved_pid_tids: HashMap<SavedPidTidKey, u32>,
     saved_meta_ids: HashMap<ExportDevNode, u32>,
+    /*
+     * All events are serialized through capture thread index 0. Every emitted
+     * event advances that thread's sequence number once, so the emitted event
+     * count is also its sequence number within a block.
+     */
+    event_count: u32,
+    /*
+     * Sequence points clear capture-thread state at event-block boundaries.
+     * Consequently, the final loss gap must start from the number of events
+     * in the most recently flushed block, not the total events in the trace.
+     */
+    last_event_count: u32,
+    /*
+     * Tracks whether the trace contains at least one thread block. The final
+     * loss sequence point references capture thread index 0, so if no event
+     * block was written, finish() must first emit a thread block that defines
+     * that index. Without it, a trace with only lost events could not encode
+     * lost_events.
+     */
+    wrote_thread_block: bool,
 }
 
 impl NetTraceWriter {
@@ -306,6 +326,9 @@ impl NetTraceWriter {
             saved_callstacks: HashMap::new(),
             saved_pid_tids: HashMap::new(),
             saved_meta_ids: HashMap::new(),
+            event_count: 0,
+            last_event_count: 0,
+            wrote_thread_block: false,
         };
 
         trace.init()?;
@@ -494,6 +517,7 @@ impl NetTraceWriter {
 
         self.event_block.write_varint(payload.len() as u64)?; /* Payload Size */
         self.event_block.write_bytes(payload)?;
+        self.event_count = self.event_count.wrapping_add(1);
 
         /* We flush every 1 MB */
         if self.event_block.len() >= 1048576 {
@@ -513,9 +537,9 @@ impl NetTraceWriter {
         end_time: u64) -> anyhow::Result<()> {
         debug!("Flushing NetTrace event block: start_time={}, end_time={}, event_count={}", 
             start_time, end_time, self.event_block.len());
-        
+
         /* Write sequence block */
-        self.write_seq_block(start_time)?;
+        self.write_seq_block(start_time, None)?;
 
         /* Write stacks to output */
         self.write_callstacks(machine)?;
@@ -535,8 +559,9 @@ impl NetTraceWriter {
 
         self.write_eventblock_end(block_start)?;
 
-        /* Clear and update */
         self.event_block.clear();
+        self.last_event_count = self.event_count;
+        self.event_count = 0;
         self.flush_time = end_time;
         self.last_time = 0;
 
@@ -1126,12 +1151,29 @@ impl NetTraceWriter {
 
     fn write_seq_block(
         &mut self,
-        time_qpc: u64) -> anyhow::Result<()> {
+        time_qpc: u64,
+        sequence_number: Option<u32>) -> anyhow::Result<()> {
         let block_start = self.write_start_block()?;
 
         self.output.write_u64(time_qpc)?; /* Timestamp */
         self.output.write_u32(1)?; /* Flags: Clear Threads */
-        self.output.write_u32(0)?; /* ThreadCount */
+
+        match sequence_number {
+            Some(sequence_number) => {
+                /*
+                 * Readers compare this lower bound with the sequence numbers
+                 * of events observed for capture thread 0 since the previous
+                 * Clear Threads sequence point. Any gap is reported as lost
+                 * events.
+                 */
+                self.output.write_u32(1)?; /* ThreadCount */
+                self.output.write_varint(0)?; /* Capture Thread Index */
+                self.output.write_varint(sequence_number as u64)?;
+            },
+            None => {
+                self.output.write_u32(0)?; /* ThreadCount */
+            },
+        }
 
         /* Done writing seq block */
         self.write_end_block(block_start, 4)
@@ -1281,6 +1323,7 @@ impl NetTraceWriter {
         }
 
         self.init_threads();
+        self.wrote_thread_block = true;
 
         /* Done writing threads */
         self.write_end_block(block_start, 6)
@@ -1450,13 +1493,60 @@ impl NetTraceWriter {
                 end_time)?;
         }
 
-        /* Always emit end sequence to convey end time */
-        self.write_seq_block(end_time)?;
+        /*
+         * Nettrace has no scalar lost-event field. Loss is represented as a
+         * gap between the events present for a capture thread and the
+         * sequence number reported at a sequence point.
+         *
+         * The collection APIs provide only an aggregate count, not where the
+         * losses occurred. Attribute the aggregate to capture thread 0 at the
+         * final sequence point. Intermediate sequence points continue to
+         * report no gap.
+         */
+        let lost_events = machine.lost_events();
+
+        if lost_events != 0 && !self.wrote_thread_block {
+            /*
+             * No event block means no thread block has defined index 0 yet.
+             * Define it now so a trace with only lost events has a valid final
+             * entry.
+             */
+            self.write_threads()?;
+        }
+
+        let sequence_number = self.loss_sequence_number(lost_events);
+
+        self.write_seq_block(
+            end_time,
+            sequence_number)?;
 
         /* EndOfStream Block */
         self.output.write_u32(0)?;
 
         Ok(self.output.flush()?)
+    }
+
+    fn loss_sequence_number(
+        &self,
+        lost_events: u64) -> Option<u32> {
+        if lost_events == 0 {
+            /*
+             * Preserve the previous zero-loss representation: an empty
+             * sequence-point thread list.
+             */
+            None
+        } else {
+            /*
+             * If N events from the final block are present and L were lost,
+             * reporting N + L makes readers infer exactly L missing sequence
+             * numbers. Nettrace sequence numbers are 32-bit and wrap, but
+             * readers report loss as a signed 32-bit count. Clamp larger
+             * aggregates so a full 32-bit wrap cannot appear as zero loss.
+             */
+            let lost_events = lost_events.min(i32::MAX as u64) as u32;
+
+            Some(self.last_event_count.wrapping_add(lost_events))
+        }
     }
 }
 
@@ -1524,6 +1614,215 @@ impl NetTraceFormat for ExportMachine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use protobuf::CodedInputStream;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_path(
+        name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("System time should be after unix epoch")
+            .as_nanos();
+
+        std::env::temp_dir().join(
+            format!("one-collect-{name}-{nanos}.nettrace"))
+    }
+
+    fn final_sequence_point(
+        path: &PathBuf) -> (u32, Option<(u64, u32)>) {
+        let data = std::fs::read(path).unwrap();
+        let mut offset = 20;
+        let mut result = None;
+
+        while offset + 4 <= data.len() {
+            let header = u32::from_le_bytes(
+                data[offset..offset + 4].try_into().unwrap());
+            offset += 4;
+
+            let size = (header & 0x00FF_FFFF) as usize;
+            let kind = (header >> 24) as u8;
+
+            if kind == 0 {
+                break;
+            }
+
+            if kind == 4 {
+                let payload = &data[offset..offset + size];
+                let flags = u32::from_le_bytes(
+                    payload[8..12].try_into().unwrap());
+                let thread_count = u32::from_le_bytes(
+                    payload[12..16].try_into().unwrap());
+                let entry = if thread_count == 0 {
+                    None
+                } else {
+                    let mut input = CodedInputStream::from_bytes(
+                        &payload[16..]);
+                    let thread_index =
+                        input.read_raw_varint64().unwrap();
+                    let sequence_number =
+                        input.read_raw_varint32().unwrap();
+
+                    Some((thread_index, sequence_number))
+                };
+
+                result = Some((flags, entry));
+            }
+
+            offset += size;
+        }
+
+        result.expect("Expected a sequence point")
+    }
+
+    fn write_loss_trace(
+        name: &str,
+        emitted_events: u32,
+        lost_events: u64) -> (PathBuf, (u32, Option<(u64, u32)>)) {
+        let path = unique_temp_path(name);
+        let mut writer = NetTraceWriter::new(
+            path.to_str().unwrap()).unwrap();
+        let machine = ExportMachine::new(ExportSettings::default());
+
+        writer.last_event_count = emitted_events;
+        machine.add_lost_events(lost_events);
+        writer.finish(&machine).unwrap();
+        drop(writer);
+
+        let sequence_point = final_sequence_point(&path);
+        (path, sequence_point)
+    }
+
+    #[test]
+    fn final_sequence_point_omits_zero_loss() {
+        let (path, sequence_point) =
+            write_loss_trace("zero-loss", 10, 0);
+
+        assert_eq!((1, None), sequence_point);
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn final_sequence_point_reports_loss_after_events() {
+        let path = unique_temp_path("event-loss");
+        let mut writer = NetTraceWriter::new(
+            path.to_str().unwrap()).unwrap();
+        let mut machine = ExportMachine::new(ExportSettings::default());
+        let kind = machine.sample_kind("test");
+
+        machine.add_sample(
+            1,
+            MetricValue::Count(1),
+            1,
+            1,
+            0,
+            kind,
+            &[]).unwrap();
+        machine.add_lost_events(7);
+
+        writer.write_metadata_object(
+            machine.sample_kinds(),
+            machine.record_types()).unwrap();
+
+        let process = machine.find_process(1).unwrap();
+        let replay = process.to_replay();
+        let converter = DefaultExportGraphMetricValueConverter::default();
+
+        writer.write_replay_event(
+            &machine,
+            &replay,
+            &converter).unwrap();
+        writer.finish(&machine).unwrap();
+        drop(writer);
+
+        assert_eq!(
+            (1, Some((0, 8))),
+            final_sequence_point(&path));
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn final_sequence_point_reports_loss_after_multiple_event_blocks() {
+        let path = unique_temp_path("multi-block-loss");
+        let mut writer = NetTraceWriter::new(
+            path.to_str().unwrap()).unwrap();
+        let mut machine = ExportMachine::new(ExportSettings::default());
+        let kind = machine.sample_kind("test");
+
+        machine.add_sample(
+            1,
+            MetricValue::Count(1),
+            1,
+            1,
+            0,
+            kind,
+            &[]).unwrap();
+
+        writer.write_metadata_object(
+            machine.sample_kinds(),
+            machine.record_types()).unwrap();
+
+        let process = machine.find_process(1).unwrap();
+        let replay = process.to_replay();
+        let converter = DefaultExportGraphMetricValueConverter::default();
+
+        writer.write_replay_event(
+            &machine,
+            &replay,
+            &converter).unwrap();
+        writer.flush_event_block(
+            &machine,
+            writer.flush_time,
+            writer.last_time).unwrap();
+
+        writer.write_replay_event(
+            &machine,
+            &replay,
+            &converter).unwrap();
+        machine.add_lost_events(7);
+        writer.finish(&machine).unwrap();
+        drop(writer);
+
+        assert_eq!(
+            (1, Some((0, 8))),
+            final_sequence_point(&path));
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn final_sequence_point_reports_loss_without_events() {
+        let (path, sequence_point) =
+            write_loss_trace("loss-only", 0, 7);
+
+        assert_eq!((1, Some((0, 7))), sequence_point);
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn final_sequence_point_wraps_sequence_number() {
+        let (path, sequence_point) =
+            write_loss_trace("loss-wrap", u32::MAX, 2);
+
+        assert_eq!((1, Some((0, 1))), sequence_point);
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn final_sequence_point_clamps_unrepresentable_loss() {
+        let (path, sequence_point) =
+            write_loss_trace("loss-clamp", 10, u64::MAX);
+
+        assert_eq!(
+            (1, Some((0, 10u32.wrapping_add(i32::MAX as u32)))),
+            sequence_point);
+
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn event_field_to_type() {

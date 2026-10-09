@@ -101,6 +101,8 @@ pub struct SessionStats {
 /// # Example
 ///
 /// ```no_run
+/// # #[cfg(target_os = "windows")]
+/// # fn main() {
 /// use std::sync::Arc;
 /// use std::sync::atomic::{AtomicU64, Ordering};
 /// use one_collect::etw::{EtwSession, query_stats};
@@ -124,6 +126,9 @@ pub struct SessionStats {
 ///         let _ = stats.events_lost;
 ///     }
 /// }
+/// # }
+/// # #[cfg(not(target_os = "windows"))]
+/// # fn main() {}
 /// ```
 pub fn query_stats(handle: u64) -> anyhow::Result<SessionStats> {
     if handle == 0 {
@@ -378,6 +383,7 @@ impl SessionCallbackContext {
 
 type SendClosure = Box<dyn Fn(&SessionCallbackContext) + Send + 'static>;
 type NoSendClosure = Box<dyn Fn(&SessionCallbackContext) + 'static>;
+type StatsClosure = Box<dyn Fn(&SessionStats) + 'static>;
 type SessionClosure = Box<dyn Fn(&mut EtwSession) -> anyhow::Result<()> + 'static>;
 
 pub struct EtwSession {
@@ -398,6 +404,7 @@ pub struct EtwSession {
     stopping_callbacks: Option<Vec<SendClosure>>,
     rundown_callbacks: Option<Vec<SendClosure>>,
     stopped_callbacks: Option<Vec<NoSendClosure>>,
+    completed_callbacks: Option<Vec<StatsClosure>>,
 
     /* Ancillary data */
     ancillary: Writable<AncillaryData>,
@@ -458,6 +465,7 @@ impl EtwSession {
             stopping_callbacks: Some(Vec::new()),
             rundown_callbacks: Some(Vec::new()),
             stopped_callbacks: Some(Vec::new()),
+            completed_callbacks: Some(Vec::new()),
 
             /* Ancillary data */
             ancillary: Writable::new(AncillaryData::default()),
@@ -556,6 +564,20 @@ impl EtwSession {
         &mut self,
         callback: impl Fn(&SessionCallbackContext) + 'static) {
         if let Some(callbacks) = self.stopped_callbacks.as_mut() {
+            callbacks.push(Box::new(callback));
+        }
+    }
+
+    /// Adds a callback that receives the counters returned by the successful
+    /// `EVENT_TRACE_CONTROL_STOP` operation.
+    ///
+    /// These callbacks run only after event processing has completed and the
+    /// control thread has stopped the session. This makes the counters final,
+    /// including any loss recorded during rundown and shutdown.
+    pub fn add_completed_callback(
+        &mut self,
+        callback: impl Fn(&SessionStats) + 'static) {
+        if let Some(callbacks) = self.completed_callbacks.as_mut() {
             callbacks.push(Box::new(callback));
         }
     }
@@ -1182,17 +1204,15 @@ impl EtwSession {
             }
         }
 
-        let thread = thread::spawn(move || -> anyhow::Result<()> {
+        let thread = thread::spawn(move || -> anyhow::Result<SessionStats> {
             let context = SessionCallbackContext::new(handle, session_id);
 
             /* Enable capture environments first */
             for enable in enabled.values() {
                 if enable.needs_capture_environment() {
-                    let result = enable.enable(handle, &target_pids);
-
-                    if result.is_err() {
-                        TraceSession::remote_stop(handle);
-                        return result;
+                    if let Err(err) = enable.enable(handle, &target_pids) {
+                        let _ = TraceSession::remote_stop(handle);
+                        return Err(err);
                     }
                 }
             }
@@ -1208,11 +1228,9 @@ impl EtwSession {
             for enable in enabled.values() {
                 if !enable.needs_capture_environment() &&
                    !enable.needs_rundown() {
-                    let result = enable.enable(handle, &target_pids);
-
-                    if result.is_err() {
-                        TraceSession::remote_stop(handle);
-                        return result;
+                    if let Err(err) = enable.enable(handle, &target_pids) {
+                        let _ = TraceSession::remote_stop(handle);
+                        return Err(err);
                     }
                 }
             }
@@ -1259,9 +1277,7 @@ impl EtwSession {
                 }
             }
 
-            TraceSession::remote_stop(handle);
-
-            Ok(())
+            TraceSession::remote_stop(handle)
         });
 
         let ancillary = self.ancillary.clone();
@@ -1360,9 +1376,19 @@ impl EtwSession {
             return result;
         }
 
-        thread.join().unwrap()?;
+        /*
+         * The control thread owns the stop operation and returns the final
+         * properties populated by ETW. Do not run completion callbacks when
+         * event processing or session stop failed; consumers rely on these
+         * counters being a successful final snapshot.
+         */
+        let stats = thread.join().unwrap()?;
 
-        session.stop();
+        if let Some(callbacks) = &self.completed_callbacks {
+            for callback in callbacks {
+                callback(&stats);
+            }
+        }
 
         Ok(())
     }
