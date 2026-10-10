@@ -17,6 +17,26 @@ data flows through a pipeline that invokes closures as it arrives. This allows
 both pre-built scenarios and custom in-process scenarios to use the same
 pipelines. Collected data can be exported to several pre-built or custom formats.
 
+## Windows ETW permissions
+
+User-mode TraceLogging and registered manifest providers use an ordinary
+real-time ETW session by default, without enabling debug or system-profile
+privileges. Windows still requires session-control and provider permissions:
+Performance Log Users membership is a non-admin option for ordinary sessions,
+subject to session and provider ACLs.
+
+Built-in system kernel event helpers, known System Provider GUIDs, and classic
+kernel stack capture automatically select system-logger mode and request
+`SeSystemProfilePrivilege`, but not `SeDebugPrivilege`. Mixed sessions retain
+system-logger mode. For other providers requiring that mode, call
+`EtwSession::requires_system_logger()`. Changing the CPU sampling interval also
+requests the system-profile privilege.
+
+`EtwSession::requires_elevation()` explicitly requests both debug and
+system-profile privileges for callers that need them. Neither method elevates
+the process or grants privileges: they must already be assigned to the account.
+Privilege-enablement and session-start failures are returned to the caller.
+
 ## Stack unwinding
 
 On x64 Linux, the framework supports callstack unwinding using live DWARF

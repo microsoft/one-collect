@@ -17,15 +17,17 @@
 //! asserts that they decode through `TdhGetEventInformation` into a real
 //! `EventFormat` with a Task-derived event name.
 //!
-//! All tests are marked `#[ignore]` because the consumer side of ETW
-//! requires administrative privileges (`SeSystemProfilePrivilege` /
-//! `SeDebugPrivilege`).  Run manually from an elevated shell with:
+//! All tests are marked `#[ignore]` because live ETW session control
+//! requires appropriate Windows permissions. Ordinary provider tests can
+//! run with Performance Log Users membership instead of elevation, subject
+//! to provider ACLs. The compiled-manifest test also installs an OS manifest
+//! and requires elevation. To run the entire suite, use an elevated shell:
 //!
 //! ```text
 //! cargo test -p one_collect --test etw_tdh_integration -- --ignored --nocapture --test-threads=1
 //! ```
 //!
-//! `--test-threads=1` is required: each test starts its own ETW kernel
+//! `--test-threads=1` is required: each test starts its own live ETW
 //! consumer session and registers the same TraceLogging provider GUID
 //! in this process.  Running the tests concurrently would race on those
 //! process- and system-global resources.
@@ -365,7 +367,7 @@ fn drive_until<'a>(
         .parse_until(session_name, move || {
             stop() || Instant::now() >= deadline
         })
-        .expect("parse_until failed (is the test running elevated?)");
+        .expect("parse_until failed (does the account have ETW session/provider permissions?)");
 
     captured.borrow()
 }
@@ -1713,4 +1715,3 @@ fn tdh_decodes_compiled_manifest_all_types() {
     assert_schema(ev, &BLOB_NAMES, &BLOB_TYPES, "manifest blob");
     assert_eq!(field_bytes(ev, "Blob"), EXP_BLOB);
 }
-
