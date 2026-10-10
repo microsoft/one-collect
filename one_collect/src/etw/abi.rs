@@ -164,6 +164,21 @@ pub(super) fn wide_string(
 const SE_PRIVILEGE_ENABLED: u32 = 2;
 const TOKEN_ADJUST_PRIVILEGES: u32 = 32;
 
+pub(super) fn is_system_provider(provider: Guid) -> bool {
+    use windows_sys::Win32::System::Diagnostics::Etw::*;
+
+    let providers = [
+        SystemAlpcProviderGuid, SystemConfigProviderGuid, SystemCpuProviderGuid,
+        SystemHypervisorProviderGuid, SystemInterruptProviderGuid,
+        SystemIoFilterProviderGuid, SystemIoProviderGuid, SystemLockProviderGuid,
+        SystemMemoryProviderGuid, SystemObjectProviderGuid, SystemPowerProviderGuid,
+        SystemProcessProviderGuid, SystemProfileProviderGuid, SystemRegistryProviderGuid,
+        SystemSchedulerProviderGuid, SystemSyscallProviderGuid, SystemTimerProviderGuid,
+    ];
+
+    providers.iter().any(|guid| super::providers::win32_guid_to_guid(guid) == provider)
+}
+
 #[repr(C)]
 #[allow(non_snake_case)]
 #[derive(Default)]
@@ -428,8 +443,12 @@ struct EVENT_TRACE_PROPERTIES {
 impl EVENT_TRACE_PROPERTIES {
     /// Construct properties for a named ETW session to be started with
     /// `StartTraceW`; see [`WNODE_HEADER::new`].
-    fn new(session_name: &str) -> Self {
-        Self::with_wnode(WNODE_HEADER::new(session_name))
+    fn new(session_name: &str, system_logger: bool) -> Self {
+        let mut properties = Self::with_wnode(WNODE_HEADER::new(session_name));
+        if system_logger {
+            properties.LogFileMode |= EVENT_TRACE_SYSTEM_LOGGER_MODE;
+        }
+        properties
     }
 
     /// Construct properties for driving `ControlTraceW` by handle;
@@ -448,8 +467,7 @@ impl EVENT_TRACE_PROPERTIES {
             MaximumBuffers: cpus * 32,
             MaximumFileSize: 0,
             LogFileMode: EVENT_TRACE_REAL_TIME_MODE |
-                EVENT_TRACE_INDEPENDENT_SESSION_MODE |
-                EVENT_TRACE_SYSTEM_LOGGER_MODE,
+                EVENT_TRACE_INDEPENDENT_SESSION_MODE,
             FlushTimer: 0,
             EnableFlags: 0,
             FlushThreshold: 0,
@@ -934,8 +952,9 @@ extern "C" fn event_callback(record: *const EVENT_RECORD) {
 impl TraceSession {
     pub(super) fn new(
         name: String,
-        buf_size_kb: u32) -> Self {
-        let mut properties = EVENT_TRACE_PROPERTIES::new(&name);
+        buf_size_kb: u32,
+        system_logger: bool) -> Self {
+        let mut properties = EVENT_TRACE_PROPERTIES::new(&name, system_logger);
 
         properties.BufferSize = buf_size_kb;
 
@@ -969,6 +988,10 @@ impl TraceSession {
                 &mut self.properties);
 
             if result != 0 {
+                if result == 5 {
+                    anyhow::bail!(
+                        "StartTraceW failed with 5 (access denied): the account needs ETW session permissions (for ordinary sessions, e.g. Performance Log Users membership) or elevation; system tracing may require additional permissions");
+                }
                 anyhow::bail!("StartTraceW failed with {}", result);
             }
         }
@@ -1138,7 +1161,7 @@ impl TraceSession {
 
     pub(super) fn enable_privilege(
         &self,
-        name: &str) -> bool {
+        name: &str) -> anyhow::Result<()> {
         let mut id: u64 = 0;
         let null_str = std::ptr::null::<u16>();
         let null_token = std::ptr::null_mut::<TOKEN_PRIVILEGES>();
@@ -1150,7 +1173,7 @@ impl TraceSession {
                 &mut id);
 
             if result == 0 {
-                return false;
+                anyhow::bail!("LookupPrivilegeValueW({name}) failed with {}", GetLastError());
             }
         }
 
@@ -1163,7 +1186,7 @@ impl TraceSession {
                 &mut token);
 
             if result == 0 {
-                return false;
+                anyhow::bail!("OpenProcessToken for {name} failed with {}", GetLastError());
             }
         }
 
@@ -1184,19 +1207,51 @@ impl TraceSession {
                 null_token,
                 &mut return_size);
 
+            let error = GetLastError();
             CloseHandle(token);
 
             if result == 0 {
-                return false;
+                anyhow::bail!("AdjustTokenPrivileges({name}) failed with {error}");
+            }
+            if error != 0 {
+                anyhow::bail!(
+                    "AdjustTokenPrivileges({name}) failed with {error}: the privilege must be assigned to the account before it can be enabled");
             }
         }
 
-        true
+        Ok(())
     }
 }
 
 impl Drop for TraceSession {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ordinary_session_does_not_use_system_logger_mode() {
+        let properties = EVENT_TRACE_PROPERTIES::new("one_collect_ordinary_mode_test", false);
+        assert_eq!(properties.LogFileMode,
+            EVENT_TRACE_REAL_TIME_MODE | EVENT_TRACE_INDEPENDENT_SESSION_MODE);
+    }
+
+    #[test]
+    fn system_session_preserves_system_logger_mode() {
+        let properties = EVENT_TRACE_PROPERTIES::new("one_collect_system_mode_test", true);
+        assert_eq!(properties.LogFileMode,
+            EVENT_TRACE_REAL_TIME_MODE | EVENT_TRACE_INDEPENDENT_SESSION_MODE |
+            EVENT_TRACE_SYSTEM_LOGGER_MODE);
+    }
+
+    #[test]
+    fn invalid_privilege_reports_lookup_failure() {
+        let session = TraceSession::new("one_collect_privilege_test".into(), 64, false);
+        let error = session.enable_privilege("OneCollectNonexistentPrivilege").unwrap_err();
+        assert!(error.to_string().contains("LookupPrivilegeValueW"));
     }
 }

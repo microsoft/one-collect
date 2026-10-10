@@ -4,20 +4,21 @@
 //! End-to-end integration tests for ETW session loss metrics
 //! (`EtwSession` / `one_collect::etw::query_stats`).
 //!
-//! These tests start a real ETW kernel consumer session, register a real
+//! These tests start a real ETW consumer session, register a real
 //! TraceLogging provider (via the `tracelogging` crate), and assert on the
 //! live loss/health counters returned by [`one_collect::etw::query_stats`].
 //!
-//! Both tests are marked `#[ignore]` because the consumer side of ETW
-//! requires administrative privileges (`SeSystemProfilePrivilege` /
-//! `SeDebugPrivilege`).  Run manually from an elevated shell with:
+//! Both tests are marked `#[ignore]` because live ETW session control
+//! requires appropriate Windows permissions. Performance Log Users
+//! membership can be used instead of elevation, subject to provider ACLs.
+//! Run manually from an authorized account (or an elevated shell) with:
 //!
 //! ```text
 //! cargo test -p one_collect --test etw_stats_integration -- --ignored --nocapture --test-threads=1
 //! ```
 //!
-//! `--test-threads=1` is required: each test starts its own ETW kernel
-//! consumer session.  Running them concurrently would race on those
+//! `--test-threads=1` is required: each test starts its own live ETW
+//! consumer session. Running them concurrently would race on those
 //! system-global resources.
 //!
 //! ## Why these tests assert what they assert
@@ -179,7 +180,7 @@ fn query_stats_reports_zero_loss_for_healthy_session() {
             until_counter.load(Ordering::Relaxed) >= EVENTS
                 || Instant::now() >= deadline
         })
-        .expect("parse_until failed (is the test running elevated?)");
+        .expect("parse_until failed (does the account have ETW session/provider permissions?)");
 
     assert!(
         offthread_ok.load(Ordering::SeqCst),
@@ -379,7 +380,7 @@ fn query_stats_observes_loss_under_blocked_consumer() {
 
     session
         .parse_until("one_collect_stats_loss", until)
-        .expect("parse_until failed (is the test running elevated?)");
+        .expect("parse_until failed (does the account have ETW session/provider permissions?)");
 
     // Tell the (detached) flood writer to stop; it exits on its next loop.
     stop_writer.store(true, Ordering::SeqCst);

@@ -404,6 +404,7 @@ pub struct EtwSession {
 
     /* Flags */
     elevate: bool,
+    system_logger: bool,
     profile_interval: Option<u32>,
 }
 
@@ -464,6 +465,7 @@ impl EtwSession {
 
             /* Flags */
             elevate: false,
+            system_logger: false,
             profile_interval: None,
         }
     }
@@ -566,13 +568,37 @@ impl EtwSession {
         self.profile_interval = Some(interval_ms);
     }
 
+    /// Explicitly request both debug and system-profile privileges.
+    /// This enables privileges already assigned to the process token; it does
+    /// not elevate the process or display a UAC prompt.
     pub fn requires_elevation(&mut self) {
         self.elevate = true;
+    }
+
+    /// Require a system logger and the system-profile privilege, without
+    /// requesting the debug privilege. Built-in kernel helpers and known
+    /// System Provider GUIDs select this automatically. Use this for other
+    /// providers that require system-logger mode.
+    pub fn requires_system_logger(&mut self) {
+        self.system_logger = true;
+    }
+
+    fn required_privileges(&self) -> &'static [&'static str] {
+        if self.elevate {
+            &["SeDebugPrivilege", "SeSystemProfilePrivilege"]
+        } else if self.system_logger || self.profile_interval.is_some() {
+            &["SeSystemProfilePrivilege"]
+        } else {
+            &[]
+        }
     }
 
     pub fn enable_provider(
         &mut self,
         provider: Guid) -> &mut TraceEnable {
+        if abi::is_system_provider(provider) {
+            self.requires_system_logger();
+        }
         self.enabled
             .entry(provider)
             .or_insert_with(|| TraceEnable::new(provider))
@@ -717,6 +743,8 @@ impl EtwSession {
             return;
         }
 
+        self.requires_system_logger();
+
         let id = id as u8;
 
         /* Bail if already enabled */
@@ -755,7 +783,7 @@ impl EtwSession {
     }
 
     pub fn comm_start_event(&mut self) -> &mut Event {
-        self.requires_elevation();
+        self.requires_system_logger();
 
         self.enable_singleton_event(
             SYSTEM_PROCESS_PROVIDER,
@@ -770,7 +798,7 @@ impl EtwSession {
     }
 
     pub fn comm_end_event(&mut self) -> &mut Event {
-        self.requires_elevation();
+        self.requires_system_logger();
 
         self.enable_singleton_event(
             SYSTEM_PROCESS_PROVIDER,
@@ -785,7 +813,7 @@ impl EtwSession {
     }
 
     pub fn comm_start_capture_event(&mut self) -> &mut Event {
-        self.requires_elevation();
+        self.requires_system_logger();
 
         self.enable_singleton_event(
             SYSTEM_PROCESS_PROVIDER,
@@ -800,7 +828,7 @@ impl EtwSession {
     }
 
     pub fn comm_end_capture_event(&mut self) -> &mut Event {
-        self.requires_elevation();
+        self.requires_system_logger();
 
         self.enable_singleton_event(
             SYSTEM_PROCESS_PROVIDER,
@@ -815,7 +843,7 @@ impl EtwSession {
     }
 
     pub fn mmap_load_event(&mut self) -> &mut Event {
-        self.requires_elevation();
+        self.requires_system_logger();
 
         self.enable_singleton_event(
             SYSTEM_PROCESS_PROVIDER,
@@ -830,7 +858,7 @@ impl EtwSession {
     }
 
     pub fn mmap_unload_event(&mut self) -> &mut Event {
-        self.requires_elevation();
+        self.requires_system_logger();
 
         self.enable_singleton_event(
             SYSTEM_PROCESS_PROVIDER,
@@ -845,7 +873,7 @@ impl EtwSession {
     }
 
     pub fn mmap_load_capture_start_event(&mut self) -> &mut Event {
-        self.requires_elevation();
+        self.requires_system_logger();
 
         self.enable_singleton_event(
             SYSTEM_PROCESS_PROVIDER,
@@ -860,7 +888,7 @@ impl EtwSession {
     }
 
     pub fn mmap_load_capture_end_event(&mut self) -> &mut Event {
-        self.requires_elevation();
+        self.requires_system_logger();
 
         self.enable_singleton_event(
             SYSTEM_PROCESS_PROVIDER,
@@ -877,7 +905,7 @@ impl EtwSession {
     pub fn profile_cpu_event(
         &mut self,
         properties: Option<u32>) -> &mut Event {
-        self.requires_elevation();
+        self.requires_system_logger();
 
         if let Some(properties) = properties {
             if properties & PROPERTY_STACK_TRACE != 0 {
@@ -901,7 +929,7 @@ impl EtwSession {
     pub fn ready_thread_event(
         &mut self,
         properties: Option<u32>) -> &mut Event {
-        self.requires_elevation();
+        self.requires_system_logger();
 
         if let Some(properties) = properties {
             if properties & PROPERTY_STACK_TRACE != 0 {
@@ -925,7 +953,7 @@ impl EtwSession {
     pub fn hard_page_fault_event(
         &mut self,
         properties: Option<u32>) -> &mut Event {
-        self.requires_elevation();
+        self.requires_system_logger();
 
         if let Some(properties) = properties {
             if properties & PROPERTY_STACK_TRACE != 0 {
@@ -950,7 +978,7 @@ impl EtwSession {
         &'a mut self,
         properties: Option<u32>,
         mut closure: impl FnMut(&mut Event)) {
-        self.requires_elevation();
+        self.requires_system_logger();
 
         if let Some(properties) = properties {
             if properties & PROPERTY_STACK_TRACE != 0 {
@@ -1016,7 +1044,7 @@ impl EtwSession {
     pub fn cswitch_event(
         &mut self,
         properties: Option<u32>) -> &mut Event {
-        self.requires_elevation();
+        self.requires_system_logger();
 
         if let Some(properties) = properties {
             if properties & PROPERTY_STACK_TRACE != 0 {
@@ -1038,7 +1066,7 @@ impl EtwSession {
     }
 
     pub fn callstack_event(&mut self) -> &mut Event {
-        self.requires_elevation();
+        self.requires_system_logger();
 
         self.enable_singleton_event(
             EMPTY_PROVIDER,
@@ -1049,7 +1077,7 @@ impl EtwSession {
     }
 
     pub fn dpc_event(&mut self) -> &mut Event {
-        self.requires_elevation();
+        self.requires_system_logger();
 
         self.enable_singleton_event(
             SYSTEM_INTERRUPT_PROVIDER,
@@ -1063,7 +1091,7 @@ impl EtwSession {
     }
 
     pub fn threaded_dpc_event(&mut self) -> &mut Event {
-        self.requires_elevation();
+        self.requires_system_logger();
 
         self.enable_singleton_event(
             SYSTEM_INTERRUPT_PROVIDER,
@@ -1077,7 +1105,7 @@ impl EtwSession {
     }
 
     pub fn timer_dpc_event(&mut self) -> &mut Event {
-        self.requires_elevation();
+        self.requires_system_logger();
 
         self.enable_singleton_event(
             SYSTEM_INTERRUPT_PROVIDER,
@@ -1135,10 +1163,6 @@ impl EtwSession {
         mut self,
         name: &str,
         until: impl Fn() -> bool + Send + 'static) -> anyhow::Result<()> {
-        let mut session = TraceSession::new(
-            name.into(),
-            self.cpu_buf_kb);
-
         /* Run self mutating callbacks for on-demand dynamic hooks */
         if let Some(callbacks) = self.built_callbacks.take() {
             for callback in callbacks {
@@ -1146,9 +1170,13 @@ impl EtwSession {
             }
         }
 
-        if self.elevate {
-            session.enable_privilege("SeDebugPrivilege");
-            session.enable_privilege("SeSystemProfilePrivilege");
+        let mut session = TraceSession::new(
+            name.into(),
+            self.cpu_buf_kb,
+            self.system_logger);
+
+        for privilege in self.required_privileges() {
+            session.enable_privilege(privilege)?;
         }
 
         if let Some(interval) = self.profile_interval {
@@ -1374,6 +1402,113 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::Duration;
+
+    #[test]
+    fn ordinary_providers_do_not_request_system_or_debug_capabilities() {
+        let mut session = EtwSession::new();
+        let mut event = Event::for_etw(
+            1, "Manifest::ProcessStart".into(),
+            Guid::from_u128(0x22fb2cd6_0e7b_422b_a0c7_2fad1fd0e716),
+            LEVEL_INFORMATION, 0x10);
+        event.set_id_wild_card_flag();
+        session.add_event(event, Some(PROPERTY_STACK_TRACE));
+        assert!(!session.system_logger);
+        assert!(!session.elevate);
+        assert!(session.kernel_callstacks.is_empty());
+        assert!(session.required_privileges().is_empty());
+    }
+
+    #[test]
+    fn system_providers_select_system_mode_through_generic_registration() {
+        use windows_sys::Win32::System::Diagnostics::Etw::SystemRegistryProviderGuid;
+
+        let provider = providers::win32_guid_to_guid(&SystemRegistryProviderGuid);
+        let mut session = EtwSession::new();
+        session.enable_provider(provider);
+        assert!(session.system_logger);
+        assert!(!session.elevate);
+        assert_eq!(session.required_privileges(), &["SeSystemProfilePrivilege"]);
+
+        let mut session = EtwSession::new();
+        let mut event = Event::for_etw(
+            1, "Kernel::Registry".into(), provider, LEVEL_INFORMATION, 1);
+        event.set_id_wild_card_flag();
+        session.add_event(event, None);
+        assert!(session.system_logger);
+        assert!(!session.elevate);
+
+        let mut session = EtwSession::new();
+        let mut event = Event::for_etw(
+            1, "Process::Start".into(), SYSTEM_PROCESS_PROVIDER, LEVEL_INFORMATION, 1);
+        *event.extension_mut().lookup_provider_mut() = Some(REAL_SYSTEM_PROCESS_PROVIDER);
+        session.add_event(event, None);
+        assert!(session.system_logger);
+        assert!(!session.elevate);
+    }
+
+    #[test]
+    fn kernel_helpers_request_system_mode_without_debug_privilege() {
+        let helpers: &[fn(&mut EtwSession)] = &[
+            |s| { s.comm_start_event(); },
+            |s| { s.comm_end_event(); },
+            |s| { s.comm_start_capture_event(); },
+            |s| { s.comm_end_capture_event(); },
+            |s| { s.mmap_load_event(); },
+            |s| { s.mmap_unload_event(); },
+            |s| { s.mmap_load_capture_start_event(); },
+            |s| { s.mmap_load_capture_end_event(); },
+            |s| { s.profile_cpu_event(Some(PROPERTY_STACK_TRACE)); },
+            |s| { s.ready_thread_event(Some(PROPERTY_STACK_TRACE)); },
+            |s| { s.hard_page_fault_event(Some(PROPERTY_STACK_TRACE)); },
+            |s| { s.soft_page_fault_events(Some(PROPERTY_STACK_TRACE), |_| {}); },
+            |s| { s.cswitch_event(Some(PROPERTY_STACK_TRACE)); },
+            |s| { s.callstack_event(); },
+            |s| { s.dpc_event(); },
+            |s| { s.threaded_dpc_event(); },
+            |s| { s.timer_dpc_event(); },
+        ];
+        for helper in helpers {
+            let mut session = EtwSession::new();
+            helper(&mut session);
+            assert!(session.system_logger);
+            assert!(!session.elevate);
+        }
+    }
+
+    #[test]
+    fn mixed_session_retains_system_mode() {
+        let mut session = EtwSession::new();
+        session.cswitch_event(None);
+        session.add_event(Event::for_etw(
+            1, "User::Event".into(), Guid::from_u128(1), LEVEL_INFORMATION, 1), None);
+        assert!(session.system_logger);
+        assert!(!session.elevate);
+    }
+
+    #[test]
+    fn direct_kernel_stacks_request_system_mode() {
+        let mut session = EtwSession::new();
+        session.add_kernel_callstack(REAL_SYSTEM_THREAD_PROVIDER, 36);
+        assert!(session.system_logger);
+        assert!(!session.elevate);
+        assert!(session.needs_kernel_callstacks());
+    }
+
+    #[test]
+    fn explicit_privileges_do_not_force_system_mode() {
+        let mut session = EtwSession::new();
+        session.requires_elevation();
+        assert!(session.elevate);
+        assert!(!session.system_logger);
+        assert_eq!(session.required_privileges(),
+            &["SeDebugPrivilege", "SeSystemProfilePrivilege"]);
+
+        let mut session = EtwSession::new();
+        session.requires_profile_interval(1);
+        assert!(!session.elevate);
+        assert!(!session.system_logger);
+        assert_eq!(session.required_privileges(), &["SeSystemProfilePrivilege"]);
+    }
 
     #[test]
     fn query_stats_rejects_zero_handle() {
