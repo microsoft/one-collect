@@ -186,8 +186,10 @@ pub trait ExportSymbolReader {
 }
 
 /// Infers symbol extents from the following kallsyms entry.
-/// Without an increasing successor, `end()` equals `start()` so range-based
-/// attribution cannot extend into unrelated code.
+/// If there is no successor (end of file or read error), or the successor
+/// address is zero or not above the current start, the extent is empty
+/// (`end() == start()`) so range-based attribution cannot extend into
+/// unrelated code.
 pub struct KernelSymbolReader {
     reader: Option<BufReader<File>>,
     buffer: String,
@@ -981,6 +983,27 @@ mod tests {
         assert_eq!(0x2000, reader.start());
         assert_eq!(0x20FF, reader.end());
         assert_eq!("method_after_zero", reader.name());
+        assert!(!reader.next());
+    }
+
+    #[test]
+    fn kernel_symbol_reader_decreasing_successor() {
+        let kern_syms_path = std::env::current_dir().unwrap().join(
+            "../test/assets/kernel/symbols-decreasing-boundary.map");
+        let mut reader = KernelSymbolReader::new();
+        reader.set_file(File::open(kern_syms_path).unwrap());
+
+        /* Successor is lower: extent must not end before start */
+        assert!(reader.next());
+        assert_eq!(0x3000, reader.start());
+        assert_eq!(reader.start(), reader.end());
+        assert_eq!("method_before_lower", reader.name());
+
+        /* Normal increasing successor is unchanged */
+        assert!(reader.next());
+        assert_eq!(0x2000, reader.start());
+        assert_eq!(0x20FF, reader.end());
+        assert_eq!("method_lower", reader.name());
         assert!(!reader.next());
     }
 
