@@ -1087,7 +1087,8 @@ impl UniversalExporterOSHooks for UniversalExporter {
         };
 
         let mut session = EtwSession::new()
-            .with_per_cpu_buffer_bytes(self.cpu_buf_bytes())
+            .with_per_cpu_buffer_bytes(
+                self.per_buffer_size_bytes(EtwSession::maximum_buffer_count() as usize))
             .with_callstack_help(&callstack_helper);
 
         if let Some(target_pids) = &settings.target_pids {
