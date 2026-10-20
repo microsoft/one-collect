@@ -26,7 +26,7 @@ struct Args {
     on_cpu: bool,
 
     #[cfg(target_os = "linux")]
-    #[arg(long, default_value_t = ClockId::MonotonicRaw, help = "Clock shared by perf events and export timestamps")]
+    #[arg(long = "clockid", default_value_t = ClockId::MonotonicRaw, help = "Clock shared by perf events and export timestamps")]
     clock_id: ClockId,
 
     #[arg(long, help = "Capture context switches")]
