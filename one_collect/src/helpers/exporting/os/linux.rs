@@ -15,9 +15,9 @@ use crate::event::DataFieldRef;
 use crate::PathBufInteger;
 use crate::openat::{OpenAt, DupFd};
 use crate::procfs;
-use crate::perf_event::{AncillaryData, PerfSession};
+use crate::perf_event::{AncillaryData, PerfClock, PerfSession};
 use crate::perf_event::{RingBufSessionBuilder, RingBufBuilder};
-use crate::perf_event::rb::{RingBufOptions, cgroup_sample_supported};
+use crate::perf_event::rb::{RingBufOptions, cgroup_sample_supported, perf_timestamp};
 use crate::perf_event::abi::PERF_RECORD_MISC_SWITCH_OUT;
 use crate::helpers::callstack::{CallstackHelp, CallstackReader};
 use crate::helpers::exporting::*;
@@ -685,24 +685,35 @@ pub(crate) fn default_export_settings() -> ExportSettings {
 
 pub(crate) struct OSExportSettings {
     process_fs: bool,
+    clock: PerfClock,
 }
 
 impl OSExportSettings {
     pub(crate) fn new() -> Self {
         Self {
             process_fs: true,
+            clock: PerfClock::default(),
         }
     }
 }
 
 pub trait ExportSettingsLinuxExt {
     fn without_process_fs(self) -> Self;
+
+    /// Select the shared perf/export clock. Defaults to CLOCK_MONOTONIC_RAW.
+    fn with_perf_clock(self, clock: PerfClock) -> Self;
 }
 
 impl ExportSettingsLinuxExt for ExportSettings {
     fn without_process_fs(self) -> Self {
         let mut clone = self;
         clone.os.process_fs = false;
+        clone
+    }
+
+    fn with_perf_clock(self, clock: PerfClock) -> Self {
+        let mut clone = self;
+        clone.os.clock = clock;
         clone
     }
 }
@@ -1707,6 +1718,10 @@ impl ExportMachineOSHooks for ExportMachine {
         ((t.tv_sec * 1000000000) + t.tv_nsec) as u64
     }
 
+    fn os_session_qpc_time(&self) -> u64 {
+        perf_timestamp(&RingBufBuilder::common_attributes(self.settings.os.clock))
+    }
+
     fn os_qpc_freq() -> u64 {
         let mut t = libc::timespec {
             tv_sec: 0,
@@ -1739,6 +1754,7 @@ impl ExportBuilderHelp for RingBufSessionBuilder {
         self,
         settings: &ExportSettings) -> Self {
         let mut builder = self;
+        builder = builder.with_clock(settings.os.clock);
 
         let mut kernel = RingBufBuilder::for_kernel()
             .with_executable_mmap_records()
@@ -1794,7 +1810,8 @@ impl ExportBuilderHelp for RingBufSessionBuilder {
 impl ExportSessionHelp for PerfSession {
     fn build_exporter(
         &mut self,
-        settings: ExportSettings) -> anyhow::Result<Writable<ExportMachine>> {
+        mut settings: ExportSettings) -> anyhow::Result<Writable<ExportMachine>> {
+        settings.os.clock = self.clock();
         OSExportMachine::hook_to_perf_session(
             ExportMachine::new(settings),
             self)

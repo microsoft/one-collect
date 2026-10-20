@@ -37,6 +37,7 @@ impl RingBufSessionHook {
 
 pub struct RingBufSessionBuilder {
     pages: usize,
+    clock: PerfClock,
     target_pids: Option<Vec<i32>>,
     target_cpus: Option<Vec<u16>>,
     wakeup_watermark: Option<u32>,
@@ -60,6 +61,7 @@ impl RingBufSessionBuilder {
     pub fn new() -> Self {
         Self {
             pages: 1,
+            clock: PerfClock::default(),
             target_pids: None,
             target_cpus: None,
             wakeup_watermark: None,
@@ -91,6 +93,7 @@ impl RingBufSessionBuilder {
 
         Self {
             pages: self.pages,
+            clock: self.clock,
             target_pids: pids,
             target_cpus: self.target_cpus.take(),
             wakeup_watermark: self.wakeup_watermark,
@@ -122,6 +125,7 @@ impl RingBufSessionBuilder {
 
         Self {
             pages: self.pages,
+            clock: self.clock,
             target_pids: self.target_pids.take(),
             target_cpus: cpus,
             wakeup_watermark: self.wakeup_watermark,
@@ -141,6 +145,7 @@ impl RingBufSessionBuilder {
         pages: usize) -> Self {
         Self {
             pages,
+            clock: self.clock,
             target_pids: self.target_pids.take(),
             target_cpus: self.target_cpus.take(),
             wakeup_watermark: self.wakeup_watermark,
@@ -153,6 +158,14 @@ impl RingBufSessionBuilder {
             hard_page_faults_builder: self.hard_page_faults_builder.take(),
             hooks: self.hooks.take(),
         }
+    }
+
+    /// Select the clock for every perf stream, including streams added by hooks.
+    pub fn with_clock(
+        mut self,
+        clock: PerfClock) -> Self {
+        self.clock = clock;
+        self
     }
 
     /// Configure the kernel to defer marking a per-CPU perf fd readable
@@ -182,6 +195,7 @@ impl RingBufSessionBuilder {
         bytes: u32) -> Self {
         Self {
             pages: self.pages,
+            clock: self.clock,
             target_pids: self.target_pids.take(),
             target_cpus: self.target_cpus.take(),
             wakeup_watermark: Some(bytes),
@@ -201,6 +215,7 @@ impl RingBufSessionBuilder {
         builder: RingBufBuilder<Kernel>) -> Self {
         Self {
             pages: self.pages,
+            clock: self.clock,
             target_pids: self.target_pids.take(),
             target_cpus: self.target_cpus.take(),
             wakeup_watermark: self.wakeup_watermark,
@@ -231,6 +246,7 @@ impl RingBufSessionBuilder {
         builder: RingBufBuilder<Tracepoint>) -> Self {
         Self {
             pages: self.pages,
+            clock: self.clock,
             target_pids: self.target_pids.take(),
             target_cpus: self.target_cpus.take(),
             wakeup_watermark: self.wakeup_watermark,
@@ -261,6 +277,7 @@ impl RingBufSessionBuilder {
         builder: RingBufBuilder<Profiling>) -> Self {
         Self {
             pages: self.pages,
+            clock: self.clock,
             target_pids: self.target_pids.take(),
             target_cpus: self.target_cpus.take(),
             wakeup_watermark: self.wakeup_watermark,
@@ -291,6 +308,7 @@ impl RingBufSessionBuilder {
         builder: RingBufBuilder<ContextSwitches>) -> Self {
         Self {
             pages: self.pages,
+            clock: self.clock,
             target_pids: self.target_pids.take(),
             target_cpus: self.target_cpus.take(),
             wakeup_watermark: self.wakeup_watermark,
@@ -321,6 +339,7 @@ impl RingBufSessionBuilder {
         builder: RingBufBuilder<Bpf>) -> Self {
         Self {
             pages: self.pages,
+            clock: self.clock,
             target_pids: self.target_pids.take(),
             target_cpus: self.target_cpus.take(),
             wakeup_watermark: self.wakeup_watermark,
@@ -351,6 +370,7 @@ impl RingBufSessionBuilder {
         builder: RingBufBuilder<PageFaults>) -> Self {
         Self {
             pages: self.pages,
+            clock: self.clock,
             target_pids: self.target_pids.take(),
             target_cpus: self.target_cpus.take(),
             wakeup_watermark: self.wakeup_watermark,
@@ -381,6 +401,7 @@ impl RingBufSessionBuilder {
         builder: RingBufBuilder<PageFaults>) -> Self {
         Self {
             pages: self.pages,
+            clock: self.clock,
             target_pids: self.target_pids.take(),
             target_cpus: self.target_cpus.take(),
             wakeup_watermark: self.wakeup_watermark,
@@ -419,6 +440,7 @@ impl RingBufSessionBuilder {
 
         Self {
             pages: self.pages,
+            clock: self.clock,
             target_pids: self.target_pids.take(),
             target_cpus: self.target_cpus.take(),
             wakeup_watermark: self.wakeup_watermark,
@@ -430,6 +452,31 @@ impl RingBufSessionBuilder {
             soft_page_faults_builder: self.soft_page_faults_builder.take(),
             hard_page_faults_builder: self.hard_page_faults_builder.take(),
             hooks: Some(hooks),
+        }
+    }
+
+    fn apply_clock(&mut self) {
+        self.kernel_builder
+            .get_or_insert_with(RingBufBuilder::for_kernel)
+            .set_clock(self.clock);
+
+        if let Some(builder) = &mut self.event_builder {
+            builder.set_clock(self.clock);
+        }
+        if let Some(builder) = &mut self.profiling_builder {
+            builder.set_clock(self.clock);
+        }
+        if let Some(builder) = &mut self.cswitch_builder {
+            builder.set_clock(self.clock);
+        }
+        if let Some(builder) = &mut self.bpf_builder {
+            builder.set_clock(self.clock);
+        }
+        if let Some(builder) = &mut self.soft_page_faults_builder {
+            builder.set_clock(self.clock);
+        }
+        if let Some(builder) = &mut self.hard_page_faults_builder {
+            builder.set_clock(self.clock);
         }
     }
 
@@ -448,6 +495,9 @@ impl RingBufSessionBuilder {
                 }
             }
         }
+
+        // Hooks may add or replace streams; normalize their clocks before opening fds.
+        self.apply_clock();
 
         /* Apply wakeup watermark to the kernel/leader perf_event_attr. The
          * leader fd is the one the kernel wakes when data lands in its
@@ -496,6 +546,7 @@ impl RingBufSessionBuilder {
             self.soft_page_faults_builder.take(),
             self.hard_page_faults_builder.take());
 
+        source.clock = self.clock;
         source.build()?;
 
         let mut session = PerfSession::new(Box::new(source));
@@ -521,6 +572,7 @@ pub struct RingBufDataSource {
     leader_ids: HashMap<u32, u64>,
     ring_bufs: HashMap<u64, CpuRingBuf>,
     pages: usize,
+    clock: PerfClock,
     enabled: bool,
     target_pids: Option<Vec<i32>>,
     target_cpus: Option<Vec<u16>>,
@@ -556,6 +608,7 @@ impl RingBufDataSource {
             leader_ids: HashMap::new(),
             ring_bufs: HashMap::new(),
             pages,
+            clock: PerfClock::default(),
             target_pids,
             target_cpus,
             kernel_builder,
@@ -841,7 +894,7 @@ impl RingBufDataSource {
          * The reader is added to the normal readers/cursors so that
          * in-process events are processed in time order alongside
          * kernel events. */
-        let mut in_process = InProcessRingBuf::new(self.pages);
+        let mut in_process = InProcessRingBuf::new(self.pages, self.clock);
         let reader = in_process.create_reader();
 
         self.readers.push(reader);
@@ -851,7 +904,7 @@ impl RingBufDataSource {
         /* Insert a dummy CpuRingBuf at id=0 so that read_time() can
          * look up the attributes for in-process records (which use
          * identifier 0). */
-        let common_attrs = Rc::new(RingBufBuilder::common_attributes());
+        let common_attrs = Rc::new(RingBufBuilder::common_attributes(self.clock));
         self.ring_bufs.insert(0, CpuRingBuf::new(0, common_attrs));
 
         info!(
@@ -1047,6 +1100,10 @@ impl RingBufDataSource {
 }
 
 impl PerfDataSource for RingBufDataSource {
+    fn clock(&self) -> PerfClock {
+        self.clock
+    }
+
     fn enable(&mut self) -> IOResult<()> {
         self.enable()
     }
@@ -1488,7 +1545,7 @@ mod tests {
     fn read_time_skips_unknown_ring_buffer_id() {
         const TEST_RECORD_TYPE: u32 = 1024;
 
-        let mut ring_buf = InProcessRingBuf::new(1);
+        let mut ring_buf = InProcessRingBuf::new(1, PerfClock::default());
         let mut writer = ring_buf.writer();
         let reader = ring_buf.create_reader();
         let mut cursor = CpuRingCursor::default();
@@ -1516,7 +1573,7 @@ mod tests {
         reader.begin_reading(&mut cursor);
 
         let mut ring_bufs = std::collections::HashMap::new();
-        let common_attrs = std::rc::Rc::new(RingBufBuilder::common_attributes());
+        let common_attrs = std::rc::Rc::new(RingBufBuilder::common_attributes(PerfClock::default()));
         ring_bufs.insert(known_id, CpuRingBuf::new(0, common_attrs));
 
         /* First call: encounters the unknown id, advances past just that one

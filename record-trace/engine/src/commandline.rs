@@ -25,6 +25,10 @@ struct Args {
     #[arg(long, help = "Capture CPU samples")]
     on_cpu: bool,
 
+    #[cfg(target_os = "linux")]
+    #[arg(long, default_value_t = ClockId::MonotonicRaw, help = "Clock shared by perf events and export timestamps")]
+    clock_id: ClockId,
+
     #[arg(long, help = "Capture context switches")]
     off_cpu: bool,
 
@@ -86,6 +90,25 @@ impl fmt::Display for Format {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+enum ClockId {
+    #[value(name = "CLOCK_MONOTONIC")]
+    Monotonic,
+    #[value(name = "CLOCK_MONOTONIC_RAW")]
+    MonotonicRaw,
+}
+
+#[cfg(target_os = "linux")]
+impl fmt::Display for ClockId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Monotonic => write!(f, "CLOCK_MONOTONIC"),
+            Self::MonotonicRaw => write!(f, "CLOCK_MONOTONIC_RAW"),
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 pub enum LogMode {
     Disabled,
@@ -108,6 +131,8 @@ pub struct RecordArgs {
     output_path: PathBuf,
     format: Format,
     on_cpu: bool,
+    #[cfg(target_os = "linux")]
+    clock_id: ClockId,
     off_cpu: bool,
     soft_page_faults: bool,
     hard_page_faults: bool,
@@ -168,6 +193,8 @@ impl RecordArgs {
             output_path,
             format: command_args.format,
             on_cpu: command_args.on_cpu,
+            #[cfg(target_os = "linux")]
+            clock_id: command_args.clock_id,
             off_cpu: command_args.off_cpu,
             soft_page_faults: command_args.soft_page_faults,
             hard_page_faults: command_args.hard_page_faults,
@@ -210,6 +237,14 @@ impl RecordArgs {
 
     pub (crate) fn on_cpu(&self) -> bool {
         self.on_cpu
+    }
+
+    #[cfg(target_os = "linux")]
+    pub (crate) fn perf_clock(&self) -> one_collect::perf_event::PerfClock {
+        match self.clock_id {
+            ClockId::Monotonic => one_collect::perf_event::PerfClock::Monotonic,
+            ClockId::MonotonicRaw => one_collect::perf_event::PerfClock::MonotonicRaw,
+        }
     }
 
     pub (crate) fn off_cpu(&self) -> bool {
@@ -272,6 +307,8 @@ impl RecordArgs {
         info!("Arguments parsed: output_path={}", self.output_path.display());
         info!("Arguments parsed: format={}", self.format);
         info!("Arguments parsed: on_cpu={}", self.on_cpu);
+        #[cfg(target_os = "linux")]
+        info!("Arguments parsed: clock_id={}", self.clock_id);
         info!("Arguments parsed: off_cpu={}", self.off_cpu);
         info!("Arguments parsed: soft_page_faults={}", self.soft_page_faults);
         info!("Arguments parsed: hard_page_faults={}", self.hard_page_faults);

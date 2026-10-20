@@ -1378,6 +1378,8 @@ pub trait ExportMachineOSHooks {
 
     fn os_qpc_time() -> u64;
 
+    fn os_session_qpc_time(&self) -> u64 { Self::os_qpc_time() }
+
     fn os_qpc_freq() -> u64;
 
     fn os_cpu_count() -> u32;
@@ -1579,7 +1581,7 @@ impl ExportMachine {
     pub fn mark_start(&mut self) {
         self.mark_start_direct(
             Utc::now(),
-            Self::os_qpc_time());
+            self.os_session_qpc_time());
     }
 
     pub fn mark_start_direct(
@@ -1592,7 +1594,7 @@ impl ExportMachine {
 
     pub fn mark_end(&mut self) {
         if let Some(start_qpc) = self.start_qpc {
-            let end_qpc = Self::os_qpc_time();
+            let end_qpc = self.os_session_qpc_time();
             let qpc_freq = Self::os_qpc_freq();
             let duration = Self::qpc_to_duration(qpc_freq, end_qpc - start_qpc);
 
