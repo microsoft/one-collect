@@ -631,6 +631,33 @@ impl RingBufDataSource {
         Ok(())
     }
 
+    fn set_new_bufs_filter(
+        ring_bufs: &HashMap<u64, CpuRingBuf>,
+        before: &HashSet<u64>,
+        mut set_filter: impl FnMut(&CpuRingBuf) -> IOResult<()>) -> IOResult<()> {
+        for (id, buf) in ring_bufs.iter() {
+            if before.contains(id) {
+                continue;
+            }
+
+            if let Err(err) = set_filter(buf) {
+                warn!(
+                    "set_new_bufs_filter: failed to set perf filter, cpu={}, id={}: {}",
+                    buf.cpu, id, err
+                );
+                return Err(err);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn remove_new_bufs(
+        ring_bufs: &mut HashMap<u64, CpuRingBuf>,
+        before: &HashSet<u64>) {
+        ring_bufs.retain(|id, _| before.contains(id));
+    }
+
     fn tasks_for_pids(pids: &mut Vec<i32>) {
         let mut tasks = HashSet::new();
 
@@ -1136,55 +1163,67 @@ impl PerfDataSource for RingBufDataSource {
                 false => { &self.target_cpus },
             };
 
+            let filter_cstr = event.extension().perf_filter()
+                .map(std::ffi::CString::new)
+                .transpose()
+                .map_err(|_| io_error("Invalid perf filter string"))?;
+
             /* Snapshot existing ring buf keys so we can find newly created ones */
             let before: std::collections::HashSet<u64> = self.ring_bufs.keys().copied().collect();
 
-            match &self.target_pids {
-                None => {
-                    Self::add_cpu_bufs(
-                        None,
-                        target_cpus,
-                        &self.leader_ids,
-                        &mut self.ring_bufs,
-                        &common,
-                        None)?;
-                },
-                Some(pids) => {
-                    for pid in pids {
+            let result = (|| -> IOResult<()> {
+                match &self.target_pids {
+                    None => {
                         Self::add_cpu_bufs(
-                            Some(*pid),
+                            None,
                             target_cpus,
                             &self.leader_ids,
                             &mut self.ring_bufs,
                             &common,
                             None)?;
-                    }
-                },
-            }
-
-            /* Apply perf tracepoint filter to newly created fds if set */
-            if let Some(filter_str) = event.extension().perf_filter() {
-                let filter_cstr = std::ffi::CString::new(filter_str)
-                    .map_err(|_| io_error("Invalid perf filter string"))?;
-
-                for (&id, buf) in self.ring_bufs.iter() {
-                    if !before.contains(&id) {
-                        if let Err(err) = buf.set_filter(&filter_cstr) {
-                            warn!(
-                                "add_event: failed to set perf filter on cpu={}, event={}: {}",
-                                buf.cpu,
-                                event.name(),
-                                err
-                            );
+                    },
+                    Some(pids) => {
+                        for pid in pids {
+                            Self::add_cpu_bufs(
+                                Some(*pid),
+                                target_cpus,
+                                &self.leader_ids,
+                                &mut self.ring_bufs,
+                                &common,
+                                None)?;
                         }
-                    }
+                    },
                 }
 
-                debug!(
-                    "add_event: perf filter applied, event_name={}, filter={:?}",
+                if let Some(filter_cstr) = &filter_cstr {
+                    Self::set_new_bufs_filter(
+                        &self.ring_bufs,
+                        &before,
+                        |buf| buf.set_filter(filter_cstr))?;
+
+                    debug!(
+                        "add_event: perf filter applied, event_name={}, filter={:?}",
+                        event.name(),
+                        filter_cstr
+                    );
+                }
+
+                Ok(())
+            })();
+
+            /* Close partially configured fds on failure. They are already connected
+             * to the tracepoint and would otherwise keep producing unfiltered samples. */
+            if let Err(err) = result {
+                Self::remove_new_bufs(&mut self.ring_bufs, &before);
+
+                warn!(
+                    "add_event: failed, new fds closed, event_name={}, event_id={}: {}",
                     event.name(),
-                    filter_str
+                    event.id(),
+                    err
                 );
+
+                return Err(err);
             }
 
             info!("Event added: event_name={}, event_id={}", event.name(), event.id());
@@ -1482,6 +1521,58 @@ mod tests {
         let mut cpus: Vec<u32> = source.fd_cpus().collect();
         cpus.sort_unstable();
         assert_eq!(vec![0u32, 1u32, 2u32], cpus);
+    }
+
+    #[test]
+    fn set_new_bufs_filter_failure_rolls_back_only_new() {
+        let common_attrs = std::rc::Rc::new(RingBufBuilder::common_attributes());
+        let mut ring_bufs = HashMap::new();
+
+        ring_bufs.insert(1u64, CpuRingBuf::new(0, common_attrs.clone()));
+        let before: HashSet<u64> = ring_bufs.keys().copied().collect();
+
+        ring_bufs.insert(2u64, CpuRingBuf::new(0, common_attrs.clone()));
+        ring_bufs.insert(3u64, CpuRingBuf::new(1, common_attrs.clone()));
+
+        let result = RingBufDataSource::set_new_bufs_filter(
+            &ring_bufs,
+            &before,
+            |_| Err(IOError::from_raw_os_error(libc::EINVAL)));
+
+        assert_eq!(Some(libc::EINVAL), result.unwrap_err().raw_os_error());
+
+        RingBufDataSource::remove_new_bufs(&mut ring_bufs, &before);
+
+        let remaining: HashSet<u64> = ring_bufs.keys().copied().collect();
+        assert_eq!(before, remaining);
+    }
+
+    #[test]
+    #[ignore]
+    fn add_event_filter_failure_closes_new_fds() {
+        let tracefs = crate::tracefs::TraceFS::open().unwrap();
+
+        let mut source = RingBufDataSource::new(
+            1,
+            None,
+            None,
+            None,
+            Some(RingBufBuilder::for_tracepoint()),
+            None,
+            None,
+            None,
+            None,
+            None);
+
+        source.build().unwrap();
+
+        let base = source.ring_bufs.len();
+
+        let mut event = tracefs.find_event("syscalls", "sys_enter_sync").unwrap();
+        event.extension_mut().set_perf_filter("I'm gonna blow you to smithereens!");
+
+        assert!(source.add_event(&event).is_err());
+        assert_eq!(base, source.ring_bufs.len());
     }
 
     #[test]
