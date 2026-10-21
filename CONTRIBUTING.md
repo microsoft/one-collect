@@ -74,7 +74,14 @@ On Linux, this framework primarily uses the perf events facility. When running o
 
 #### Windows Development
 
-On Windows, this framework uses ETW (Event Tracing for Windows). Running one-collect will require elevated privileges on Windows.
+On Windows, this framework uses ETW (Event Tracing for Windows). Ordinary
+real-time sessions require ETW session permissions, which can be provided by
+Performance Log Users membership instead of an elevated administrator process,
+subject to session and provider ACLs. System kernel tracing additionally requires
+the system-profile privilege and appropriate access to the system providers.
+The library does not elevate the process or grant permissions. ETW integration
+tests remain ignored by default; the complete suite requires elevation because
+it also installs a test manifest.
 
 ### Architecture Overview
 
