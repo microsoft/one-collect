@@ -68,7 +68,7 @@
 //! Negative results are not cached, so a manifest registered after the
 //! decoder starts is picked up on the next matching event.
 
-use super::abi::{EVENT_RECORD, EventRecordExt};
+use super::abi::{EVENT_HEADER_EXT_TYPE_PROV_TRAITS, EVENT_RECORD, EventRecordExt};
 use crate::Guid;
 use crate::event::{EventData, EventField, EventFormat, LocationType};
 
@@ -193,12 +193,16 @@ impl std::error::Error for TdhDecodeError {}
 
 // ── Cached schema ───────────────────────────────────────────────────
 
-/// Cached schema: the event name and the `EventFormat` that the
-/// framework's `try_get_field_data_closure` can resolve lazily.
+/// Cached schema: the event name, optional manifest provider name, and the
+/// `EventFormat` that the framework's `try_get_field_data_closure` can
+/// resolve lazily.
 #[derive(Clone)]
 struct CachedSchema {
     /// The event name (TraceLogging event name or manifest task name).
     event_name: String,
+    /// Manifest provider name extracted from TDH metadata, when available.
+    /// TraceLogging provider names are borrowed from each event's traits.
+    provider_name: Option<String>,
     /// Schema-stable `EventFormat`: field offsets are absolute for
     /// fixed-size fields, and the framework's skip chain handles
     /// variable-length fields lazily via `size = 0`.
@@ -371,7 +375,7 @@ impl SchemaCache {
 
 /// Result of a successful [`TdhDecoder::decode`] call.
 ///
-/// Contains the decoded [`EventData`], the resolved `event_name`,
+/// Contains the decoded [`EventData`], the resolved event and provider names,
 /// and a monotonic [`SchemaId`] that exporters can use as a cheap
 /// lookup key for format registration.
 #[non_exhaustive]
@@ -391,6 +395,13 @@ pub struct TdhDecodedEvent<'a> {
     /// consumers (dedup, routing, record identity) should use `schema_id`
     /// (or the event's `Id`/`Opcode`) rather than treating the name as unique.
     pub event_name: Option<&'a str>,
+    /// Best-effort provider name from the event's provider traits, falling
+    /// back to `TRACE_EVENT_INFO.ProviderNameOffset` for manifest events.
+    ///
+    /// Missing, empty, or malformed metadata yields `None`. TraceLogging
+    /// provider names are borrowed directly from the current event without
+    /// allocation.
+    pub provider_name: Option<&'a str>,
     /// Monotonic identifier for this event's schema.
     ///
     /// Each distinct schema (identified by its inline TraceLogging bytes or
@@ -469,7 +480,7 @@ impl TdhDecoder {
     /// through a `decode_*` path.
     ///
     /// The returned [`TdhDecodedEvent`] contains the decoded
-    /// [`EventData`], the resolved `event_name`, and a monotonic
+    /// [`EventData`], the resolved event and provider names, and a monotonic
     /// [`SchemaId`] that exporters can use as a cheap lookup key for
     /// format registration.
     pub fn decode<'a>(
@@ -536,10 +547,13 @@ impl TdhDecoder {
         } else {
             Some(schema.event_name.as_str())
         };
+        let provider_name = provider_name_from_traits(record)
+            .or(schema.provider_name.as_deref());
 
         Ok(TdhDecodedEvent {
             event_data: EventData::new(user_data, user_data, &schema.format),
             event_name,
+            provider_name,
             schema_id: schema.schema_id,
         })
     }
@@ -637,10 +651,16 @@ fn build_cached_schema(tei_buf: &[u8], is_32bit: bool) -> Result<CachedSchema, T
     let top_level_count = tei.TopLevelPropertyCount as usize;
 
     let event_name = read_event_name(tei_buf, tei);
+    let provider_name = if tei.DecodingSource == DecodingSourceXMLFile {
+        read_provider_name(tei_buf, tei)
+    } else {
+        None
+    };
 
     if property_count == 0 {
         return Ok(CachedSchema {
             event_name,
+            provider_name,
             format: EventFormat::new(),
             schema_id: SchemaId(0), // assigned by caller
         });
@@ -678,6 +698,7 @@ fn build_cached_schema(tei_buf: &[u8], is_32bit: bool) -> Result<CachedSchema, T
 
     Ok(CachedSchema {
         event_name,
+        provider_name,
         format,
         schema_id: SchemaId(0), // assigned by caller
     })
@@ -851,6 +872,34 @@ fn find_schema_tl(record: &EVENT_RECORD) -> Option<&[u8]> {
     })
 }
 
+/// Borrows the UTF-8 provider name from an event's provider traits.
+///
+/// Provider traits begin with a little-endian total length followed by a
+/// NUL-terminated provider name. Optional traits may follow the name.
+fn provider_name_from_traits(record: &EVENT_RECORD) -> Option<&str> {
+    let item_ptr = record
+        .find_extended_data(EVENT_HEADER_EXT_TYPE_PROV_TRAITS as u16)?;
+    let item = unsafe { &*item_ptr };
+    if item.DataPtr == 0 || item.DataSize < 3 {
+        return None;
+    }
+
+    let data = unsafe {
+        std::slice::from_raw_parts(item.DataPtr as *const u8, item.DataSize as usize)
+    };
+    let traits_len = u16::from_le_bytes([data[0], data[1]]) as usize;
+    if traits_len < 3 || traits_len > data.len() {
+        return None;
+    }
+
+    let name_bytes = &data[2..traits_len];
+    let nul = name_bytes.iter().position(|&byte| byte == 0)?;
+    if nul == 0 {
+        return None;
+    }
+    std::str::from_utf8(&name_bytes[..nul]).ok()
+}
+
 /// Reads `TRACE_EVENT_INFO.DecodingSource` from a filled TEI buffer.
 ///
 /// Used by the manifest dispatch path to reject non-XML-manifest sources
@@ -993,6 +1042,41 @@ fn read_event_name(tei_buf: &[u8], tei: &TRACE_EVENT_INFO) -> String {
 /// Reads a null-terminated UTF-16 property name from the TEI buffer.
 fn read_property_name(tei_buf: &[u8], prop: &EVENT_PROPERTY_INFO) -> String {
     read_utf16_at(tei_buf, prop.NameOffset as usize)
+}
+
+/// Read optional provider metadata without accepting malformed offsets or
+/// unterminated/invalid UTF-16 as a provider identity.
+fn read_provider_name(tei_buf: &[u8], tei: &TRACE_EVENT_INFO) -> Option<String> {
+    let offset = tei.ProviderNameOffset as usize;
+    if offset == 0 {
+        return None;
+    }
+    if offset < std::mem::size_of::<TRACE_EVENT_INFO>() || offset & 1 != 0
+        || offset >= tei_buf.len()
+    {
+        warn!(offset, "invalid TDH provider name offset");
+        return None;
+    }
+    let remaining = &tei_buf[offset..];
+    let mut units = Vec::new();
+    for bytes in remaining.chunks_exact(2) {
+        let unit = u16::from_le_bytes([bytes[0], bytes[1]]);
+        if unit == 0 {
+            if units.is_empty() {
+                return None;
+            }
+            return match String::from_utf16(&units) {
+                Ok(name) => Some(name),
+                Err(error) => {
+                    warn!(%error, "invalid UTF-16 in TDH provider name");
+                    None
+                }
+            };
+        }
+        units.push(unit);
+    }
+    warn!(offset, "unterminated TDH provider name");
+    None
 }
 
 /// Reads a null-terminated UTF-16LE string from `buf` at `byte_offset`.
@@ -1172,6 +1256,173 @@ mod tests {
         assert_eq!(read_utf16_at(&[0x41, 0x00], 100), "");
     }
 
+    /// Scenario: TDH returns a provider name in a zero-property schema.
+    /// Guarantees: The schema owns the decoded UTF-16 name independently of
+    /// the reusable TDH buffer for manifest events, while TraceLogging names
+    /// remain record-borrowed.
+    #[test]
+    fn cached_schema_extracts_provider_name() {
+        let mut tei: TRACE_EVENT_INFO = unsafe { std::mem::zeroed() };
+        tei.ProviderNameOffset = std::mem::size_of::<TRACE_EVENT_INFO>() as u32;
+        let mut buf = AlignedTeiBuf::new();
+        let name = "Provider.\u{2603}";
+        let name_bytes: Vec<u8> = name.encode_utf16().chain(Some(0))
+            .flat_map(u16::to_le_bytes).collect();
+        buf.len = std::mem::size_of::<TRACE_EVENT_INFO>() + name_bytes.len();
+        buf.ensure_capacity(buf.len);
+        // SAFETY: The buffer is aligned for TRACE_EVENT_INFO and sized above.
+        unsafe {
+            buf.as_mut_ptr().write(tei);
+            std::ptr::copy_nonoverlapping(
+                name_bytes.as_ptr(),
+                (buf.as_mut_ptr() as *mut u8).add(std::mem::size_of::<TRACE_EVENT_INFO>()),
+                name_bytes.len(),
+            );
+        }
+        // SAFETY: The initialized TDH buffer is aligned and sized above.
+        unsafe { (*buf.as_mut_ptr()).DecodingSource = DecodingSourceTlg; }
+        let schema = build_cached_schema(buf.as_bytes(), false).expect("valid schema");
+        assert_eq!(schema.provider_name, None);
+
+        // SAFETY: The initialized TDH buffer is aligned and sized above.
+        unsafe { (*buf.as_mut_ptr()).DecodingSource = DecodingSourceXMLFile; }
+        let schema = build_cached_schema(buf.as_bytes(), false).expect("valid schema");
+        assert_eq!(schema.provider_name.as_deref(), Some(name));
+        buf.ensure_capacity(8192);
+        assert_eq!(schema.provider_name.as_deref(), Some(name));
+    }
+
+    /// Scenario: Optional provider metadata is missing, empty, outside the
+    /// buffer, misaligned, unterminated, or contains invalid UTF-16.
+    /// Guarantees: No malformed or absent metadata is exposed as a name.
+    #[test]
+    fn provider_name_metadata_unavailable_or_malformed() {
+        let header_size = std::mem::size_of::<TRACE_EVENT_INFO>();
+        let mut tei: TRACE_EVENT_INFO = unsafe { std::mem::zeroed() };
+        let mut buf = vec![0u8; header_size + 4];
+        for offset in [0, 2, header_size + 1, buf.len(), u32::MAX as usize] {
+            tei.ProviderNameOffset = offset as u32;
+            assert_eq!(read_provider_name(&buf, &tei), None);
+        }
+        tei.ProviderNameOffset = header_size as u32;
+        assert_eq!(read_provider_name(&buf, &tei), None, "empty name");
+        buf[header_size..].copy_from_slice(&[b'A', 0, b'B', 0]);
+        assert_eq!(read_provider_name(&buf, &tei), None, "unterminated name");
+        buf[header_size..].copy_from_slice(&[0x00, 0xD8, 0, 0]);
+        assert_eq!(read_provider_name(&buf, &tei), None, "unpaired surrogate");
+    }
+
+    /// Scenario: Two providers emit identical TraceLogging event schemas.
+    /// Guarantees: Provider names are borrowed from each record while the
+    /// schema and its ID remain shared based on the inline schema bytes.
+    #[test]
+    fn tdh_decode_provider_names_are_borrowed_per_record() {
+        let schema_a = build_tl_schema("ProviderA", "SameEvent", &[("X", TL_UINT32)]);
+        let schema_b = build_tl_schema("ProviderB", "SameEvent", &[("X", TL_UINT32)]);
+        let (prov_a, evt_a) = split_tl_schema(&schema_a);
+        let (prov_b, evt_b) = split_tl_schema(&schema_b);
+        assert_eq!(evt_a, evt_b);
+        let user_data = 1u32.to_le_bytes();
+        let mut ext_a = unsafe { std::mem::zeroed() };
+        let mut ext_b = unsafe { std::mem::zeroed() };
+        let mut record_a = build_test_record(prov_a, evt_a, &mut ext_a, &user_data);
+        let mut record_b = build_test_record(prov_b, evt_b, &mut ext_b, &user_data);
+        record_a.EventHeader.ProviderId.data1 = 1;
+        record_b.EventHeader.ProviderId.data1 = 2;
+        let mut decoder = TdhDecoder::new();
+        let first = decoder.decode(&record_a).expect("decode A");
+        assert_eq!(first.provider_name, Some("ProviderA"));
+        let first_id = first.schema_id;
+        let second = decoder.decode(&record_b).expect("decode B");
+        assert_eq!(second.provider_name, Some("ProviderB"));
+        assert_eq!(second.schema_id, first_id);
+        assert_eq!(decoder.cache.schemas.len(), 1);
+
+        // The name is not retained in the TraceLogging cache.
+        record_a = build_test_record(&[], evt_a, &mut ext_a, &user_data);
+        record_a.EventHeader.ProviderId.data1 = 1;
+        let cached = decoder.decode(&record_a).expect("cached A");
+        assert_eq!(cached.schema_id, first_id);
+        assert_eq!(cached.provider_name, None);
+        assert_eq!(decoder.cache.schemas.len(), 1);
+    }
+
+    /// Scenario: Provider traits are absent or malformed.
+    /// Guarantees: Invalid metadata is ignored without affecting decoding.
+    #[test]
+    fn provider_name_traits_unavailable_or_malformed() {
+        let record: EVENT_RECORD = unsafe { std::mem::zeroed() };
+        assert_eq!(provider_name_from_traits(&record), None);
+
+        for data in [
+            &[][..],
+            &[2, 0][..],
+            &[9, 0, b'A', 0][..],
+            &[4, 0, b'A', b'B'][..],
+            &[3, 0, 0][..],
+            &[5, 0, 0xFF, 0, 0][..],
+        ] {
+            let mut item: EVENT_HEADER_EXTENDED_DATA_ITEM = unsafe { std::mem::zeroed() };
+            item.ExtType = EVENT_HEADER_EXT_TYPE_PROV_TRAITS as u16;
+            item.DataSize = data.len() as u16;
+            item.DataPtr = data.as_ptr() as u64;
+            let mut record: EVENT_RECORD = unsafe { std::mem::zeroed() };
+            record.ExtendedDataCount = 1;
+            record.ExtendedData = &mut item;
+            assert_eq!(provider_name_from_traits(&record), None);
+        }
+
+        let data = [6, 0, b'A', b'B', 0, 0xFF];
+        let mut item: EVENT_HEADER_EXTENDED_DATA_ITEM = unsafe { std::mem::zeroed() };
+        item.ExtType = EVENT_HEADER_EXT_TYPE_PROV_TRAITS as u16;
+        item.DataSize = data.len() as u16;
+        item.DataPtr = data.as_ptr() as u64;
+        let mut record: EVENT_RECORD = unsafe { std::mem::zeroed() };
+        record.ExtendedDataCount = 1;
+        record.ExtendedData = &mut item;
+        assert_eq!(provider_name_from_traits(&record), Some("AB"));
+    }
+
+    /// Scenario: A cached manifest schema has a TDH provider-name fallback.
+    /// Guarantees: Valid provider traits take precedence, and the cached name
+    /// is used when traits are absent.
+    #[test]
+    fn tdh_decode_manifest_provider_name_prefers_traits() {
+        let traits = [
+            16, 0, b'T', b'r', b'a', b'i', b't', b'P', b'r', b'o', b'v', b'i', b'd', b'e',
+            b'r', 0,
+        ];
+        let mut item: EVENT_HEADER_EXTENDED_DATA_ITEM = unsafe { std::mem::zeroed() };
+        item.ExtType = EVENT_HEADER_EXT_TYPE_PROV_TRAITS as u16;
+        item.DataSize = traits.len() as u16;
+        item.DataPtr = traits.as_ptr() as u64;
+        let mut record: EVENT_RECORD = unsafe { std::mem::zeroed() };
+        record.ExtendedDataCount = 1;
+        record.ExtendedData = &mut item;
+        let key = ManifestEventKey {
+            provider: record.provider_guid(),
+            id: 0,
+            version: 0,
+        };
+        let mut decoder = TdhDecoder::new();
+        decoder.cache.insert(SchemaSource::Manifest(key), false, CachedSchema {
+            event_name: String::new(),
+            provider_name: Some("ManifestProvider".to_string()),
+            format: EventFormat::new(),
+            schema_id: SchemaId(7),
+        });
+
+        let result = decoder.decode(&record).expect("cached decode succeeds");
+        assert_eq!(result.provider_name, Some("TraitProvider"));
+        assert_eq!(result.schema_id, SchemaId(7));
+
+        record.ExtendedDataCount = 0;
+        record.ExtendedData = std::ptr::null_mut();
+        let result = decoder.decode(&record).expect("cached decode succeeds");
+        assert_eq!(result.provider_name, Some("ManifestProvider"));
+        assert_eq!(result.schema_id, SchemaId(7));
+    }
+
     // ── End-to-end TDH integration tests ────────────────────────────
 
     /// TL InType constants (same as TDH_INTYPE_* values).
@@ -1209,8 +1460,6 @@ mod tests {
         blob
     }
 
-    const EXT_TYPE_PROV_TRAITS: u16 = 12;
-
     fn build_test_record(
         prov_blob: &[u8],
         event_blob: &[u8],
@@ -1218,7 +1467,7 @@ mod tests {
         user_data: &[u8],
     ) -> EVENT_RECORD {
         ext_items[0] = unsafe { std::mem::zeroed() };
-        ext_items[0].ExtType = EXT_TYPE_PROV_TRAITS;
+        ext_items[0].ExtType = EVENT_HEADER_EXT_TYPE_PROV_TRAITS as u16;
         ext_items[0].DataSize = prov_blob.len() as u16;
         ext_items[0].DataPtr = prov_blob.as_ptr() as u64;
         ext_items[1] = unsafe { std::mem::zeroed() };
@@ -1590,6 +1839,7 @@ mod tests {
     fn manifest_cache_shared_arena_and_pointer_split() {
         let mk = |name: &str| CachedSchema {
             event_name: name.to_string(),
+            provider_name: None,
             format: EventFormat::new(),
             schema_id: SchemaId(0),
         };
@@ -1710,6 +1960,7 @@ mod tests {
     fn tracelogging_duplicate_key_returns_existing_index() {
         let mk = |name: &str| CachedSchema {
             event_name: name.to_string(),
+            provider_name: None,
             format: EventFormat::new(),
             schema_id: SchemaId(0),
         };
