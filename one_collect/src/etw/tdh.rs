@@ -879,11 +879,16 @@ fn find_schema_tl(record: &EVENT_RECORD) -> Option<&[u8]> {
 fn provider_name_from_traits(record: &EVENT_RECORD) -> Option<&str> {
     let item_ptr = record
         .find_extended_data(EVENT_HEADER_EXT_TYPE_PROV_TRAITS as u16)?;
+    // SAFETY: `find_extended_data` returns a pointer to an item in the
+    // `EVENT_RECORD`'s aligned extended-data array, which remains valid for
+    // the lifetime of `record`.
     let item = unsafe { &*item_ptr };
     if item.DataPtr == 0 || item.DataSize < 3 {
         return None;
     }
 
+    // SAFETY: ETW guarantees that a non-null extended-data `DataPtr` points
+    // to `DataSize` initialized bytes that remain valid with the record.
     let data = unsafe {
         std::slice::from_raw_parts(item.DataPtr as *const u8, item.DataSize as usize)
     };
