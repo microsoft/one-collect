@@ -207,7 +207,9 @@ trait EventPayloadWriter {
         &mut self,
         value: &str) -> anyhow::Result<()> {
         let bytes = value.as_bytes();
-        self.write_u16(value.len() as u16)?;
+        let len = u16::try_from(bytes.len())
+            .map_err(|_| anyhow::anyhow!("NetTrace UTF8 string exceeds the 16-bit length limit: {} bytes", bytes.len()))?;
+        self.write_u16(len)?;
         self.write_bytes(bytes)
     }
 
@@ -404,12 +406,14 @@ impl NetTraceWriter {
         };
 
         /* Write payload */
+        let field_count = u16::try_from(fields.len())
+            .map_err(|_| anyhow::anyhow!("NetTrace metadata exceeds the 16-bit field count limit"))?;
         self.buffer.clear();
         self.buffer.write_varint(meta_id as u64)?;
         self.buffer.write_utf8(provider)?;
         self.buffer.write_varint(event_id as u64)?;
         self.buffer.write_utf8(event_name)?;
-        self.buffer.write_u16(fields.len() as u16)?;
+        self.buffer.write_u16(field_count)?;
 
         for field in fields {
             let mut size = self.buffer.size_utf8(field.name) + 1;
@@ -418,12 +422,16 @@ impl NetTraceWriter {
                 size += 1;
             }
 
-            self.buffer.write_u16(size as u16)?;
+            let size = u16::try_from(size)
+                .map_err(|_| anyhow::anyhow!("NetTrace field description exceeds the 16-bit size limit: {}", field.name))?;
+            self.buffer.write_u16(size)?;
             self.buffer.write_utf8(field.name)?;
             self.buffer.write_u8(field.type_id)?;
 
             if field.type_id == TYPE_ID_ARRAY {
-                self.buffer.write_u8(field.element_type_id.unwrap_or(0))?;
+                let element_type_id = field.element_type_id
+                    .ok_or_else(|| anyhow::anyhow!("NetTrace array field has no supported element type: {}", field.name))?;
+                self.buffer.write_u8(element_type_id)?;
             }
         }
 
@@ -447,8 +455,10 @@ impl NetTraceWriter {
         }
 
         let payload = self.buffer.as_slice();
+        let size = u16::try_from(payload.len())
+            .map_err(|_| anyhow::anyhow!("NetTrace metadata row exceeds the 16-bit size limit: {} bytes", payload.len()))?;
 
-        self.output.write_u16(payload.len() as u16)?; /* Size */
+        self.output.write_u16(size)?; /* Size */
         self.output.write_bytes(payload)
     }
 
@@ -1659,6 +1669,56 @@ mod tests {
         let low = input.read_raw_byte().unwrap();
         let high = input.read_raw_byte().unwrap();
         u16::from_le_bytes([low, high]) as usize
+    }
+
+    #[test]
+    fn short_utf8_lengths_are_checked_in_bytes() {
+        for value in [String::new(), "a".repeat(65535), "\u{00e9}".repeat(32767)] {
+            let mut buffer = Vec::new();
+            buffer.write_short_utf8(&value).unwrap();
+            let mut input = CodedInputStream::from_bytes(&buffer);
+            assert_eq!(read_u16(&mut input), value.len());
+            assert_eq!(input.read_raw_bytes(value.len() as u32).unwrap(), value.as_bytes());
+            assert!(input.eof().unwrap());
+        }
+        for value in ["a".repeat(65536), "\u{00e9}".repeat(32768)] {
+            let mut buffer = vec![42];
+            let error = buffer.write_short_utf8(&value).unwrap_err();
+            assert!(error.to_string().contains("16-bit length limit"));
+            assert_eq!(buffer, vec![42]);
+        }
+    }
+
+    #[test]
+    fn metadata_lengths_are_checked_before_writing() {
+        let path = unique_temp_path("metadata-lengths");
+        let mut writer = NetTraceWriter::new(path.to_str().unwrap()).unwrap();
+        writer.write_event_metadata(1, "", 1, &"a".repeat(65525), &[]).unwrap();
+        let pos = writer.get_pos().unwrap();
+        assert_eq!(pos, 20 + 2 + 65535);
+        let error = writer.write_event_metadata(1, "", 1, &"a".repeat(65526), &[]).unwrap_err();
+        assert!(error.to_string().contains("metadata row exceeds"));
+        assert_eq!(writer.get_pos().unwrap(), pos);
+
+        let name = "a".repeat(65532);
+        let field = NetTraceField { type_id: TYPE_ID_BYTE, element_type_id: None, name: &name };
+        let error = writer.write_event_metadata(1, "", 1, "", &[field]).unwrap_err();
+        assert!(error.to_string().contains("field description exceeds"));
+        assert_eq!(writer.get_pos().unwrap(), pos);
+
+        let fields: Vec<_> = (0..65536).map(|_| NetTraceField {
+            type_id: TYPE_ID_BYTE, element_type_id: None, name: "",
+        }).collect();
+        let error = writer.write_event_metadata(1, "", 1, "", &fields).unwrap_err();
+        assert!(error.to_string().contains("field count limit"));
+        assert_eq!(writer.get_pos().unwrap(), pos);
+
+        let field = NetTraceField { type_id: TYPE_ID_ARRAY, element_type_id: None, name: "unknown" };
+        let error = writer.write_event_metadata(1, "", 1, "", &[field]).unwrap_err();
+        assert!(error.to_string().contains("no supported element type"));
+        assert_eq!(writer.get_pos().unwrap(), pos);
+        drop(writer);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
