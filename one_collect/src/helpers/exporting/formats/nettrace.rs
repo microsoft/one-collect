@@ -1459,16 +1459,23 @@ impl NetTraceWriter {
                     ExportAttributeValue::Value(value) => {
                         if attribute.name() == op_code_str_id {
                             /* Kind 7: OpCode */
+                            let value = u8::try_from(value)
+                                .map_err(|_| anyhow::anyhow!("NetTrace OpCode label exceeds the 8-bit value limit: {}", value))?;
                             self.buffer.write_u8(add_flag | 7)?;
-                            self.buffer.write_u8(value as u8)?;
+                            self.buffer.write_u8(value)?;
                         } else if attribute.name() == version_str_id {
                             /* Kind 10: Version */
+                            let value = u8::try_from(value)
+                                .map_err(|_| anyhow::anyhow!("NetTrace Version label exceeds the 8-bit value limit: {}", value))?;
                             self.buffer.write_u8(add_flag | 10)?;
-                            self.buffer.write_u8(value as u8)?;
+                            self.buffer.write_u8(value)?;
                         } else {
+                            // Kind 6 is signed zigzag, unlike event payload varuints.
+                            let encoded = value.checked_mul(2)
+                                .ok_or_else(|| anyhow::anyhow!("NetTrace numeric label {} exceeds the signed 64-bit value limit: {}", name, value))?;
                             self.buffer.write_u8(add_flag | 6)?;
                             self.buffer.write_utf8(name)?;
-                            self.buffer.write_varint(value)?;
+                            self.buffer.write_varint(encoded)?;
                         }
                     },
                     ExportAttributeValue::Record(id) => {
@@ -1892,6 +1899,63 @@ mod tests {
             }
         }
         assert!(seen.into_iter().all(|value| value));
+    }
+
+    #[test]
+    fn numeric_labels_round_trip_as_signed_varints() {
+        let path = unique_temp_path("numeric-labels");
+        let mut writer = NetTraceWriter::new(path.to_str().unwrap()).unwrap();
+        let mut machine = ExportMachine::new(ExportSettings::default());
+        let values = [0, 1, 63, 64, 127, 128, i64::MAX as u64];
+        let mut attributes = ExportAttributes::default();
+        for value in values {
+            attributes.push(machine.value_attribute("number", value));
+        }
+        attributes.push(machine.value_attribute("OpCode", 255));
+        attributes.push(machine.value_attribute("Version", 255));
+        let attributes_id = machine.push_unique_attributes(attributes);
+        writer.saved_labels.insert(SavedLabelKey { attributes_id, write_id: 0 }, 0);
+        writer.write_labels(&machine).unwrap();
+        drop(writer);
+        let data = std::fs::read(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        let rows = blocks(&data);
+        assert_eq!(rows.len(), 1);
+        let mut input = CodedInputStream::from_bytes(rows[0].1);
+        assert_eq!(input.read_raw_little_endian32().unwrap(), 1);
+        assert_eq!(input.read_raw_little_endian32().unwrap(), 1);
+        for value in values {
+            assert_eq!(input.read_raw_byte().unwrap(), 6);
+            assert_eq!(input.read_string().unwrap(), "number");
+            assert_eq!(input.read_sint64().unwrap(), value as i64);
+        }
+        assert_eq!(input.read_raw_byte().unwrap(), 7);
+        assert_eq!(input.read_raw_byte().unwrap(), 255);
+        assert_eq!(input.read_raw_byte().unwrap(), 128 | 10);
+        assert_eq!(input.read_raw_byte().unwrap(), 255);
+        assert!(input.eof().unwrap());
+    }
+
+    #[test]
+    fn unrepresentable_numeric_labels_are_rejected() {
+        for (name, value, message) in [
+            ("number", i64::MAX as u64 + 1, "signed 64-bit value limit"),
+            ("number", u64::MAX, "signed 64-bit value limit"),
+            ("OpCode", 256, "8-bit value limit"),
+            ("Version", 256, "8-bit value limit"),
+        ] {
+            let path = unique_temp_path("numeric-label-overflow");
+            let mut writer = NetTraceWriter::new(path.to_str().unwrap()).unwrap();
+            let mut machine = ExportMachine::new(ExportSettings::default());
+            let mut attributes = ExportAttributes::default();
+            attributes.push(machine.value_attribute(name, value));
+            let attributes_id = machine.push_unique_attributes(attributes);
+            writer.saved_labels.insert(SavedLabelKey { attributes_id, write_id: 0 }, 0);
+            let error = writer.write_labels(&machine).unwrap_err();
+            assert!(error.to_string().contains(message));
+            drop(writer);
+            std::fs::remove_file(path).unwrap();
+        }
     }
 
     #[test]
