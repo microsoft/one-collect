@@ -491,6 +491,10 @@ impl NetTraceWriter {
             time = self.sync_time;
         }
 
+        if time < self.flush_time {
+            time = self.flush_time;
+        }
+
         /* Don't allow overflow (should never happen, but if it does...) */
         if time < self.last_time {
             time = self.last_time;
@@ -559,6 +563,7 @@ impl NetTraceWriter {
         machine: &ExportMachine,
         start_time: u64,
         end_time: u64) -> anyhow::Result<()> {
+        let end_time = end_time.max(self.last_time).max(start_time);
         debug!("Flushing NetTrace event block: start_time={}, end_time={}, event_count={}", 
             start_time, end_time, self.event_block.len());
 
@@ -1552,10 +1557,8 @@ impl NetTraceWriter {
         &mut self,
         machine: &ExportMachine) -> anyhow::Result<()> {
         /* Determine end time to use */
-        let end_time = match machine.end_qpc() {
-            Some(end_qpc) => { end_qpc },
-            None => { u64::MAX },
-        };
+        let latest_time = self.last_time.max(self.flush_time).max(self.sync_time);
+        let end_time = machine.end_qpc().unwrap_or(latest_time).max(latest_time);
 
         /* Flush events/stacks if needed */
         if !self.event_block.is_empty() {
@@ -1956,6 +1959,92 @@ mod tests {
             drop(writer);
             std::fs::remove_file(path).unwrap();
         }
+    }
+
+    fn check_event_times(data: &[u8]) -> (Vec<u64>, Vec<u64>) {
+        let mut event_times = Vec::new();
+        let mut sequence_times = Vec::new();
+        for (kind, payload) in blocks(data) {
+            let mut input = CodedInputStream::from_bytes(payload);
+            if kind == 4 {
+                let time = input.read_raw_little_endian64().unwrap();
+                if let Some(previous) = sequence_times.last() {
+                    assert!(time >= *previous);
+                }
+                if let Some(previous) = event_times.last() {
+                    assert!(time >= *previous);
+                }
+                sequence_times.push(time);
+            } else if kind == 2 {
+                assert_eq!(read_u16(&mut input), 20);
+                assert_eq!(read_u16(&mut input), 1);
+                let min = input.read_raw_little_endian64().unwrap();
+                let max = input.read_raw_little_endian64().unwrap();
+                let mut time = 0;
+                while !input.eof().unwrap() {
+                    assert_eq!(input.read_raw_byte().unwrap(), 223);
+                    for _ in 0..6 {
+                        input.read_raw_varint64().unwrap();
+                    }
+                    time += input.read_raw_varint64().unwrap();
+                    assert!(time >= min && time <= max);
+                    assert!(time >= *sequence_times.last().unwrap());
+                    if let Some(previous) = event_times.last() {
+                        assert!(time >= *previous);
+                    }
+                    event_times.push(time);
+                    input.read_raw_varint32().unwrap();
+                    let size = input.read_raw_varint32().unwrap();
+                    input.skip_raw_bytes(size).unwrap();
+                }
+            }
+        }
+        (event_times, sequence_times)
+    }
+
+    #[test]
+    fn event_times_remain_sorted_across_blocks() {
+        let path = unique_temp_path("event-times");
+        let mut writer = NetTraceWriter::new(path.to_str().unwrap()).unwrap();
+        writer.sync_time = 100;
+        writer.flush_time = 100;
+        let mut machine = ExportMachine::new(ExportSettings::default());
+        let kind = machine.sample_kind("test");
+        let converter = DefaultExportGraphMetricValueConverter::default();
+        for (i, time) in [300, 350, 200, 400].into_iter().enumerate() {
+            let pid = i as u32 + 1;
+            machine.add_sample(time, MetricValue::Count(1), pid, 1, 0, kind, &[]).unwrap();
+            let replay = machine.find_process(pid).unwrap().to_replay();
+            writer.write_replay_event(&machine, &replay, &converter).unwrap();
+            if i == 1 {
+                writer.flush_event_block(&machine, writer.flush_time, writer.last_time).unwrap();
+            }
+        }
+        writer.finish(&machine).unwrap();
+        drop(writer);
+        let data = std::fs::read(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(check_event_times(&data), (vec![300, 350, 350, 400], vec![100, 350, 400]));
+    }
+
+    #[test]
+    fn final_timestamp_cannot_precede_events() {
+        let path = unique_temp_path("final-time");
+        let mut machine = ExportMachine::new(ExportSettings::default());
+        machine.mark_start();
+        machine.mark_end();
+        let time = machine.end_qpc().unwrap() + 100;
+        let kind = machine.sample_kind("test");
+        machine.add_sample(time, MetricValue::Count(1), 1, 1, 0, kind, &[]).unwrap();
+        let mut writer = NetTraceWriter::new(path.to_str().unwrap()).unwrap();
+        let converter = DefaultExportGraphMetricValueConverter::default();
+        let replay = machine.find_process(1).unwrap().to_replay();
+        writer.write_replay_event(&machine, &replay, &converter).unwrap();
+        writer.finish(&machine).unwrap();
+        drop(writer);
+        let data = std::fs::read(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(check_event_times(&data), (vec![time], vec![0, time]));
     }
 
     #[test]
