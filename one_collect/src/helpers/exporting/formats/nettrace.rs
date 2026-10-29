@@ -48,6 +48,7 @@ struct NetTraceField<'a> {
 
 const MAX_BLOCK_SIZE: usize = 0x00FF_FFFF;
 
+const TYPE_ID_SBYTE: u8 = 5;
 const TYPE_ID_BYTE: u8 = 6;
 const TYPE_ID_INT16: u8 = 7;
 const TYPE_ID_UINT16: u8 = 8;
@@ -922,7 +923,7 @@ impl NetTraceWriter {
         match first {
             /* Byte */
             "u8" => { Some(TYPE_ID_BYTE) },
-            "s8" => { Some(TYPE_ID_BYTE) },
+            "s8" => { Some(TYPE_ID_SBYTE) },
             "char" => { Some(TYPE_ID_BYTE) },
 
             /* INT16 */
@@ -938,7 +939,14 @@ impl NetTraceWriter {
             /* INT64 */
             "u64" => { Some(TYPE_ID_UINT64) },
             "s64" => { Some(TYPE_ID_INT64) },
-            "long" => { Some(TYPE_ID_INT64) },
+            "long" => {
+                match field.size {
+                    4 => Some(TYPE_ID_INT32),
+                    8 => Some(TYPE_ID_INT64),
+                    0 if field.location == LocationType::StaticLenPrefixArray => Some(TYPE_ID_INT64),
+                    _ => None,
+                }
+            },
 
             /* SINGLE */
             "float" => { Some(TYPE_ID_SINGLE) },
@@ -2083,6 +2091,20 @@ mod tests {
     }
 
     #[test]
+    fn signed_record_field_types_preserve_sign_and_width() {
+        for (name, location, size, expected) in [
+            ("s8", LocationType::Static, 1, TYPE_ID_SBYTE),
+            ("__dyn_array s8", LocationType::StaticLenPrefixArray, 0, TYPE_ID_SBYTE),
+            ("long", LocationType::Static, 4, TYPE_ID_INT32),
+            ("long", LocationType::Static, 8, TYPE_ID_INT64),
+            ("__dyn_array long", LocationType::StaticLenPrefixArray, 0, TYPE_ID_INT64),
+        ] {
+            let field = EventField::new("value".into(), name.into(), location, 0, size);
+            assert_eq!(NetTraceWriter::event_field_to_element_type(&field), Some(expected));
+        }
+    }
+
+    #[test]
     fn system_event_string_schemas_match_payloads() {
         let path = unique_temp_path("system-schemas");
         let mut writer = NetTraceWriter::new(path.to_str().unwrap()).unwrap();
@@ -2515,7 +2537,7 @@ mod tests {
                     1)));
 
         assert_eq!(
-            Some(TYPE_ID_BYTE),
+            Some(TYPE_ID_SBYTE),
             NetTraceWriter::event_field_to_type(
                 &EventField::new(
                     "Test".into(),
