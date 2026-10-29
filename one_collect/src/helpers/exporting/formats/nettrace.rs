@@ -383,6 +383,7 @@ impl NetTraceWriter {
 
     fn write_event_metadata(
         &mut self,
+        block_start: &mut u64,
         meta_id: u32,
         provider: &str,
         event_id: u32,
@@ -454,12 +455,17 @@ impl NetTraceWriter {
             self.buffer.write_u16(0)?;
         }
 
-        let payload = self.buffer.as_slice();
-        let size = u16::try_from(payload.len())
-            .map_err(|_| anyhow::anyhow!("NetTrace metadata row exceeds the 16-bit size limit: {} bytes", payload.len()))?;
+        let size = u16::try_from(self.buffer.len())
+            .map_err(|_| anyhow::anyhow!("NetTrace metadata row exceeds the 16-bit size limit: {} bytes", self.buffer.len()))?;
+
+        if self.get_pos()? - *block_start + 2 + size as u64 > MAX_BLOCK_SIZE as u64 {
+            self.write_end_block(*block_start, 3)?;
+            *block_start = self.write_start_block()?;
+            self.output.write_u16(0)?; /* HeaderSize */
+        }
 
         self.output.write_u16(size)?; /* Size */
-        self.output.write_bytes(payload)
+        self.output.write_bytes(&self.buffer)
     }
 
     fn write_eventblock_start(
@@ -981,7 +987,7 @@ impl NetTraceWriter {
         &mut self,
         stack_kinds: &[String],
         record_types: &[ExportRecordType]) -> anyhow::Result<()> {
-        let block_start = self.write_start_block()?;
+        let mut block_start = self.write_start_block()?;
         let mut meta_id = 1;
 
         /* HeaderSize: Future expansion */
@@ -995,6 +1001,7 @@ impl NetTraceWriter {
          */
         for kind in stack_kinds {
             self.write_event_metadata(
+                &mut block_start,
                 meta_id,
                 "Universal.Events",
                 meta_id,
@@ -1056,6 +1063,7 @@ impl NetTraceWriter {
                 };
 
                 self.write_event_metadata(
+                    &mut block_start,
                     meta_id,
                     provider_name,
                     record_type.id() as u32,
@@ -1063,6 +1071,7 @@ impl NetTraceWriter {
                     &record_fields)?;
             } else {
                 self.write_event_metadata(
+                    &mut block_start,
                     meta_id,
                     "Universal.Events",
                     meta_id,
@@ -1084,6 +1093,7 @@ impl NetTraceWriter {
         self.existing_event_id = meta_id;
 
         self.write_event_metadata(
+            &mut block_start,
             meta_id,
             "Universal.System",
             0, /* Stable ID */
@@ -1095,6 +1105,7 @@ impl NetTraceWriter {
         self.create_event_id = meta_id;
 
         self.write_event_metadata(
+            &mut block_start,
             meta_id,
             "Universal.System",
             1, /* Stable ID */
@@ -1106,6 +1117,7 @@ impl NetTraceWriter {
         self.exit_event_id = meta_id;
 
         self.write_event_metadata(
+            &mut block_start,
             meta_id,
             "Universal.System",
             2, /* Stable ID */
@@ -1117,6 +1129,7 @@ impl NetTraceWriter {
         self.mapping_event_id = meta_id;
 
         self.write_event_metadata(
+            &mut block_start,
             meta_id,
             "Universal.System",
             3, /* Stable ID */
@@ -1128,6 +1141,7 @@ impl NetTraceWriter {
         self.symbol_event_id = meta_id;
 
         self.write_event_metadata(
+            &mut block_start,
             meta_id,
             "Universal.System",
             4, /* Stable ID */
@@ -1139,6 +1153,7 @@ impl NetTraceWriter {
         self.mapping_meta_event_id = meta_id;
 
         self.write_event_metadata(
+            &mut block_start,
             meta_id,
             "Universal.System",
             5, /* Stable ID */
@@ -1693,32 +1708,68 @@ mod tests {
     fn metadata_lengths_are_checked_before_writing() {
         let path = unique_temp_path("metadata-lengths");
         let mut writer = NetTraceWriter::new(path.to_str().unwrap()).unwrap();
-        writer.write_event_metadata(1, "", 1, &"a".repeat(65525), &[]).unwrap();
+        let mut start = writer.write_start_block().unwrap();
+        writer.output.write_u16(0).unwrap();
+        writer.write_event_metadata(&mut start, 1, "", 1, &"a".repeat(65525), &[]).unwrap();
         let pos = writer.get_pos().unwrap();
-        assert_eq!(pos, 20 + 2 + 65535);
-        let error = writer.write_event_metadata(1, "", 1, &"a".repeat(65526), &[]).unwrap_err();
+        assert_eq!(pos, 20 + 4 + 2 + 2 + 65535);
+        let error = writer.write_event_metadata(&mut start, 1, "", 1, &"a".repeat(65526), &[]).unwrap_err();
         assert!(error.to_string().contains("metadata row exceeds"));
         assert_eq!(writer.get_pos().unwrap(), pos);
 
         let name = "a".repeat(65532);
         let field = NetTraceField { type_id: TYPE_ID_BYTE, element_type_id: None, name: &name };
-        let error = writer.write_event_metadata(1, "", 1, "", &[field]).unwrap_err();
+        let error = writer.write_event_metadata(&mut start, 1, "", 1, "", &[field]).unwrap_err();
         assert!(error.to_string().contains("field description exceeds"));
         assert_eq!(writer.get_pos().unwrap(), pos);
 
         let fields: Vec<_> = (0..65536).map(|_| NetTraceField {
             type_id: TYPE_ID_BYTE, element_type_id: None, name: "",
         }).collect();
-        let error = writer.write_event_metadata(1, "", 1, "", &fields).unwrap_err();
+        let error = writer.write_event_metadata(&mut start, 1, "", 1, "", &fields).unwrap_err();
         assert!(error.to_string().contains("field count limit"));
         assert_eq!(writer.get_pos().unwrap(), pos);
 
         let field = NetTraceField { type_id: TYPE_ID_ARRAY, element_type_id: None, name: "unknown" };
-        let error = writer.write_event_metadata(1, "", 1, "", &[field]).unwrap_err();
+        let error = writer.write_event_metadata(&mut start, 1, "", 1, "", &[field]).unwrap_err();
         assert!(error.to_string().contains("no supported element type"));
         assert_eq!(writer.get_pos().unwrap(), pos);
         drop(writer);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn metadata_spans_blocks_without_resetting_ids() {
+        let path = unique_temp_path("metadata-blocks");
+        let mut writer = NetTraceWriter::new(path.to_str().unwrap()).unwrap();
+        let kinds = vec!["a".repeat(60000); 600];
+        writer.write_metadata_object(&kinds, &[]).unwrap();
+        drop(writer);
+        let data = std::fs::read(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        let mut next_id = 1;
+        let mut count = 0;
+        for (kind, payload) in blocks(&data) {
+            assert_eq!(kind, 3);
+            assert!(payload.len() <= MAX_BLOCK_SIZE);
+            let mut input = CodedInputStream::from_bytes(payload);
+            assert_eq!(read_u16(&mut input), 0);
+            while !input.eof().unwrap() {
+                let size = read_u16(&mut input);
+                let row = input.read_raw_bytes(size as u32).unwrap();
+                let mut row = CodedInputStream::from_bytes(&row);
+                assert_eq!(row.read_raw_varint32().unwrap(), next_id);
+                if next_id <= 600 {
+                    assert_eq!(row.read_string().unwrap(), "Universal.Events");
+                    assert_eq!(row.read_raw_varint32().unwrap(), next_id);
+                    assert_eq!(row.read_string().unwrap(), kinds[(next_id - 1) as usize]);
+                }
+                next_id += 1;
+            }
+            count += 1;
+        }
+        assert_eq!(count, 3);
+        assert_eq!(next_id, 607);
     }
 
     #[test]
