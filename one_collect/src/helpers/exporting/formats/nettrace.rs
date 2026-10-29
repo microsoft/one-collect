@@ -459,6 +459,7 @@ impl NetTraceWriter {
         let size = u16::try_from(self.buffer.len())
             .map_err(|_| anyhow::anyhow!("NetTrace metadata row exceeds the 16-bit size limit: {} bytes", self.buffer.len()))?;
 
+        // Start a new metadata block if this row and its 2-byte size prefix would exceed the 24-bit limit.
         if self.get_pos()? - *block_start + 2 + size as u64 > MAX_BLOCK_SIZE as u64 {
             self.write_end_block(*block_start, 3)?;
             *block_start = self.write_start_block()?;
@@ -553,7 +554,7 @@ impl NetTraceWriter {
         self.event_block.write_bytes(payload)?;
         self.event_count = self.event_count.wrapping_add(1);
 
-        /* We flush every 1 MB */
+        // Flush at event boundaries once the buffer reaches 1 MiB; subsequent events use a new block.
         if self.event_block.len() >= 1048576 {
             self.flush_event_block(
                 machine,
@@ -1346,6 +1347,7 @@ impl NetTraceWriter {
                 "NetTrace callstack exceeds the 24-bit block size limit: {} bytes",
                 entry_size);
 
+            // Start a new stack block before this complete entry would exceed the 24-bit limit.
             if block_size + entry_size > MAX_BLOCK_SIZE {
                 self.update_u32(count, count_pos)?;
                 self.write_end_block(block_start, 5)?;
@@ -1395,6 +1397,7 @@ impl NetTraceWriter {
                 self.output.size_varint(id as u64) +
                 2;
 
+            // Start a new thread block if this row and its 2-byte size prefix would exceed the 24-bit limit.
             if block_size + 2 + len > MAX_BLOCK_SIZE {
                 self.write_end_block(block_start, 6)?;
                 block_start = self.write_start_block()?;
@@ -1574,6 +1577,8 @@ impl NetTraceWriter {
                 size <= MAX_BLOCK_SIZE - 8,
                 "NetTrace label list exceeds the 24-bit block size limit: {} bytes",
                 size);
+            // Start a new label block before this complete list would exceed the 24-bit limit.
+            // Continue label IDs across blocks so existing event references remain valid.
             if block_size + size > MAX_BLOCK_SIZE {
                 self.update_u32(count, count_pos)?;
                 self.write_end_block(block_start, 8)?;
