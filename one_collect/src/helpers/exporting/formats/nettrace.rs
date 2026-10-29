@@ -516,6 +516,11 @@ impl NetTraceWriter {
         stack_id: Option<u32>,
         label_id: Option<u32>,
         replay: &ExportProcessReplay) -> anyhow::Result<()> {
+        // TraceEvent bridges events through an ETW record with a 16-bit payload length.
+        anyhow::ensure!(
+            self.buffer.len() <= u16::MAX as usize,
+            "NetTrace event payload exceeds TraceEvent's 16-bit size limit: {} bytes",
+            self.buffer.len());
         let thread_id = self.get_pid_tid_id(replay);
 
         self.event_block.write_u8(223)?; /* Flags: 1 | 2 | 4 | 8 | 16 | 64 | 128 */
@@ -2045,6 +2050,36 @@ mod tests {
         let data = std::fs::read(&path).unwrap();
         std::fs::remove_file(path).unwrap();
         assert_eq!(check_event_times(&data), (vec![time], vec![0, time]));
+    }
+
+    #[test]
+    fn event_payload_size_is_checked_before_mutating_event_state() {
+        let path = unique_temp_path("payload-size");
+        let mut writer = NetTraceWriter::new(path.to_str().unwrap()).unwrap();
+        let mut machine = ExportMachine::new(ExportSettings::default());
+        machine.add_sample(200, MetricValue::Count(1), 42, 43, 0, 0, &[]).unwrap();
+        let replay = machine.find_process(42).unwrap().to_replay();
+        writer.buffer.resize(65536, 0xA5);
+        let error = writer.write_event_blob_from_buffer(&machine, 1, 0, None, None, &replay).unwrap_err();
+        assert!(error.to_string().contains("event payload exceeds TraceEvent's 16-bit size limit"));
+        assert!(writer.event_block.is_empty());
+        assert_eq!(writer.event_count, 0);
+        assert_eq!(writer.last_time, 0);
+        assert_eq!(writer.saved_pid_tids.len(), 1);
+        writer.buffer.pop();
+        writer.write_event_blob_from_buffer(&machine, 1, 0, None, None, &replay).unwrap();
+        assert_eq!(writer.event_count, 1);
+        let mut input = CodedInputStream::from_bytes(&writer.event_block);
+        assert_eq!(input.read_raw_byte().unwrap(), 223);
+        for _ in 0..8 {
+            input.read_raw_varint64().unwrap();
+        }
+        assert_eq!(input.read_raw_varint32().unwrap(), 65535);
+        assert_eq!(input.read_raw_bytes(65535).unwrap(), vec![0xA5; 65535]);
+        assert!(input.eof().unwrap());
+        drop(input);
+        drop(writer);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
