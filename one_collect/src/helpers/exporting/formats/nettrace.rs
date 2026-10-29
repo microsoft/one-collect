@@ -46,6 +46,8 @@ struct NetTraceField<'a> {
     name: &'a str,
 }
 
+const MAX_BLOCK_SIZE: usize = 0x00FF_FFFF;
+
 const TYPE_ID_BYTE: u8 = 6;
 const TYPE_ID_INT16: u8 = 7;
 const TYPE_ID_UINT16: u8 = 8;
@@ -367,6 +369,12 @@ impl NetTraceWriter {
         block_start: u64,
         kind: u8) -> anyhow::Result<()> {
         let total_size = self.get_pos()? - block_start;
+        anyhow::ensure!(
+            total_size <= MAX_BLOCK_SIZE as u64,
+            "NetTrace block kind {} exceeds the 24-bit size limit: {} bytes",
+            kind,
+            total_size);
+
         let header = total_size as u32 | (kind as u32) << 24;
         self.update_u32(header, block_start)
     }
@@ -1264,13 +1272,13 @@ impl NetTraceWriter {
     fn write_callstacks(
         &mut self,
         machine: &ExportMachine) -> anyhow::Result<()> {
-        let block_start = self.write_start_block()?;
-
         let callstacks = self.take_saved_callstacks();
-        let len = callstacks.len() as u32;
 
+        let mut block_start = self.write_start_block()?;
         self.output.write_u32(1)?; /* First Stack ID */
-        self.output.write_u32(len)?; /* Count of stacks */
+        let mut count_pos = self.reserve_u32()?;
+        let mut count = 0;
+        let mut block_size = 8;
 
         let mut ips = Vec::new();
 
@@ -1280,6 +1288,23 @@ impl NetTraceWriter {
                 &mut ips)?;
 
             let size = (ips.len() + 1) * 8;
+            let entry_size = 4 + size;
+            anyhow::ensure!(
+                entry_size <= MAX_BLOCK_SIZE - 8,
+                "NetTrace callstack exceeds the 24-bit block size limit: {} bytes",
+                entry_size);
+
+            if block_size + entry_size > MAX_BLOCK_SIZE {
+                self.update_u32(count, count_pos)?;
+                self.write_end_block(block_start, 5)?;
+
+                // Stack IDs continue across blocks until the next sequence point.
+                block_start = self.write_start_block()?;
+                self.output.write_u32(callstack.write_id + 1)?;
+                count_pos = self.reserve_u32()?;
+                count = 0;
+                block_size = 8;
+            }
 
             self.output.write_u32(size as u32)?;
             self.output.write_u64(callstack.ip)?;
@@ -1287,9 +1312,13 @@ impl NetTraceWriter {
             for ip in &ips {
                 self.output.write_u64(*ip)?;
             }
+
+            count += 1;
+            block_size += entry_size;
         }
 
         /* Done writing stacks */
+        self.update_u32(count, count_pos)?;
         self.write_end_block(block_start, 5)
     }
 
@@ -1691,6 +1720,160 @@ mod tests {
 
         let sequence_point = final_sequence_point(&path);
         (path, sequence_point)
+    }
+
+    fn check_callstack_blocks(
+        depths: &[usize]) -> Vec<(usize, u32)> {
+        let path = unique_temp_path("stack-blocks");
+        let mut writer = NetTraceWriter::new(
+            path.to_str().unwrap()).unwrap();
+        let mut machine = ExportMachine::new(ExportSettings::default());
+
+        for (i, depth) in depths.iter().enumerate() {
+            let mut frames = vec![0x1000; *depth];
+            frames[0] = 0x10000 + i as u64;
+            let sample = machine.make_sample(
+                1, MetricValue::Count(1), 1, 0, 0, &frames);
+
+            writer.saved_callstacks.insert(
+                SavedCallstackKey {
+                    ip: sample.ip(),
+                    sample_id: sample.callstack_id() as u32,
+                    write_id: 0,
+                },
+                i as u32);
+        }
+
+        writer.write_callstacks(&machine).unwrap();
+        assert!(writer.saved_callstacks.is_empty());
+        writer.output.flush().unwrap();
+        drop(writer);
+
+        let data = std::fs::read(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        let mut offset = 20;
+        let mut next_stack = 0;
+        let mut blocks = Vec::new();
+
+        while offset < data.len() {
+            let header = u32::from_le_bytes(
+                data[offset..offset + 4].try_into().unwrap());
+            assert_eq!(header >> 24, 5);
+            let size = (header & 0x00FF_FFFF) as usize;
+            offset += 4;
+            let end = offset + size;
+            let first_id = u32::from_le_bytes(
+                data[offset..offset + 4].try_into().unwrap());
+            let count = u32::from_le_bytes(
+                data[offset + 4..offset + 8].try_into().unwrap());
+            assert_eq!(first_id, next_stack as u32 + 1);
+            offset += 8;
+
+            for _ in 0..count {
+                let stack_size = u32::from_le_bytes(
+                    data[offset..offset + 4].try_into().unwrap()) as usize;
+                assert_eq!(stack_size, depths[next_stack] * 8);
+                offset += 4;
+                assert!(offset + stack_size <= end);
+                let ip = u64::from_le_bytes(
+                    data[offset..offset + 8].try_into().unwrap());
+                assert_eq!(ip, 0x10000 + next_stack as u64);
+
+                for frame in data[offset + 8..offset + stack_size].chunks_exact(8) {
+                    assert_eq!(u64::from_le_bytes(frame.try_into().unwrap()), 0x1000);
+                }
+
+                offset += stack_size;
+                next_stack += 1;
+            }
+
+            assert_eq!(offset, end);
+            blocks.push((size, count));
+        }
+
+        assert_eq!(next_stack, depths.len());
+        blocks
+    }
+
+    #[test]
+    fn empty_callstack_block() {
+        assert_eq!(check_callstack_blocks(&[]), vec![(8, 0)]);
+    }
+
+    #[test]
+    fn callstacks_fit_in_one_block() {
+        assert_eq!(
+            check_callstack_blocks(&[1, 2, 126]),
+            vec![(8 + 12 + 20 + 1012, 3)]);
+    }
+
+    #[test]
+    fn callstacks_split_at_block_size_limit() {
+        // Fill a block to 0xFFFFFC bytes, the largest possible stack payload.
+        let mut depths = vec![126; 16578];
+        depths.push(33);
+        depths.push(1);
+
+        assert_eq!(
+            check_callstack_blocks(&depths),
+            vec![(0x00FF_FFFC, 16579), (20, 1)]);
+    }
+
+    #[test]
+    fn callstacks_span_multiple_blocks() {
+        let blocks = check_callstack_blocks(&vec![126; 35427]);
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0], (8 + 16578 * 1012, 16578));
+        assert_eq!(blocks[1], blocks[0]);
+        assert_eq!(blocks[2], (8 + (35427 - 2 * 16578) * 1012, 2271));
+    }
+
+    #[test]
+    fn oversized_callstack_is_rejected() {
+        let path = unique_temp_path("oversized-stack");
+        let mut writer = NetTraceWriter::new(
+            path.to_str().unwrap()).unwrap();
+        let mut machine = ExportMachine::new(ExportSettings::default());
+        let frames = vec![0x1000; MAX_BLOCK_SIZE / 8];
+        let sample = machine.make_sample(
+            1, MetricValue::Count(1), 1, 0, 0, &frames);
+        writer.saved_callstacks.insert(
+            SavedCallstackKey {
+                ip: sample.ip(),
+                sample_id: sample.callstack_id() as u32,
+                write_id: 0,
+            },
+            0);
+
+        let error = writer.write_callstacks(&machine).unwrap_err();
+        assert!(error.to_string().contains("callstack exceeds the 24-bit block size limit"));
+        drop(writer);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn block_size_limit_is_enforced() {
+        for size in [MAX_BLOCK_SIZE - 1, MAX_BLOCK_SIZE, MAX_BLOCK_SIZE + 1] {
+            let path = unique_temp_path("block-limit");
+            let mut writer = NetTraceWriter::new(
+                path.to_str().unwrap()).unwrap();
+            let start = writer.write_start_block().unwrap();
+            writer.output.seek(SeekFrom::Current(size as i64 - 1)).unwrap();
+            writer.output.write_u8(0).unwrap();
+            let result = writer.write_end_block(start, 5);
+
+            if size <= MAX_BLOCK_SIZE {
+                result.unwrap();
+                let data = std::fs::read(&path).unwrap();
+                let header = u32::from_le_bytes(data[20..24].try_into().unwrap());
+                assert_eq!(header, (5 << 24) | size as u32);
+            } else {
+                assert!(result.unwrap_err().to_string().contains("exceeds the 24-bit size limit"));
+            }
+
+            drop(writer);
+            std::fs::remove_file(path).unwrap();
+        }
     }
 
     #[test]
