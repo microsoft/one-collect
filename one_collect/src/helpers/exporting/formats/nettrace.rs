@@ -1340,14 +1340,21 @@ impl NetTraceWriter {
     }
 
     fn write_threads(&mut self) -> anyhow::Result<()> {
-        let block_start = self.write_start_block()?;
+        let mut block_start = self.write_start_block()?;
+        let mut block_size = 0;
+        let threads = std::mem::take(&mut self.saved_pid_tids);
 
-        for (k,id) in self.saved_pid_tids.drain() {
+        for (k,id) in threads {
             let len = self.output.size_varint(k.pid as u64) +
                 self.output.size_varint(k.tid as u64) +
                 self.output.size_varint(id as u64) +
                 2;
 
+            if block_size + 2 + len > MAX_BLOCK_SIZE {
+                self.write_end_block(block_start, 6)?;
+                block_start = self.write_start_block()?;
+                block_size = 0;
+            }
             self.output.write_u16(len as u16)?;
             self.output.write_varint(id as u64)?;
 
@@ -1356,6 +1363,7 @@ impl NetTraceWriter {
 
             self.output.write_u8(3)?;
             self.output.write_varint(k.tid as u64)?;
+            block_size += 2 + len;
         }
 
         self.init_threads();
@@ -1844,6 +1852,46 @@ mod tests {
         assert!(error.to_string().contains("label list exceeds the 24-bit block size limit"));
         drop(writer);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn threads_span_blocks_without_changing_indices() {
+        let path = unique_temp_path("thread-blocks");
+        let mut writer = NetTraceWriter::new(path.to_str().unwrap()).unwrap();
+        let count = 1_100_000u32;
+        for id in 1..=count {
+            writer.saved_pid_tids.insert(
+                SavedPidTidKey { pid: u32::MAX - id, tid: u32::MAX - id }, id);
+        }
+        writer.write_threads().unwrap();
+        assert_eq!(writer.saved_pid_tids.len(), 1);
+        assert_eq!(writer.saved_pid_tids[&SavedPidTidKey { pid: 0, tid: 0 }], 0);
+        drop(writer);
+        let data = std::fs::read(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        let rows = blocks(&data);
+        assert_eq!(rows.len(), 2);
+        let mut seen = vec![false; count as usize + 1];
+        for (kind, payload) in rows {
+            assert_eq!(kind, 6);
+            assert!(payload.len() <= MAX_BLOCK_SIZE);
+            let mut input = CodedInputStream::from_bytes(payload);
+            while !input.eof().unwrap() {
+                let size = read_u16(&mut input);
+                let row = input.read_raw_bytes(size as u32).unwrap();
+                let mut row = CodedInputStream::from_bytes(&row);
+                let id = row.read_raw_varint32().unwrap();
+                assert!(!seen[id as usize]);
+                seen[id as usize] = true;
+                let expected = if id == 0 { 0 } else { u32::MAX - id };
+                assert_eq!(row.read_raw_byte().unwrap(), 2);
+                assert_eq!(row.read_raw_varint32().unwrap(), expected);
+                assert_eq!(row.read_raw_byte().unwrap(), 3);
+                assert_eq!(row.read_raw_varint32().unwrap(), expected);
+                assert!(row.eof().unwrap());
+            }
+        }
+        assert!(seen.into_iter().all(|value| value));
     }
 
     #[test]
