@@ -75,32 +75,32 @@ const ID_FIELD: NetTraceField = NetTraceField {
 };
 
 const NAME_FIELD: NetTraceField = NetTraceField {
-    type_id: TYPE_ID_UTF8,
-    element_type_id: None,
+    type_id: TYPE_ID_ARRAY,
+    element_type_id: Some(TYPE_ID_UTF8),
     name: "Name",
 };
 
 const NAMESPACE_NAME_FIELD: NetTraceField = NetTraceField {
-    type_id: TYPE_ID_UTF8,
-    element_type_id: None,
+    type_id: TYPE_ID_ARRAY,
+    element_type_id: Some(TYPE_ID_UTF8),
     name: "NamespaceName",
 };
 
 const FILE_NAME_FIELD: NetTraceField = NetTraceField {
-    type_id: TYPE_ID_UTF8,
-    element_type_id: None,
+    type_id: TYPE_ID_ARRAY,
+    element_type_id: Some(TYPE_ID_UTF8),
     name: "FileName",
 };
 
 const SYMBOL_META_FIELD: NetTraceField = NetTraceField {
-    type_id: TYPE_ID_UTF8,
-    element_type_id: None,
+    type_id: TYPE_ID_ARRAY,
+    element_type_id: Some(TYPE_ID_UTF8),
     name: "SymbolMetadata",
 };
 
 const VERSION_META_FIELD: NetTraceField = NetTraceField {
-    type_id: TYPE_ID_UTF8,
-    element_type_id: None,
+    type_id: TYPE_ID_ARRAY,
+    element_type_id: Some(TYPE_ID_UTF8),
     name: "VersionMetadata",
 };
 
@@ -814,24 +814,6 @@ impl NetTraceWriter {
         self.buffer.write_varint(mapping.file_offset())?;
         self.buffer.write_short_utf8(name)?;
         self.buffer.write_varint(meta_id as u64)?;
-
-        /* Symbol details */
-        self.str_buffer.clear();
-
-        if let Some(metadata) = machine.get_mapping_metadata(mapping) {
-            metadata.to_symbol_metadata(machine.strings(), &mut self.str_buffer);
-        }
-
-        self.buffer.write_short_utf8(&self.str_buffer)?;
-
-        /* Version details */
-        self.str_buffer.clear();
-
-        if let Some(metadata) = machine.get_mapping_metadata(mapping) {
-            metadata.to_version_metadata(machine.strings(), &mut self.str_buffer);
-        }
-
-        self.buffer.write_short_utf8(&self.str_buffer)?;
 
         self.write_event_blob_from_buffer(
             machine,
@@ -1656,6 +1638,87 @@ mod tests {
 
         std::env::temp_dir().join(
             format!("one-collect-{name}-{nanos}.nettrace"))
+    }
+
+    fn blocks(data: &[u8]) -> Vec<(u8, &[u8])> {
+        assert_eq!(&data[..8], b"Nettrace");
+        let mut offset = 20;
+        let mut result = Vec::new();
+        while offset < data.len() {
+            let header = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+            offset += 4;
+            let size = (header & 0x00FF_FFFF) as usize;
+            result.push(((header >> 24) as u8, &data[offset..offset + size]));
+            offset += size;
+        }
+        assert_eq!(offset, data.len());
+        result
+    }
+
+    fn read_u16(input: &mut CodedInputStream<'_>) -> usize {
+        let low = input.read_raw_byte().unwrap();
+        let high = input.read_raw_byte().unwrap();
+        u16::from_le_bytes([low, high]) as usize
+    }
+
+    #[test]
+    fn system_event_string_schemas_match_payloads() {
+        let path = unique_temp_path("system-schemas");
+        let mut writer = NetTraceWriter::new(path.to_str().unwrap()).unwrap();
+        writer.write_metadata_object(&[], &[]).unwrap();
+        let mut machine = ExportMachine::new(ExportSettings::default());
+        machine.add_sample(1, MetricValue::Count(1), 1, 1, 0, 0, &[]).unwrap();
+        let name = "module-\u{00e9}.so";
+        let mapping = ExportMapping::new(
+            1, machine.intern(name), 0x1000, 0x2000, 0, false, 7,
+            crate::ruwind::UnwindType::DWARF);
+        let replay = machine.find_process(1).unwrap().to_replay();
+        writer.write_mapping_replay_event(&machine, &replay, &mapping).unwrap();
+        let mut expected = vec![7, 0x80, 0x20, 0x80, 0x40, 0];
+        expected.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        expected.extend_from_slice(name.as_bytes());
+        expected.push(0); // No mapping metadata.
+        assert_eq!(writer.buffer, expected);
+        writer.output.flush().unwrap();
+        drop(writer);
+
+        let data = std::fs::read(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        let rows = blocks(&data);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, 3);
+        let mut input = CodedInputStream::from_bytes(rows[0].1);
+        assert_eq!(read_u16(&mut input), 0);
+        let mut string_fields = 0;
+        while !input.eof().unwrap() {
+            let size = read_u16(&mut input);
+            let row = input.read_raw_bytes(size as u32).unwrap();
+            let mut row = CodedInputStream::from_bytes(&row);
+            row.read_raw_varint32().unwrap();
+            assert_eq!(row.read_string().unwrap(), "Universal.System");
+            row.read_raw_varint32().unwrap();
+            row.read_string().unwrap();
+            let count = read_u16(&mut row);
+            for _ in 0..count {
+                let size = read_u16(&mut row);
+                let field = row.read_raw_bytes(size as u32).unwrap();
+                let mut field = CodedInputStream::from_bytes(&field);
+                let name = field.read_string().unwrap();
+                let type_id = field.read_raw_byte().unwrap();
+                if matches!(name.as_str(),
+                    "Name" | "NamespaceName" | "FileName" | "SymbolMetadata" | "VersionMetadata") {
+                    assert_eq!(type_id, 19);
+                    assert_eq!(field.read_raw_byte().unwrap(), 23);
+                    string_fields += 1;
+                } else {
+                    assert_eq!(type_id, 21);
+                }
+                assert!(field.eof().unwrap());
+            }
+            assert_eq!(read_u16(&mut row), 0);
+            assert!(row.eof().unwrap());
+        }
+        assert_eq!(string_fields, 8);
     }
 
     fn final_sequence_point(
