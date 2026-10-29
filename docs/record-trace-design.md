@@ -57,6 +57,15 @@ Main orchestrator containing:
 - **Format Detection**: Format selection based on file extension
 - **Format Configuration**: Format-specific option handling
 
+#### Nettrace Block Limits
+Nettrace v6 block headers reserve 24 bits for the payload size (at most
+16,777,215 bytes). The exporter splits pending callstacks across stack blocks
+while preserving consecutive stack IDs within each sequence point. The 1 MiB
+event-buffer flush threshold alone does not bound stack data: compact events
+can reference many distinct, deep stacks. Blocks or individual stacks that
+cannot fit the format's size limit cause an export error rather than a
+successfully reported but corrupt trace.
+
 ## Adding New File Formats
 
 To add a new export format to record-trace, implement the format in the one_collect export system and integrate it with the command-line interface:
