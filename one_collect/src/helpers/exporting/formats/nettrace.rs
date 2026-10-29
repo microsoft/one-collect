@@ -1368,7 +1368,7 @@ impl NetTraceWriter {
     fn write_labels(
         &mut self,
         machine: &ExportMachine) -> anyhow::Result<()> {
-        let block_start = self.write_start_block()?;
+        let mut block_start = self.write_start_block()?;
 
         let strings = machine.strings();
         let activity_str_id = strings.find_id("ActivityId").unwrap_or(0);
@@ -1409,9 +1409,12 @@ impl NetTraceWriter {
         let labels = self.take_saved_labels();
 
         self.output.write_u32(1)?;
-        self.output.write_u32(labels.len() as u32)?;
+        let mut count_pos = self.reserve_u32()?;
+        let mut count = 0;
+        let mut block_size = 8;
 
         for key in &labels {
+            self.buffer.clear();
             machine.attributes(
                 key.attributes_id,
                 &mut walker);
@@ -1420,13 +1423,12 @@ impl NetTraceWriter {
 
             /* We do not expect empty attributes */
             if attributes.is_empty() {
-                self.output.write_u8(128 | 5)?;
-                self.output.write_utf8("Error")?;
-                self.output.write_utf8("Expected actual values")?;
-                continue;
+                self.buffer.write_u8(128 | 5)?;
+                self.buffer.write_utf8("Error")?;
+                self.buffer.write_utf8("Expected actual values")?;
             }
 
-            let last = attributes.len() - 1;
+            let last = attributes.len().saturating_sub(1);
 
             for (i,attribute) in attributes.into_iter().enumerate() {
                 let name = attribute.name_str(strings).unwrap_or("???");
@@ -1442,23 +1444,23 @@ impl NetTraceWriter {
                     ExportAttributeValue::Label(id) => {
                         let value = strings.from_id(id).unwrap_or("???");
 
-                        self.output.write_u8(add_flag | 5)?;
-                        self.output.write_utf8(name)?;
-                        self.output.write_utf8(value)?;
+                        self.buffer.write_u8(add_flag | 5)?;
+                        self.buffer.write_utf8(name)?;
+                        self.buffer.write_utf8(value)?;
                     },
                     ExportAttributeValue::Value(value) => {
                         if attribute.name() == op_code_str_id {
                             /* Kind 7: OpCode */
-                            self.output.write_u8(add_flag | 7)?;
-                            self.output.write_u8(value as u8)?;
+                            self.buffer.write_u8(add_flag | 7)?;
+                            self.buffer.write_u8(value as u8)?;
                         } else if attribute.name() == version_str_id {
                             /* Kind 10: Version */
-                            self.output.write_u8(add_flag | 10)?;
-                            self.output.write_u8(value as u8)?;
+                            self.buffer.write_u8(add_flag | 10)?;
+                            self.buffer.write_u8(value as u8)?;
                         } else {
-                            self.output.write_u8(add_flag | 6)?;
-                            self.output.write_utf8(name)?;
-                            self.output.write_varint(value)?;
+                            self.buffer.write_u8(add_flag | 6)?;
+                            self.buffer.write_utf8(name)?;
+                            self.buffer.write_varint(value)?;
                         }
                     },
                     ExportAttributeValue::Record(id) => {
@@ -1468,25 +1470,25 @@ impl NetTraceWriter {
                         if record.len() == 16 {
                             /* GUID based attributes */
                             if attribute.name() == activity_str_id {
-                                self.output.write_u8(add_flag | 1)?;
-                                self.output.write_all(record)?;
+                                self.buffer.write_u8(add_flag | 1)?;
+                                self.buffer.write_all(record)?;
                                 written = true;
                             } else if attribute.name() == related_activity_str_id {
-                                self.output.write_u8(add_flag | 2)?;
-                                self.output.write_all(record)?;
+                                self.buffer.write_u8(add_flag | 2)?;
+                                self.buffer.write_all(record)?;
                                 written = true;
                             } else if attribute.name() == trace_id_str_id {
                                 /* Kind 3: TraceId */
-                                self.output.write_u8(add_flag | 3)?;
-                                self.output.write_all(record)?;
+                                self.buffer.write_u8(add_flag | 3)?;
+                                self.buffer.write_all(record)?;
                                 written = true;
                             }
                         }
 
                         if record.len() == 8 && attribute.name() == span_id_str_id {
                             /* Kind 4: SpanId */
-                            self.output.write_u8(add_flag | 4)?;
-                            self.output.write_all(record)?;
+                            self.buffer.write_u8(add_flag | 4)?;
+                            self.buffer.write_all(record)?;
                             written = true;
                         }
 
@@ -1499,16 +1501,35 @@ impl NetTraceWriter {
                              * write the add_flag for ending, the reader
                              * will have errors.
                              */
-                            self.output.write_u8(add_flag | 5)?;
-                            self.output.write_utf8("Error")?;
-                            self.output.write_utf8("Unknown Record Attribute")?;
+                            self.buffer.write_u8(add_flag | 5)?;
+                            self.buffer.write_utf8("Error")?;
+                            self.buffer.write_utf8("Unknown Record Attribute")?;
                         }
                     }
                 }
             }
+
+            let size = self.buffer.len();
+            anyhow::ensure!(
+                size <= MAX_BLOCK_SIZE - 8,
+                "NetTrace label list exceeds the 24-bit block size limit: {} bytes",
+                size);
+            if block_size + size > MAX_BLOCK_SIZE {
+                self.update_u32(count, count_pos)?;
+                self.write_end_block(block_start, 8)?;
+                block_start = self.write_start_block()?;
+                self.output.write_u32(key.write_id + 1)?;
+                count_pos = self.reserve_u32()?;
+                count = 0;
+                block_size = 8;
+            }
+            self.output.write_bytes(&self.buffer)?;
+            count += 1;
+            block_size += size;
         }
 
         /* Done writing labels */
+        self.update_u32(count, count_pos)?;
         self.write_end_block(block_start, 8)
     }
 
@@ -1770,6 +1791,59 @@ mod tests {
         }
         assert_eq!(count, 3);
         assert_eq!(next_id, 607);
+    }
+
+    #[test]
+    fn label_lists_span_blocks_without_resetting_ids() {
+        let path = unique_temp_path("label-blocks");
+        let mut writer = NetTraceWriter::new(path.to_str().unwrap()).unwrap();
+        let mut machine = ExportMachine::new(ExportSettings::default());
+        let value = "a".repeat(60000);
+        let label = machine.label_attribute("key", &value);
+        for i in 0..600 {
+            let mut attributes = ExportAttributes::default();
+            attributes.push(label);
+            let attributes_id = machine.push_unique_attributes(attributes);
+            writer.saved_labels.insert(SavedLabelKey { attributes_id, write_id: 0 }, i);
+        }
+        writer.write_labels(&machine).unwrap();
+        assert!(writer.saved_labels.is_empty());
+        drop(writer);
+        let data = std::fs::read(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        let mut next_id = 1;
+        let rows = blocks(&data);
+        assert_eq!(rows.len(), 3);
+        for (kind, payload) in rows {
+            assert_eq!(kind, 8);
+            let mut input = CodedInputStream::from_bytes(payload);
+            assert_eq!(input.read_raw_little_endian32().unwrap(), next_id);
+            let count = input.read_raw_little_endian32().unwrap();
+            assert!(count > 0);
+            for _ in 0..count {
+                assert_eq!(input.read_raw_byte().unwrap(), 128 | 5);
+                assert_eq!(input.read_string().unwrap(), "key");
+                assert_eq!(input.read_string().unwrap(), value);
+                next_id += 1;
+            }
+            assert!(input.eof().unwrap());
+        }
+        assert_eq!(next_id, 601);
+    }
+
+    #[test]
+    fn oversized_label_list_is_rejected() {
+        let path = unique_temp_path("oversized-label");
+        let mut writer = NetTraceWriter::new(path.to_str().unwrap()).unwrap();
+        let mut machine = ExportMachine::new(ExportSettings::default());
+        let mut attributes = ExportAttributes::default();
+        attributes.push(machine.label_attribute("key", &"a".repeat(MAX_BLOCK_SIZE)));
+        let attributes_id = machine.push_unique_attributes(attributes);
+        writer.saved_labels.insert(SavedLabelKey { attributes_id, write_id: 0 }, 0);
+        let error = writer.write_labels(&machine).unwrap_err();
+        assert!(error.to_string().contains("label list exceeds the 24-bit block size limit"));
+        drop(writer);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
