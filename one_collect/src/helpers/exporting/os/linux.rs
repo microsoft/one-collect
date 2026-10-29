@@ -38,6 +38,16 @@ pub type Session = PerfSession;
 /* OS Specific Session Builder Type */
 pub type SessionBuilder = RingBufSessionBuilder;
 
+fn underlying_perf_buffer_count() -> usize {
+    (crate::perf_event::rb::cpu_count() as usize).saturating_add(1)
+}
+
+fn perf_buffer_page_count(buffer_bytes: usize) -> usize {
+    let page_size = system_page_size() as usize;
+    let page_count = (buffer_bytes / page_size).max(1);
+    1 << page_count.ilog2()
+}
+
 #[derive(Clone)]
 pub(crate) struct OSExportProcess {
     root_fs: Option<OpenAt>,
@@ -1809,9 +1819,16 @@ impl UniversalExporterOSHooks for UniversalExporter {
         until: impl Fn() -> bool + Send + 'static) -> anyhow::Result<Writable<ExportMachine>> {
         let settings = self.settings()?;
 
-        let page_size = unsafe { libc::sysconf(libc::_SC_PAGE_SIZE) as usize };
+        let underlying_buffer_count = underlying_perf_buffer_count();
+        let per_buffer_size_bytes =
+            self.per_buffer_size_bytes(underlying_buffer_count);
+        let page_count = perf_buffer_page_count(per_buffer_size_bytes);
 
-        let page_count = self.cpu_buf_bytes() / page_size;
+        info!(
+            "Sizing perf ring buffers: buffers={}, pages_per_buffer={}, bytes_per_buffer={}",
+            underlying_buffer_count,
+            page_count,
+            page_count * system_page_size() as usize);
 
         let mut builder = RingBufSessionBuilder::new()
             .with_page_count(page_count)
@@ -2007,6 +2024,56 @@ mod tests {
         session.parse_all().unwrap();
 
         assert_eq!(8, exporter.borrow().lost_events());
+    }
+
+    #[test]
+    fn perf_buffer_page_count_rounds_down_to_power_of_two_pages() {
+        let page_size = system_page_size() as usize;
+
+        assert_eq!(1, perf_buffer_page_count(1));
+        assert_eq!(1, perf_buffer_page_count(0));
+        assert_eq!(1, perf_buffer_page_count(page_size));
+        assert_eq!(1, perf_buffer_page_count(2 * page_size - 1));
+        assert_eq!(16, perf_buffer_page_count(16 * page_size));
+        assert_eq!(16, perf_buffer_page_count(17 * page_size));
+    }
+
+    #[test]
+    fn direct_per_buffer_size_is_an_upper_bound() {
+        let page_size = system_page_size() as usize;
+        let buffer_size = 17 * page_size;
+
+        let exporter = UniversalExporter::new(ExportSettings::default())
+            .with_per_cpu_buffer_bytes(buffer_size);
+        let page_count = perf_buffer_page_count(
+            exporter.per_buffer_size_bytes(1));
+
+        assert_eq!(16, page_count);
+        assert!(page_count * page_size <= buffer_size);
+    }
+
+    #[test]
+    fn total_buffer_size_includes_all_perf_rings() {
+        let page_size = system_page_size() as usize;
+        let underlying_buffer_count = underlying_perf_buffer_count();
+        let total_buffer_size =
+            underlying_buffer_count * 17 * page_size;
+        let exporter = UniversalExporter::new(ExportSettings::default())
+            .with_buffer_size_bytes(total_buffer_size);
+        let page_count = perf_buffer_page_count(
+            exporter.per_buffer_size_bytes(underlying_buffer_count));
+
+        assert_eq!(16, page_count);
+        assert!(
+            underlying_buffer_count * page_count * page_size <=
+                total_buffer_size);
+    }
+
+    #[test]
+    fn perf_buffer_count_includes_online_cpus_and_in_process_ring() {
+        assert_eq!(
+            crate::perf_event::rb::cpu_count() as usize + 1,
+            underlying_perf_buffer_count());
     }
 
     #[test]

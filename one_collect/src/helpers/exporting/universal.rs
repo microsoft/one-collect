@@ -27,6 +27,11 @@ type BoxedExportCallback = Box<dyn FnMut(&Writable<ExportMachine>) -> anyhow::Re
 type BoxedParsedCallback = Box<dyn FnMut(&mut UniversalParsedContext) -> anyhow::Result<()>>;
 type BoxedDropCallback = Box<dyn FnMut()>;
 
+enum BufferSize {
+    PerBuffer(usize),
+    Total(usize),
+}
+
 pub struct UniversalExporter {
     settings: Option<ExportSettings>,
     setting_hooks: Vec<BoxedSettingsCallback>,
@@ -34,8 +39,10 @@ pub struct UniversalExporter {
     export_hooks: Vec<BoxedExportCallback>,
     parsed_hooks: Vec<BoxedParsedCallback>,
     drop_hooks: Vec<BoxedDropCallback>,
-    cpu_buf_bytes: usize,
+    buffer_size: BufferSize,
 }
+
+const MIN_BUFFER_BYTES: usize = 64 * 1024;
 
 pub trait UniversalExporterOSHooks {
     fn os_parse_until(
@@ -46,11 +53,11 @@ pub trait UniversalExporterOSHooks {
 
 impl UniversalExporter {
     pub fn new(settings: ExportSettings) -> Self {
-        let mut cpu_buf_bytes = 64*1024;
+        let mut per_buffer_size_bytes = MIN_BUFFER_BYTES;
 
         if settings.has_unwinder() {
             /* Unwinders need more data per-CPU than normal */
-            cpu_buf_bytes = 1024*1024;
+            per_buffer_size_bytes = 1024*1024;
         }
 
         Self {
@@ -60,7 +67,7 @@ impl UniversalExporter {
             export_hooks: Vec::new(),
             parsed_hooks: Vec::new(),
             drop_hooks: Vec::new(),
-            cpu_buf_bytes,
+            buffer_size: BufferSize::PerBuffer(per_buffer_size_bytes),
         }
     }
 
@@ -85,10 +92,42 @@ impl UniversalExporter {
         }
     }
 
+    /// Sets an upper bound for each underlying platform buffer.
+    ///
+    /// On Linux, this bounds each per-CPU perf ring buffer.
+    /// On Windows, ETW uses a session-wide buffer pool, so this is the size of
+    /// each ETW buffer rather than a per-CPU allocation. A platform minimum
+    /// may require a larger buffer than the requested bound.
+    ///
+    /// Use [`Self::with_buffer_size_bytes`] when the caller has a total session
+    /// size and wants the Universal layer to apply the platform-specific
+    /// normalization policy.
     pub fn with_per_cpu_buffer_bytes(
         mut self,
         bytes: usize) -> Self {
-        self.cpu_buf_bytes = bytes;
+        self.buffer_size = BufferSize::PerBuffer(bytes);
+        self
+    }
+
+    /// Sets an upper bound for the total event buffer data capacity across all
+    /// underlying platform buffers.
+    ///
+    /// The Universal layer divides the capacity by the number of buffers the
+    /// active platform creates, then applies that platform's sizing rules. It
+    /// replaces the default capacity rather than raising it, so a small value
+    /// reduces the capacity that would otherwise be used. The resulting
+    /// capacity does not exceed `bytes` unless the minimum size for each
+    /// underlying buffer requires more. Because the total is divided and then
+    /// reduced to a size the platform accepts, the delivered capacity can be as
+    /// low as half the request. Platform metadata is not counted against this
+    /// bound. On Linux, metadata adds one system page per buffer.
+    ///
+    /// Use [`Self::with_per_cpu_buffer_bytes`] to bound each underlying buffer
+    /// directly instead.
+    pub fn with_buffer_size_bytes(
+        mut self,
+        bytes: usize) -> Self {
+        self.buffer_size = BufferSize::Total(bytes);
         self
     }
 
@@ -164,7 +203,16 @@ impl UniversalExporter {
             until)
     }
 
-    pub(crate) const fn cpu_buf_bytes(&self) -> usize { self.cpu_buf_bytes }
+    pub(crate) fn per_buffer_size_bytes(
+        &self,
+        underlying_buffer_count: usize) -> usize {
+        match self.buffer_size {
+            BufferSize::PerBuffer(bytes) => bytes,
+            BufferSize::Total(bytes) => {
+                (bytes / underlying_buffer_count.max(1)).max(MIN_BUFFER_BYTES)
+            },
+        }
+    }
 
     pub(crate) fn run_build_hooks(
         &mut self,
@@ -220,5 +268,48 @@ impl UniversalExporter {
 
     pub(crate) const fn settings_mut(&mut self) -> Option<&mut ExportSettings> {
         self.settings.as_mut()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn total_buffer_size_is_divided_across_buffers() {
+        let exporter = UniversalExporter::new(ExportSettings::default())
+            .with_buffer_size_bytes(1024 * 1024);
+
+        assert_eq!(1024 * 1024, exporter.per_buffer_size_bytes(1));
+        assert_eq!(256 * 1024, exporter.per_buffer_size_bytes(4));
+        assert_eq!(349525, exporter.per_buffer_size_bytes(3));
+    }
+
+    #[test]
+    fn total_buffer_size_enforces_minimum_buffer_size() {
+        let exporter = UniversalExporter::new(ExportSettings::default())
+            .with_buffer_size_bytes(1);
+
+        assert_eq!(MIN_BUFFER_BYTES, exporter.per_buffer_size_bytes(1));
+        assert_eq!(
+            MIN_BUFFER_BYTES,
+            exporter.per_buffer_size_bytes(usize::MAX));
+    }
+
+    #[test]
+    fn per_buffer_size_does_not_depend_on_buffer_count() {
+        let exporter = UniversalExporter::new(ExportSettings::default())
+            .with_per_cpu_buffer_bytes(1234);
+
+        assert_eq!(1234, exporter.per_buffer_size_bytes(1));
+        assert_eq!(1234, exporter.per_buffer_size_bytes(usize::MAX));
+    }
+
+    #[test]
+    fn total_buffer_size_tolerates_an_unknown_buffer_count() {
+        let exporter = UniversalExporter::new(ExportSettings::default())
+            .with_buffer_size_bytes(1024 * 1024);
+
+        assert_eq!(1024 * 1024, exporter.per_buffer_size_bytes(0));
     }
 }

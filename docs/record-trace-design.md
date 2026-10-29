@@ -134,3 +134,18 @@ record-trace --on-cpu --pid 42
 ```bash
 record-trace --script-file script.file
 ```
+
+### Increase Event Buffer Capacity
+Use a larger total event buffer data capacity to reduce event loss during
+bursts. The size is specified in megabytes. It replaces the default capacity
+rather than raising it, so a small value reduces the capacity that would
+otherwise be used.
+
+```bash
+record-trace --on-cpu --buffersize 256
+```
+
+A buffer-size setting in a script overrides `--buffersize`. The two sizing
+models are mutually exclusive, so a script cannot use both
+`with_buffer_size_bytes` and `with_per_cpu_buffer_bytes`. Repeating either one
+overrides the size requested by the earlier call.
