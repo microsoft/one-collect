@@ -1049,9 +1049,36 @@ impl NetTraceWriter {
             }
 
             /* Dynamic fields */
+            let mut offset = 0;
+            let mut variable = false;
             for field in record_type.format().fields() {
                 match Self::event_field_to_type(field) {
                     Some(type_id) => {
+                        // Metadata describes packed fields; record bytes are copied verbatim.
+                        anyhow::ensure!(
+                            variable || field.offset == offset,
+                            "NetTrace record {} field {} has an unsupported layout: expected offset {}, got {}",
+                            record_type.name(), field.name, offset, field.offset);
+                        let size = match type_id {
+                            TYPE_ID_SBYTE | TYPE_ID_BYTE => Some(1),
+                            TYPE_ID_INT16 | TYPE_ID_UINT16 => Some(2),
+                            TYPE_ID_INT32 | TYPE_ID_UINT32 | TYPE_ID_SINGLE => Some(4),
+                            TYPE_ID_INT64 | TYPE_ID_UINT64 | TYPE_ID_DOUBLE => Some(8),
+                            _ => None,
+                        };
+                        if let Some(size) = size {
+                            anyhow::ensure!(
+                                field.size == size,
+                                "NetTrace record {} field {} has an unsupported layout: expected size {}, got {}",
+                                record_type.name(), field.name, size, field.size);
+                        }
+                        anyhow::ensure!(
+                            type_id != TYPE_ID_NULL_UTF16_STRING || field.location != LocationType::StaticString,
+                            "NetTrace record {} field {} has an unsupported UTF8 string layout",
+                            record_type.name(), field.name);
+                        variable |= field.size == 0;
+                        offset += field.size;
+
                         let element_type_id = match type_id {
                             TYPE_ID_ARRAY => Self::event_field_to_element_type(field),
                             _ => None,
@@ -2102,6 +2129,42 @@ mod tests {
             let field = EventField::new("value".into(), name.into(), location, 0, size);
             assert_eq!(NetTraceWriter::event_field_to_element_type(&field), Some(expected));
         }
+    }
+
+    #[test]
+    fn incompatible_record_layouts_are_rejected() {
+        for field in [
+            EventField::new("gap".into(), "u32".into(), LocationType::Static, 4, 4),
+            EventField::new("width".into(), "double".into(), LocationType::Static, 0, 4),
+            EventField::new("encoding".into(), "string".into(), LocationType::StaticString, 0, 0),
+        ] {
+            let path = unique_temp_path("record-layout");
+            let mut writer = NetTraceWriter::new(path.to_str().unwrap()).unwrap();
+            let mut format = crate::event::EventFormat::new();
+            format.add_field(field);
+            let mut record = ExportRecordType::new(0, 1, "Audit/Layout".into(), format);
+            record.set_original_data_flag();
+            let error = writer.write_metadata_object(&[], &[record]).unwrap_err();
+            assert!(error.to_string().contains("unsupported"));
+            assert!(error.to_string().contains("layout"));
+            drop(writer);
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn packed_variable_record_layouts_are_accepted() {
+        let path = unique_temp_path("variable-record-layout");
+        let mut writer = NetTraceWriter::new(path.to_str().unwrap()).unwrap();
+        let mut format = crate::event::EventFormat::new();
+        format.add_field(EventField::new("first".into(), "u32".into(), LocationType::Static, 0, 4));
+        format.add_field(EventField::new("text".into(), "string".into(), LocationType::StaticUTF16String, 4, 0));
+        format.add_field(EventField::new("tail".into(), "u64".into(), LocationType::Static, 4, 8));
+        let mut record = ExportRecordType::new(0, 1, "Audit/Layout".into(), format);
+        record.set_original_data_flag();
+        writer.write_metadata_object(&[], &[record]).unwrap();
+        drop(writer);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
