@@ -46,6 +46,11 @@ struct NetTraceField<'a> {
     name: &'a str,
 }
 
+struct MetadataBlock {
+    start: u64,
+    size: usize,
+}
+
 const MAX_BLOCK_SIZE: usize = 0x00FF_FFFF;
 
 const TYPE_ID_SBYTE: u8 = 5;
@@ -382,9 +387,15 @@ impl NetTraceWriter {
         self.update_u32(header, block_start)
     }
 
+    fn write_metadata_block_start(&mut self) -> anyhow::Result<MetadataBlock> {
+        let start = self.write_start_block()?;
+        self.output.write_u16(0)?; /* HeaderSize: Future expansion */
+        Ok(MetadataBlock { start, size: 2 })
+    }
+
     fn write_event_metadata(
         &mut self,
-        block_start: &mut u64,
+        block: &mut MetadataBlock,
         meta_id: u32,
         provider: &str,
         event_id: u32,
@@ -460,14 +471,15 @@ impl NetTraceWriter {
             .map_err(|_| anyhow::anyhow!("NetTrace metadata row exceeds the 16-bit size limit: {} bytes", self.buffer.len()))?;
 
         // Start a new metadata block if this row and its 2-byte size prefix would exceed the 24-bit limit.
-        if self.get_pos()? - *block_start + 2 + size as u64 > MAX_BLOCK_SIZE as u64 {
-            self.write_end_block(*block_start, 3)?;
-            *block_start = self.write_start_block()?;
-            self.output.write_u16(0)?; /* HeaderSize */
+        if block.size + 2 + size as usize > MAX_BLOCK_SIZE {
+            self.write_end_block(block.start, 3)?;
+            *block = self.write_metadata_block_start()?;
         }
 
         self.output.write_u16(size)?; /* Size */
-        self.output.write_bytes(&self.buffer)
+        self.output.write_bytes(&self.buffer)?;
+        block.size += 2 + size as usize;
+        Ok(())
     }
 
     fn write_eventblock_start(
@@ -1006,11 +1018,8 @@ impl NetTraceWriter {
         &mut self,
         stack_kinds: &[String],
         record_types: &[ExportRecordType]) -> anyhow::Result<()> {
-        let mut block_start = self.write_start_block()?;
+        let mut block_start = self.write_metadata_block_start()?;
         let mut meta_id = 1;
-
-        /* HeaderSize: Future expansion */
-        self.output.write_u16(0)?;
 
         /*
          * Stack Event Metadata:
@@ -1207,7 +1216,7 @@ impl NetTraceWriter {
             &PROCESS_MAPPING_META_FIELDS)?;
 
         /* Done writing metadata */
-        self.write_end_block(block_start, 3)
+        self.write_end_block(block_start.start, 3)
     }
 
     fn write_seq_block(
@@ -1794,8 +1803,7 @@ mod tests {
     fn metadata_lengths_are_checked_before_writing() {
         let path = unique_temp_path("metadata-lengths");
         let mut writer = NetTraceWriter::new(path.to_str().unwrap()).unwrap();
-        let mut start = writer.write_start_block().unwrap();
-        writer.output.write_u16(0).unwrap();
+        let mut start = writer.write_metadata_block_start().unwrap();
         writer.write_event_metadata(&mut start, 1, "", 1, &"a".repeat(65525), &[]).unwrap();
         let pos = writer.get_pos().unwrap();
         assert_eq!(pos, 20 + 4 + 2 + 2 + 65535);
@@ -1820,6 +1828,54 @@ mod tests {
         let error = writer.write_event_metadata(&mut start, 1, "", 1, "", &[field]).unwrap_err();
         assert!(error.to_string().contains("no supported element type"));
         assert_eq!(writer.get_pos().unwrap(), pos);
+        drop(writer);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn metadata_rows_remain_buffered() {
+        let path = unique_temp_path("buffered-metadata");
+        let mut writer = NetTraceWriter::new(path.to_str().unwrap()).unwrap();
+        let mut block = writer.write_metadata_block_start().unwrap();
+        for id in 1..=10 {
+            writer.write_event_metadata(&mut block, id, "Audit", id, "Small", &[]).unwrap();
+        }
+        assert_eq!(writer.output.buffer().len(), block.size);
+        assert_eq!(writer.output.get_ref().metadata().unwrap().len(), block.start);
+        writer.write_end_block(block.start, 3).unwrap();
+        let data = std::fs::read(&path).unwrap();
+        let rows = blocks(&data);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, 3);
+        assert_eq!(rows[0].1.len(), block.size);
+        drop(writer);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn metadata_blocks_split_only_after_exact_limit() {
+        let path = unique_temp_path("metadata-exact-limit");
+        let mut writer = NetTraceWriter::new(path.to_str().unwrap()).unwrap();
+        let mut block = writer.write_metadata_block_start().unwrap();
+        let name = "a".repeat(65525);
+        for _ in 0..255 {
+            writer.write_event_metadata(&mut block, 1, "", 1, &name, &[]).unwrap();
+        }
+        let remaining = MAX_BLOCK_SIZE - block.size;
+        writer.write_event_metadata(
+            &mut block, 1, "", 1, &"a".repeat(remaining - 12), &[]).unwrap();
+        assert_eq!(block.size, MAX_BLOCK_SIZE);
+        let first_start = block.start;
+        writer.write_event_metadata(&mut block, 1, "", 1, "", &[]).unwrap();
+        assert_ne!(block.start, first_start);
+        assert_eq!(block.size, 12);
+        writer.write_end_block(block.start, 3).unwrap();
+        let data = std::fs::read(&path).unwrap();
+        let rows = blocks(&data);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], (3, &data[24..24 + MAX_BLOCK_SIZE]));
+        assert_eq!(rows[1].0, 3);
+        assert_eq!(rows[1].1.len(), 12);
         drop(writer);
         std::fs::remove_file(path).unwrap();
     }
