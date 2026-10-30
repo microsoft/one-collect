@@ -518,10 +518,10 @@ impl NetTraceWriter {
         stack_id: Option<u32>,
         label_id: Option<u32>,
         replay: &ExportProcessReplay) -> anyhow::Result<()> {
-        // TraceEvent bridges events through an ETW record with a 16-bit payload length.
+        // Readers may bridge events through an ETW record with a 16-bit payload length.
         anyhow::ensure!(
             self.buffer.len() <= u16::MAX as usize,
-            "NetTrace event payload exceeds TraceEvent's 16-bit size limit: {} bytes",
+            "NetTrace event payload exceeds the 16-bit size limit supported by readers: {} bytes",
             self.buffer.len());
         let thread_id = self.get_pid_tid_id(replay);
 
@@ -1411,6 +1411,7 @@ impl NetTraceWriter {
 
             self.output.write_u8(3)?;
             self.output.write_varint(k.tid as u64)?;
+            // Count the 2-byte row-size prefix plus the len bytes of row data.
             block_size += 2 + len;
         }
 
@@ -1573,6 +1574,7 @@ impl NetTraceWriter {
             }
 
             let size = self.buffer.len();
+            // A complete list must fit after the block's two u32 fields: first ID and count (8 bytes).
             anyhow::ensure!(
                 size <= MAX_BLOCK_SIZE - 8,
                 "NetTrace label list exceeds the 24-bit block size limit: {} bytes",
@@ -2101,7 +2103,7 @@ mod tests {
         let replay = machine.find_process(42).unwrap().to_replay();
         writer.buffer.resize(65536, 0xA5);
         let error = writer.write_event_blob_from_buffer(&machine, 1, 0, None, None, &replay).unwrap_err();
-        assert!(error.to_string().contains("event payload exceeds TraceEvent's 16-bit size limit"));
+        assert!(error.to_string().contains("event payload exceeds the 16-bit size limit supported by readers"));
         assert!(writer.event_block.is_empty());
         assert_eq!(writer.event_count, 0);
         assert_eq!(writer.last_time, 0);
