@@ -17,6 +17,7 @@ use one_collect::event::Event;
 use one_collect::event::os::windows::WindowsEventExtension;
 
 use tracelogging as tlg;
+use windows_sys::Win32::Foundation::ERROR_TIMEOUT;
 
 tlg::define_provider!(MIXED_PROV, "OneCollect.SessionIntegration.Mixed");
 
@@ -82,6 +83,15 @@ fn system_session_captures_kernel_stacks_and_user_events() {
     });
     let status_slot = write_status.clone();
     session.add_started_callback(move |_| {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !MIXED_PROV.enabled(tlg::Level::Verbose, 1) {
+            if Instant::now() >= deadline {
+                status_slot.store(ERROR_TIMEOUT, Ordering::Relaxed);
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
         let status = tlg::write_event!(
             MIXED_PROV, "UserEvent", level(Verbose), keyword(1), u32("Value", &42u32));
         status_slot.store(status, Ordering::Relaxed);
@@ -100,7 +110,8 @@ fn system_session_captures_kernel_stacks_and_user_events() {
     assert_eq!(MIXED_PROV.unregister(), 0, "ETW provider unregistration failed");
     result.expect("mixed ETW session failed; system-tracing permissions are required");
 
-    assert_eq!(write_status.load(Ordering::Relaxed), 0, "ETW event write failed");
+    assert_eq!(write_status.load(Ordering::Relaxed), 0,
+        "provider enablement timed out or ETW event write failed");
     assert!(user_count.load(Ordering::Relaxed) > 0, "no user event captured");
     assert!(kernel_count.load(Ordering::Relaxed) > 0, "no context-switch event captured");
     assert!(stack_count.load(Ordering::Relaxed) > 0,

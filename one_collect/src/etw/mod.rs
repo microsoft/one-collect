@@ -386,6 +386,27 @@ type NoSendClosure = Box<dyn Fn(&SessionCallbackContext) + 'static>;
 type StatsClosure = Box<dyn Fn(&SessionStats) + 'static>;
 type SessionClosure = Box<dyn Fn(&mut EtwSession) -> anyhow::Result<()> + 'static>;
 
+/// An ETW collection session.
+///
+/// # Permissions
+///
+/// User-mode TraceLogging and registered manifest providers use an ordinary
+/// real-time session by default, without enabling token privileges. Windows
+/// still requires session-control and provider permissions: Performance Log
+/// Users membership is a non-admin option for ordinary sessions, subject to
+/// session and provider ACLs.
+///
+/// Built-in system kernel event helpers, known System Provider GUIDs, and
+/// classic kernel stack capture automatically select system-logger mode and
+/// request `SeSystemProfilePrivilege`. Mixed user/kernel sessions retain
+/// system-logger mode. For other providers that require that mode, call
+/// [`Self::requires_system_logger`]. Changing the CPU sampling interval with
+/// [`Self::requires_profile_interval`] also requests `SeSystemProfilePrivilege`.
+///
+/// `SeDebugPrivilege` is not requested. The session does not elevate the
+/// process or grant privileges; required privileges must already be assigned
+/// to the process token. Privilege-enablement and session-start failures are
+/// returned by [`Self::parse_until`] and [`Self::parse_for_duration`].
 pub struct EtwSession {
     enabled: HashMap<Guid, TraceEnable>,
     providers: ProviderLookup,
@@ -410,7 +431,6 @@ pub struct EtwSession {
     ancillary: Writable<AncillaryData>,
 
     /* Flags */
-    elevate: bool,
     system_logger: bool,
     profile_interval: Option<u32>,
 }
@@ -472,7 +492,6 @@ impl EtwSession {
             ancillary: Writable::new(AncillaryData::default()),
 
             /* Flags */
-            elevate: false,
             system_logger: false,
             profile_interval: None,
         }
@@ -584,31 +603,25 @@ impl EtwSession {
         }
     }
 
+    /// Set the CPU sampling interval in milliseconds.
+    /// This requests the system-profile privilege when collection starts,
+    /// without requiring system-logger mode.
     pub fn requires_profile_interval(
         &mut self,
         interval_ms: u32) {
         self.profile_interval = Some(interval_ms);
     }
 
-    /// Explicitly request both debug and system-profile privileges.
-    /// This enables privileges already assigned to the process token; it does
-    /// not elevate the process or display a UAC prompt.
-    pub fn requires_elevation(&mut self) {
-        self.elevate = true;
-    }
-
-    /// Require a system logger and the system-profile privilege, without
-    /// requesting the debug privilege. Built-in kernel helpers and known
-    /// System Provider GUIDs select this automatically. Use this for other
-    /// providers that require system-logger mode.
+    /// Require a system logger and the system-profile privilege.
+    /// Built-in kernel helpers and known System Provider GUIDs select this
+    /// automatically. Use this for other providers that require system-logger
+    /// mode.
     pub fn requires_system_logger(&mut self) {
         self.system_logger = true;
     }
 
     fn required_privileges(&self) -> &'static [&'static str] {
-        if self.elevate {
-            &["SeDebugPrivilege", "SeSystemProfilePrivilege"]
-        } else if self.system_logger || self.profile_interval.is_some() {
+        if self.system_logger || self.profile_interval.is_some() {
             &["SeSystemProfilePrivilege"]
         } else {
             &[]
@@ -1439,7 +1452,6 @@ mod tests {
         event.set_id_wild_card_flag();
         session.add_event(event, Some(PROPERTY_STACK_TRACE));
         assert!(!session.system_logger);
-        assert!(!session.elevate);
         assert!(session.kernel_callstacks.is_empty());
         assert!(session.required_privileges().is_empty());
     }
@@ -1452,7 +1464,6 @@ mod tests {
         let mut session = EtwSession::new();
         session.enable_provider(provider);
         assert!(session.system_logger);
-        assert!(!session.elevate);
         assert_eq!(session.required_privileges(), &["SeSystemProfilePrivilege"]);
 
         let mut session = EtwSession::new();
@@ -1461,7 +1472,7 @@ mod tests {
         event.set_id_wild_card_flag();
         session.add_event(event, None);
         assert!(session.system_logger);
-        assert!(!session.elevate);
+        assert_eq!(session.required_privileges(), &["SeSystemProfilePrivilege"]);
 
         let mut session = EtwSession::new();
         let mut event = Event::for_etw(
@@ -1469,7 +1480,7 @@ mod tests {
         *event.extension_mut().lookup_provider_mut() = Some(REAL_SYSTEM_PROCESS_PROVIDER);
         session.add_event(event, None);
         assert!(session.system_logger);
-        assert!(!session.elevate);
+        assert_eq!(session.required_privileges(), &["SeSystemProfilePrivilege"]);
     }
 
     #[test]
@@ -1497,7 +1508,7 @@ mod tests {
             let mut session = EtwSession::new();
             helper(&mut session);
             assert!(session.system_logger);
-            assert!(!session.elevate);
+            assert_eq!(session.required_privileges(), &["SeSystemProfilePrivilege"]);
         }
     }
 
@@ -1508,7 +1519,7 @@ mod tests {
         session.add_event(Event::for_etw(
             1, "User::Event".into(), Guid::from_u128(1), LEVEL_INFORMATION, 1), None);
         assert!(session.system_logger);
-        assert!(!session.elevate);
+        assert_eq!(session.required_privileges(), &["SeSystemProfilePrivilege"]);
     }
 
     #[test]
@@ -1516,22 +1527,22 @@ mod tests {
         let mut session = EtwSession::new();
         session.add_kernel_callstack(REAL_SYSTEM_THREAD_PROVIDER, 36);
         assert!(session.system_logger);
-        assert!(!session.elevate);
+        assert_eq!(session.required_privileges(), &["SeSystemProfilePrivilege"]);
         assert!(session.needs_kernel_callstacks());
     }
 
     #[test]
-    fn explicit_privileges_do_not_force_system_mode() {
+    fn explicit_system_logger_requests_only_profile_privilege() {
         let mut session = EtwSession::new();
-        session.requires_elevation();
-        assert!(session.elevate);
-        assert!(!session.system_logger);
-        assert_eq!(session.required_privileges(),
-            &["SeDebugPrivilege", "SeSystemProfilePrivilege"]);
+        session.requires_system_logger();
+        assert!(session.system_logger);
+        assert_eq!(session.required_privileges(), &["SeSystemProfilePrivilege"]);
+    }
 
+    #[test]
+    fn profile_interval_does_not_force_system_mode() {
         let mut session = EtwSession::new();
         session.requires_profile_interval(1);
-        assert!(!session.elevate);
         assert!(!session.system_logger);
         assert_eq!(session.required_privileges(), &["SeSystemProfilePrivilege"]);
     }
