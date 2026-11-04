@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::collections::hash_map::{Values, ValuesMut};
 use std::time::Duration;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::Writable;
 use crate::event::{Event, EventData};
@@ -1341,6 +1342,7 @@ pub struct ExportMachine {
     duration: Option<Duration>,
     sample_hooks: Vec<Box<dyn Fn(&ExportSampleFilterContext) -> ExportFilterAction>>,
     attribute_sources: Writable<Vec<Box<dyn ExportAttributeSource>>>,
+    lost_events: AtomicU64,
 }
 
 pub trait ExportMachineSessionHooks {
@@ -1428,6 +1430,7 @@ impl ExportMachine {
             duration: None,
             sample_hooks,
             attribute_sources: Writable::new(Vec::new()),
+            lost_events: AtomicU64::new(0),
         };
 
         /* Initialize and add attribute sources */
@@ -1449,6 +1452,18 @@ impl ExportMachine {
     pub fn duration(&self) -> Option<Duration> { self.duration }
 
     pub fn settings(&self) -> &ExportSettings { &self.settings }
+
+    /// Returns the trace-wide number of events reported lost by the
+    /// collection backend.
+    pub fn lost_events(&self) -> u64 {
+        self.lost_events.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn add_lost_events(
+        &self,
+        count: u64) {
+        self.lost_events.fetch_add(count, Ordering::Relaxed);
+    }
 
     pub fn qpc_time() -> u64 { Self::os_qpc_time() }
 
@@ -2171,6 +2186,16 @@ pub trait ExportSessionHelp {
 mod tests {
     use super::*;
     use crate::event::*;
+
+    #[test]
+    fn aggregates_lost_events() {
+        let machine = ExportMachine::new(ExportSettings::default());
+
+        machine.add_lost_events(2);
+        machine.add_lost_events(3);
+
+        assert_eq!(5, machine.lost_events());
+    }
 
     #[test]
     fn sample_records() {

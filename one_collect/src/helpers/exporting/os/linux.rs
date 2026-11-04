@@ -917,6 +917,40 @@ impl OSExportMachine {
                 }
             });
 
+        /*
+         * PERF_RECORD_LOST and PERF_RECORD_LOST_SAMPLES describe different
+         * kernel loss paths, but nettrace can represent only a sequence gap.
+         * Preserve the low-level callbacks while also combining both counts
+         * into the exporter's trace-wide loss total.
+         */
+        let loss_machine = machine.clone();
+        let event = session.lost_event();
+        let lost_field = event.format().get_field_ref_unchecked("lost");
+
+        event.add_callback(move |data| {
+            let lost = data.format().get_u64(
+                lost_field,
+                data.event_data())?;
+
+            loss_machine.borrow().add_lost_events(lost);
+
+            Ok(())
+        });
+
+        let loss_machine = machine.clone();
+        let event = session.lost_samples_event();
+        let lost_field = event.format().get_field_ref_unchecked("lost");
+
+        event.add_callback(move |data| {
+            let lost = data.format().get_u64(
+                lost_field,
+                data.event_data())?;
+
+            loss_machine.borrow().add_lost_events(lost);
+
+            Ok(())
+        });
+
         if let Some(events) = events {
             let shared_sampler = Writable::new(
                 ExportSampler::new(
@@ -1852,14 +1886,128 @@ impl UniversalExporterOSHooks for UniversalExporter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Error, ErrorKind};
     use std::path::Path;
     use std::os::linux::fs::MetadataExt;
 
     use crate::tracefs::TraceFS;
-    use crate::perf_event::RingBufSessionBuilder;
+    use crate::perf_event::{
+        PerfData,
+        PerfDataFile,
+        PerfDataSource,
+        RingBufSessionBuilder,
+    };
+    use crate::perf_event::abi::{
+        Header,
+        PERF_RECORD_LOST,
+        PERF_RECORD_LOST_SAMPLES,
+    };
     use crate::helpers::callstack::CallstackHelper;
 
     use graph::{DefaultExportGraphMetricValueConverter, ExportGraphMetricValueConverter};
+
+    struct LostDataSource {
+        records: Vec<Vec<u8>>,
+        index: usize,
+    }
+
+    impl LostDataSource {
+        fn new(
+            records: Vec<Vec<u8>>) -> Self {
+            Self {
+                records,
+                index: 0,
+            }
+        }
+    }
+
+    impl PerfDataSource for LostDataSource {
+        fn enable(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn disable(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn target_pids(&self) -> Option<&[i32]> {
+            None
+        }
+
+        fn create_bpf_files(
+            &mut self,
+            _event: Option<&Event>) -> std::io::Result<Vec<PerfDataFile>> {
+            Err(Error::new(
+                ErrorKind::Unsupported,
+                "BPF is not supported"))
+        }
+
+        fn add_event(
+            &mut self,
+            _event: &Event) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn begin_reading(&mut self) {
+        }
+
+        fn read(
+            &mut self,
+            _timeout: std::time::Duration) -> Option<PerfData<'_>> {
+            if self.index == self.records.len() {
+                return None;
+            }
+
+            let index = self.index;
+            self.index += 1;
+
+            Some(PerfData {
+                ancillary: Default::default(),
+                raw_data: &self.records[index],
+            })
+        }
+
+        fn end_reading(&mut self) {
+        }
+
+        fn more(&self) -> bool {
+            self.index < self.records.len()
+        }
+    }
+
+    fn lost_record(
+        entry_type: u32,
+        values: &[u64]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        let mut record = Vec::new();
+
+        for value in values {
+            payload.extend_from_slice(&value.to_ne_bytes());
+        }
+
+        Header::write(
+            entry_type,
+            0,
+            &payload,
+            &mut record);
+
+        record
+    }
+
+    #[test]
+    fn exporter_aggregates_both_perf_loss_records() {
+        let source = LostDataSource::new(vec![
+            lost_record(PERF_RECORD_LOST, &[1, 3]),
+            lost_record(PERF_RECORD_LOST_SAMPLES, &[5]),
+        ]);
+        let mut session = PerfSession::new(Box::new(source));
+        let settings = ExportSettings::new(CallstackHelper::new());
+        let exporter = session.build_exporter(settings).unwrap();
+
+        session.parse_all().unwrap();
+
+        assert_eq!(8, exporter.borrow().lost_events());
+    }
 
     #[test]
     #[ignore]

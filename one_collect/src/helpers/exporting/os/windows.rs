@@ -496,6 +496,13 @@ impl OSExportMachine {
         OSExportMachine::alloc_idle_pid(&mut machine);
 
         let machine = Writable::new(machine);
+        let loss_machine = machine.clone();
+
+        // Capture lost events at trace end.
+        session.add_completed_callback(move |stats| {
+            loss_machine.borrow().add_lost_events(
+                stats.events_lost as u64);
+        });
 
         if let Some(events) = events {
             let shared_sampler = Writable::new(
