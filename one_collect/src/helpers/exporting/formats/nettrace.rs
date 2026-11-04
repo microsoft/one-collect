@@ -1629,6 +1629,38 @@ mod tests {
             format!("one-collect-{name}-{nanos}.nettrace"))
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn clockid_nettrace_sync_matches_selected_session_clock() {
+        use crate::perf_event::PerfClock;
+
+        for clock in [None, Some(PerfClock::MonotonicRaw), Some(PerfClock::Monotonic)] {
+            let path = unique_temp_path("clockid-sync");
+            let mut settings = ExportSettings::default();
+            if let Some(clock) = clock {
+                settings = settings.with_perf_clock(clock);
+            }
+            let mut machine = ExportMachine::new(settings);
+            let before = clock.unwrap_or_default().timestamp();
+            machine.mark_start();
+            machine.mark_end();
+            let after = clock.unwrap_or_default().timestamp();
+            machine.to_net_trace(|_| true, path.to_str().unwrap()).unwrap();
+
+            let data = std::fs::read(&path).unwrap();
+            assert_eq!(b"Nettrace", &data[..8]);
+            let block_header = u32::from_le_bytes(data[20..24].try_into().unwrap());
+            assert_eq!(1, block_header >> 24);
+            // The trace block's 16-byte UTC date precedes its QPC synchronization fields.
+            let sync_qpc = u64::from_le_bytes(data[40..48].try_into().unwrap());
+            let frequency = u64::from_le_bytes(data[48..56].try_into().unwrap());
+            assert_eq!(machine.start_qpc().unwrap(), sync_qpc);
+            assert!((before..=after).contains(&sync_qpc));
+            assert_eq!(1_000_000_000, frequency);
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
     fn final_sequence_point(
         path: &PathBuf) -> (u32, Option<(u64, u32)>) {
         let data = std::fs::read(path).unwrap();

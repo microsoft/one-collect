@@ -312,3 +312,17 @@ impl RecordArgs {
         }
     }
 }
+
+#[cfg(all(test, target_os = "windows"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clockid_shared_windows_parser_rejects_linux_only_options() {
+        for option in ["--clockid", "--clock-id", "-k"] {
+            let error = Args::try_parse_from(["record-trace", option, "mono"])
+                .err().expect("Linux-only argument must be rejected");
+            assert_eq!(clap::error::ErrorKind::UnknownArgument, error.kind());
+        }
+    }
+}

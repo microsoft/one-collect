@@ -44,3 +44,64 @@ impl OSArgs {
         info!("Arguments parsed: clock_id={}", self.clock_id);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commandline::{Args as CommandArgs, RecordArgs};
+    use clap::Parser;
+    use one_collect::helpers::exporting::ExportMachine;
+
+    #[test]
+    fn clockid_default_and_all_aliases_reach_export_settings() {
+        let default = RecordArgs::parse(["record-trace", "--on-cpu"]);
+        assert_eq!(ClockId::MonotonicRaw, default.os.clock_id);
+        for (option, value, expected) in [
+            ("--clockid", "monotonic", ClockId::Monotonic),
+            ("--clockid", "mono", ClockId::Monotonic),
+            ("--clockid", "CLOCK_MONOTONIC", ClockId::Monotonic),
+            ("--clockid", "monotonic_raw", ClockId::MonotonicRaw),
+            ("--clockid", "raw", ClockId::MonotonicRaw),
+            ("--clockid", "CLOCK_MONOTONIC_RAW", ClockId::MonotonicRaw),
+            ("--clock-id", "mono", ClockId::Monotonic),
+            ("-k", "raw", ClockId::MonotonicRaw),
+        ] {
+            let args = RecordArgs::parse(["record-trace", "--on-cpu", option, value]);
+            assert_eq!(expected, args.os.clock_id);
+        }
+
+        let monotonic = RecordArgs::parse(["record-trace", "--on-cpu", "--clockid", "monotonic"]);
+        for (args, clock) in [(default, PerfClock::MonotonicRaw), (monotonic, PerfClock::Monotonic)] {
+            let machine = ExportMachine::new(args.os.apply_to(ExportSettings::default()));
+            let before = clock.timestamp();
+            let timestamp = machine.qpc_time();
+            let after = clock.timestamp();
+            assert!((before..=after).contains(&timestamp));
+        }
+    }
+
+    #[test]
+    fn clockid_rejects_unsupported_and_missing_values() {
+        for value in ["realtime", "invalid"] {
+            let error = CommandArgs::try_parse_from(["record-trace", "--clockid", value])
+                .err().expect("unsupported clock must fail");
+            assert_eq!(clap::error::ErrorKind::InvalidValue, error.kind());
+        }
+        let error = CommandArgs::try_parse_from(["record-trace", "--clockid"])
+            .err().expect("missing clock must fail");
+        assert_eq!(clap::error::ErrorKind::InvalidValue, error.kind());
+    }
+
+    #[test]
+    fn clockid_rejects_multiple_spellings_even_with_equal_values() {
+        for args in [
+            ["record-trace", "--clockid", "mono", "--clockid", "mono"],
+            ["record-trace", "--clockid", "mono", "--clock-id", "raw"],
+            ["record-trace", "--clock-id", "mono", "-k", "mono"],
+        ] {
+            let error = CommandArgs::try_parse_from(args)
+                .err().expect("duplicate clock must fail");
+            assert_eq!(clap::error::ErrorKind::ArgumentConflict, error.kind());
+        }
+    }
+}

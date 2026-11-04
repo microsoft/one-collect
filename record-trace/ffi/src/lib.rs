@@ -163,6 +163,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn clockid_option_is_forwarded_to_the_shared_parser() {
+        let input = "--on-cpu --clockid CLOCK_MONOTONIC";
+        let tokens: Vec<_> = RecordArgsParser::new("RecordTraceFFI", input).collect();
+        assert_eq!(vec!["RecordTraceFFI", "--on-cpu", "--clockid", "CLOCK_MONOTONIC"], tokens);
+        let _args = RecordArgs::parse(RecordArgsParser::new("RecordTraceFFI", input));
+    }
+
+    #[test]
     fn command_parser() {
         let mut parser = RecordArgsParser::new(
             "UnitTest",

@@ -1570,6 +1570,58 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
+    #[test]
+    fn clockid_timestamp_reads_the_requested_os_clock() {
+        for (clock, clock_id) in [
+            (PerfClock::MonotonicRaw, libc::CLOCK_MONOTONIC_RAW),
+            (PerfClock::Monotonic, libc::CLOCK_MONOTONIC),
+        ] {
+            let mut before = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+            let mut after = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+            assert_eq!(0, unsafe { libc::clock_gettime(clock_id, &mut before) });
+            let timestamp = clock.timestamp();
+            assert_eq!(0, unsafe { libc::clock_gettime(clock_id, &mut after) });
+            let before = (before.tv_sec * 1_000_000_000 + before.tv_nsec) as u64;
+            let after = (after.tv_sec * 1_000_000_000 + after.tv_nsec) as u64;
+            assert!((before..=after).contains(&timestamp));
+        }
+    }
+
+    #[test]
+    fn clockid_environment_records_use_writer_clock() {
+        for clock in [PerfClock::MonotonicRaw, PerfClock::Monotonic] {
+            let mut ring_buf = rb::InProcessRingBuf::new(64, clock);
+            let mut writer = ring_buf.writer();
+            let mut reader = ring_buf.create_reader();
+            let mut cursor = rb::CpuRingCursor::default();
+            let mut temp = Vec::new();
+            let pids = Some(HashSet::from([std::process::id() as i32]));
+            let before = clock.timestamp();
+            PerfSession::write_environment_comms(&pids, &mut writer);
+            PerfSession::write_environment_modules(&pids, false, &mut writer);
+            let after = clock.timestamp();
+            let mut comms = 0;
+            let mut mmaps = 0;
+
+            reader.begin_reading(&mut cursor);
+            while cursor.more() {
+                let record = reader.read(&mut cursor, &mut temp).unwrap();
+                let (name_offset, trailer_offset) = match abi::Header::from_slice(record).unwrap().entry_type {
+                    PERF_RECORD_COMM => { comms += 1; (16, 8) },
+                    PERF_RECORD_MMAP2 => { mmaps += 1; (72, 0) },
+                    kind => panic!("Unexpected environment record type: {}", kind),
+                };
+                let name_len = record[name_offset..].iter().position(|b| *b == 0).unwrap();
+                let time_offset = name_offset + name_len + 1 + trailer_offset;
+                let timestamp = u64::from_ne_bytes(record[time_offset..time_offset + 8].try_into().unwrap());
+                assert!((before..=after).contains(&timestamp));
+            }
+            assert_eq!(1, comms);
+            assert!(mmaps > 0);
+            reader.end_reading(&cursor);
+        }
+    }
+
     struct MockData {
         data: Vec<u8>,
         entries: Vec<(usize, usize)>,

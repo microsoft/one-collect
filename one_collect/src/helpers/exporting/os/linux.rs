@@ -1911,6 +1911,7 @@ mod tests {
     struct LostDataSource {
         records: Vec<Vec<u8>>,
         index: usize,
+        clock: PerfClock,
     }
 
     impl LostDataSource {
@@ -1919,11 +1920,16 @@ mod tests {
             Self {
                 records,
                 index: 0,
+                clock: PerfClock::default(),
             }
         }
     }
 
     impl PerfDataSource for LostDataSource {
+        fn clock(&self) -> PerfClock {
+            self.clock
+        }
+
         fn enable(&mut self) -> std::io::Result<()> {
             Ok(())
         }
@@ -1994,6 +2000,37 @@ mod tests {
             &mut record);
 
         record
+    }
+
+    #[test]
+    fn clockid_exporter_attachment_inherits_actual_session_clock() {
+        for clock in [None, Some(PerfClock::MonotonicRaw), Some(PerfClock::Monotonic)] {
+            let mut source = LostDataSource::new(Vec::new());
+            let mut settings = ExportSettings::new(CallstackHelper::new());
+            if let Some(clock) = clock {
+                source.clock = clock;
+                let other_clock = match clock {
+                    PerfClock::MonotonicRaw => PerfClock::Monotonic,
+                    PerfClock::Monotonic => PerfClock::MonotonicRaw,
+                };
+                settings = settings.with_perf_clock(other_clock);
+            }
+            let expected = clock.unwrap_or_default();
+            let mut session = PerfSession::new(Box::new(source));
+            let exporter = session.build_exporter(settings).unwrap();
+            let mut machine = exporter.borrow_mut();
+            assert_eq!(expected, machine.settings.os.clock);
+            let before = expected.timestamp();
+            machine.mark_start();
+            let current = machine.qpc_time();
+            machine.mark_end();
+            let after = expected.timestamp();
+            let start = machine.start_qpc().unwrap();
+            let end = machine.end_qpc().unwrap();
+            assert!((before..=current).contains(&start));
+            assert!((current..=after).contains(&end));
+            assert_eq!(Some(std::time::Duration::from_nanos(end - start)), machine.duration());
+        }
     }
 
     #[test]

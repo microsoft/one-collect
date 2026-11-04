@@ -1400,6 +1400,34 @@ impl InProcessRingBufWriter {
 mod tests {
     use super::*;
 
+    #[test]
+    fn clockid_synthetic_writer_and_lost_records_use_selected_clock() {
+        for clock in [PerfClock::MonotonicRaw, PerfClock::Monotonic] {
+            let mut ring_buf = InProcessRingBuf::new(1, clock);
+            let mut writer = ring_buf.writer();
+            let mut reader = ring_buf.create_reader();
+            let mut cursor = CpuRingCursor::default();
+            let mut temp = Vec::new();
+
+            assert_eq!(clock, writer.clock);
+            let before = clock.timestamp();
+            let timestamp = writer.timestamp();
+            writer.lost_count = 3;
+            writer.flush();
+            let after = clock.timestamp();
+            assert!((before..=after).contains(&timestamp));
+
+            reader.begin_reading(&mut cursor);
+            let record = reader.read(&mut cursor, &mut temp).unwrap();
+            assert_eq!(abi::PERF_RECORD_LOST, abi::Header::from_slice(record).unwrap().entry_type);
+            assert_eq!(3, u64::from_ne_bytes(record[16..24].try_into().unwrap()));
+            let lost_time = u64::from_ne_bytes(record[32..40].try_into().unwrap());
+            assert!((before..=after).contains(&lost_time));
+            assert!(!cursor.more());
+            reader.end_reading(&cursor);
+        }
+    }
+
     fn swap(
         source: &[u8],
         dest: &mut [u8]) {

@@ -1472,6 +1472,104 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    fn clock_builder(clock: PerfClock) -> RingBufSessionBuilder {
+        RingBufSessionBuilder::new()
+            .with_clock(clock)
+            .with_page_count(2)
+            .with_target_pid(123)
+            .with_target_cpu(0)
+            .with_kernel_events(RingBufBuilder::for_kernel().with_comm_records())
+            .with_profiling_events(RingBufBuilder::for_profiling(1000).with_ip())
+            .with_cswitch_events(RingBufBuilder::for_cswitches())
+            .with_soft_page_faults_events(RingBufBuilder::for_soft_page_faults())
+            .with_hard_page_faults_events(RingBufBuilder::for_hard_page_faults())
+            .with_bpf_events(RingBufBuilder::for_bpf())
+            .with_tracepoint_events(RingBufBuilder::for_tracepoint().with_cgroup_data())
+    }
+
+    fn assert_clock(builder: &RingBufSessionBuilder, clock: PerfClock) {
+        for attributes in [
+            builder.kernel_builder.as_ref().map(|b| &b.attributes),
+            builder.profiling_builder.as_ref().map(|b| &b.attributes),
+            builder.cswitch_builder.as_ref().map(|b| &b.attributes),
+            builder.soft_page_faults_builder.as_ref().map(|b| &b.attributes),
+            builder.hard_page_faults_builder.as_ref().map(|b| &b.attributes),
+            builder.bpf_builder.as_ref().map(|b| &b.attributes),
+            builder.event_builder.as_ref().map(|b| &b.attributes),
+        ].into_iter().flatten() {
+            assert_eq!(clock.clock_id(), attributes.clockid);
+            assert_ne!(0, attributes.flags & FLAG_USE_CLOCKID);
+        }
+    }
+
+    #[test]
+    fn clockid_defaults_to_raw_and_normalizes_all_streams() {
+        assert_eq!(PerfClock::MonotonicRaw, RingBufSessionBuilder::new().clock);
+        for clock in [PerfClock::MonotonicRaw, PerfClock::Monotonic] {
+            let mut builder = clock_builder(clock);
+            builder.apply_clock();
+            assert_clock(&builder, clock);
+            assert_eq!(Some(vec![123]), builder.target_pids);
+            assert_eq!(Some(vec![0]), builder.target_cpus);
+            let profiling = builder.profiling_builder.as_ref().unwrap();
+            assert_eq!(1000, profiling.attributes.sample_period_freq);
+            assert_ne!(0, profiling.attributes.sample_type & abi::PERF_SAMPLE_IP);
+            let event = builder.event_builder.as_ref().unwrap().build(42);
+            assert_eq!(42, event.attributes.config);
+            assert_ne!(0, event.attributes.sample_type & abi::PERF_SAMPLE_CGROUP);
+            assert_eq!(clock.clock_id(), event.attributes.clockid);
+        }
+    }
+
+    #[test]
+    fn clockid_is_resolved_after_helper_and_replacement_hooks() {
+        use crate::helpers::callstack::{CallstackHelp, CallstackHelper};
+
+        for clock in [PerfClock::MonotonicRaw, PerfClock::Monotonic] {
+            let helper = CallstackHelper::new().with_ip_only();
+            let mut builder = clock_builder(PerfClock::MonotonicRaw)
+                .with_callstack_help(&helper)
+                .with_hooks(
+                    move |builder| {
+                        builder.clock = clock;
+                        builder.replace_kernel_events(RingBufBuilder::for_kernel());
+                        builder.replace_tracepoint_events(RingBufBuilder::for_tracepoint());
+                        builder.replace_bpf_events(RingBufBuilder::for_bpf());
+                    },
+                    |_| {})
+                .with_wakeup_watermark(u32::MAX);
+
+            // Stop before opening perf fds, but after real helper and replacement hooks.
+            let error = builder.build().err().expect("invalid watermark must fail");
+            assert!(error.to_string().contains("wakeup_watermark"));
+            assert_clock(&builder, clock);
+            assert_ne!(0, builder.profiling_builder.as_ref().unwrap().attributes.sample_type & abi::PERF_SAMPLE_IP);
+        }
+    }
+
+    #[test]
+    fn clockid_export_settings_reach_the_builder() {
+        use crate::helpers::callstack::CallstackHelper;
+        use crate::helpers::exporting::{
+            ExportBuilderHelp, ExportSettings, ExportSettingsLinuxExt,
+        };
+
+        for clock in [None, Some(PerfClock::MonotonicRaw), Some(PerfClock::Monotonic)] {
+            let mut settings = ExportSettings::new(CallstackHelper::new())
+                .with_cpu_profiling(1000)
+                .with_cswitches()
+                .with_soft_page_faults()
+                .with_hard_page_faults();
+            if let Some(clock) = clock {
+                settings = settings.with_perf_clock(clock);
+            }
+            let mut builder = RingBufSessionBuilder::new().with_exporter_events(&settings);
+            assert_eq!(clock.unwrap_or_default(), builder.clock);
+            builder.apply_clock();
+            assert_clock(&builder, clock.unwrap_or_default());
+        }
+    }
+
     #[test]
     fn config() {
         let kernel = RingBufBuilder::for_kernel()
