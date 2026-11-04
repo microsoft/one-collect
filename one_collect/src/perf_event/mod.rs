@@ -35,6 +35,23 @@ pub use rb::source::RingBufSessionBuilder;
 pub use rb::{RingBufOptions, RingBufBuilder};
 pub use rb::cpu_count;
 
+/// Clock domain shared by all perf streams and synthetic records in a session.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PerfClock {
+    Monotonic,
+    #[default]
+    MonotonicRaw,
+}
+
+impl PerfClock {
+    pub(crate) fn clock_id(self) -> i32 {
+        match self {
+            Self::Monotonic => libc::CLOCK_MONOTONIC,
+            Self::MonotonicRaw => libc::CLOCK_MONOTONIC_RAW,
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct CaptureEnvironmentOptions {
     all_mmaps: bool,
@@ -201,6 +218,8 @@ impl PerfDataFile {
 }
 
 pub trait PerfDataSource {
+    fn clock(&self) -> PerfClock { PerfClock::default() }
+
     fn enable(&mut self) -> IOResult<()>;
 
     fn disable(&mut self) -> IOResult<()>;
@@ -494,6 +513,10 @@ impl PerfSession {
 
     pub fn ancillary_data(&self) -> ReadOnly<AncillaryData> {
         self.ancillary.read_only()
+    }
+
+    pub(crate) fn clock(&self) -> PerfClock {
+        self.source.clock()
     }
 
     pub fn cpu_profile_event(&mut self) -> &mut Event {
@@ -1392,7 +1415,6 @@ impl PerfSession {
             pid_lookup.is_some()
         );
 
-        let attributes = RingBufBuilder::common_attributes();
         let mut event_data: Vec<u8> = Vec::new();
         let mut full_data: Vec<u8> = Vec::new();
 
@@ -1421,7 +1443,7 @@ impl PerfSession {
             event_data.extend_from_slice(&pid_bytes);
             event_data.extend_from_slice(&pid_bytes);
 
-            let capture_time = rb::perf_timestamp(&attributes);
+            let capture_time = writer.timestamp();
             event_data.extend_from_slice(&capture_time.to_ne_bytes());
             event_data.extend_from_slice(&id_bytes);
 
@@ -1444,7 +1466,6 @@ impl PerfSession {
             pid_lookup.is_some()
         );
 
-        let attributes = RingBufBuilder::common_attributes();
         let mut event_data: Vec<u8> = Vec::new();
         let mut full_data: Vec<u8> = Vec::new();
 
@@ -1505,7 +1526,7 @@ impl PerfSession {
             event_data.extend_from_slice(path.as_bytes());
             event_data.push(0);
 
-            let capture_time = rb::perf_timestamp(&attributes);
+            let capture_time = writer.timestamp();
             event_data.extend_from_slice(&capture_time.to_ne_bytes());
             event_data.extend_from_slice(&id_bytes);
 

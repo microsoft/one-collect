@@ -244,7 +244,7 @@ pub struct RingBufBuilder<T = Profiling> {
 }
 
 impl RingBufBuilder {
-    pub(crate) fn common_attributes() -> perf_event_attr {
+    pub(crate) fn common_attributes(clock: PerfClock) -> perf_event_attr {
         perf_event_attr {
             size: PERF_ATTR_SIZE_VER4,
             flags: FLAG_USE_CLOCKID |
@@ -253,7 +253,7 @@ impl RingBufBuilder {
                 FLAG_EXCLUDE_HV |
                 FLAG_EXCLUDE_IDLE |
                 FLAG_INHERIT,
-            clockid: CLOCK_MONOTONIC_RAW,
+            clockid: clock.clock_id(),
             read_format: abi::PERF_FORMAT_ID,
             sample_type: abi::PERF_SAMPLE_IDENTIFIER |
                 abi::PERF_SAMPLE_TIME |
@@ -264,7 +264,7 @@ impl RingBufBuilder {
     }
 
     pub fn for_kernel() -> RingBufBuilder<Kernel> {
-        let mut attributes = Self::common_attributes();
+        let mut attributes = Self::common_attributes(PerfClock::default());
 
         attributes.event_type = PERF_TYPE_SOFTWARE;
         attributes.config = PERF_COUNT_SW_DUMMY;
@@ -276,7 +276,7 @@ impl RingBufBuilder {
     }
 
     pub fn for_cswitches() -> RingBufBuilder<ContextSwitches> {
-        let mut attributes = Self::common_attributes();
+        let mut attributes = Self::common_attributes(PerfClock::default());
 
         attributes.event_type = PERF_TYPE_SOFTWARE;
         attributes.config = PERF_COUNT_SW_CONTEXT_SWITCHES;
@@ -289,7 +289,7 @@ impl RingBufBuilder {
     }
 
     pub fn for_soft_page_faults() -> RingBufBuilder<PageFaults> {
-        let mut attributes = Self::common_attributes();
+        let mut attributes = Self::common_attributes(PerfClock::default());
 
         attributes.event_type = PERF_TYPE_SOFTWARE;
         attributes.config = PERF_COUNT_SW_PAGE_FAULTS_MIN;
@@ -302,7 +302,7 @@ impl RingBufBuilder {
     }
 
     pub fn for_hard_page_faults() -> RingBufBuilder<PageFaults> {
-        let mut attributes = Self::common_attributes();
+        let mut attributes = Self::common_attributes(PerfClock::default());
 
         attributes.event_type = PERF_TYPE_SOFTWARE;
         attributes.config = PERF_COUNT_SW_PAGE_FAULTS_MAJ;
@@ -316,7 +316,7 @@ impl RingBufBuilder {
 
     pub fn for_profiling(
         sampling_frequency: u64) -> RingBufBuilder<Profiling> {
-        let mut attributes = Self::common_attributes();
+        let mut attributes = Self::common_attributes(PerfClock::default());
 
         attributes.event_type = PERF_TYPE_SOFTWARE;
         attributes.config = PERF_COUNT_SW_CPU_CLOCK;
@@ -330,7 +330,7 @@ impl RingBufBuilder {
     }
 
     pub fn for_tracepoint() -> RingBufBuilder<Tracepoint> {
-        let mut attributes = Self::common_attributes();
+        let mut attributes = Self::common_attributes(PerfClock::default());
 
         attributes.event_type = PERF_TYPE_TRACEPOINT;
         attributes.sample_period_freq = 1;
@@ -344,7 +344,7 @@ impl RingBufBuilder {
     }
 
     pub fn for_bpf() -> RingBufBuilder<Bpf> {
-        let mut attributes = Self::common_attributes();
+        let mut attributes = Self::common_attributes(PerfClock::default());
 
         attributes.event_type = PERF_TYPE_SOFTWARE;
         attributes.config = PERF_COUNT_SW_BPF_OUTPUT;
@@ -360,6 +360,11 @@ impl RingBufBuilder {
 }
 
 impl<T> RingBufBuilder<T> {
+    pub(crate) fn set_clock(&mut self, clock: PerfClock) {
+        self.attributes.flags |= FLAG_USE_CLOCKID;
+        self.attributes.clockid = clock.clock_id();
+    }
+
     /// Configure the kernel to wake up the perf fd only after the ring
     /// buffer has accumulated at least `bytes` of data.
     ///
@@ -1113,6 +1118,7 @@ pub(crate) struct InProcessRingBuf {
     data_size: usize,
     data_mask: usize,
     head: usize,
+    clock: PerfClock,
 }
 
 /// Writer half of an `InProcessRingBuf`.
@@ -1128,6 +1134,7 @@ pub struct InProcessRingBufWriter {
     data_mask: usize,
     head: usize,
     lost_count: u64,
+    clock: PerfClock,
 }
 
 // SAFETY: InProcessRingBufWriter only writes to memory via raw pointer.
@@ -1138,7 +1145,7 @@ unsafe impl Send for InProcessRingBufWriter {}
 impl InProcessRingBuf {
     /// Create a new in-process ring buffer with the given number of data pages.
     /// The data_pages value will be rounded up to the next power of two.
-    pub(crate) fn new(data_pages: usize) -> Self {
+    pub(crate) fn new(data_pages: usize, clock: PerfClock) -> Self {
         let page_size = unsafe { sysconf(_SC_PAGE_SIZE) as usize };
         let data_pages = data_pages.next_power_of_two();
         let data_size = data_pages * page_size;
@@ -1166,6 +1173,7 @@ impl InProcessRingBuf {
             data_size,
             data_mask: data_size - 1,
             head: 0,
+            clock,
         }
     }
 
@@ -1192,11 +1200,16 @@ impl InProcessRingBuf {
             data_mask: self.data_mask,
             head: self.head,
             lost_count: 0,
+            clock: self.clock,
         }
     }
 }
 
 impl InProcessRingBufWriter {
+    pub(crate) fn timestamp(&self) -> u64 {
+        perf_timestamp(&RingBufBuilder::common_attributes(self.clock))
+    }
+
     /// Maximum time to spin-wait for space to become available (100 ms).
     const WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
 
@@ -1310,7 +1323,7 @@ impl InProcessRingBufWriter {
         payload.extend_from_slice(&self.lost_count.to_ne_bytes());
         payload.extend_from_slice(&0u64.to_ne_bytes()); /* pid/tid */
         payload.extend_from_slice(
-            &perf_timestamp(&RingBufBuilder::common_attributes()).to_ne_bytes()
+            &self.timestamp().to_ne_bytes()
         );
         payload.extend_from_slice(&0u64.to_ne_bytes()); /* id */
 
@@ -1569,7 +1582,7 @@ mod tests {
         let mut temp = Vec::new();
 
         /* Create an in-process ring buffer with 1 data page */
-        let mut ring_buf = InProcessRingBuf::new(1);
+        let mut ring_buf = InProcessRingBuf::new(1, PerfClock::default());
 
         /* Get writer and reader */
         let mut writer = ring_buf.writer();
@@ -1624,7 +1637,7 @@ mod tests {
     #[test]
     fn in_process_ring_buf_writer_threaded() {
         let mut temp = Vec::new();
-        let mut ring_buf = InProcessRingBuf::new(1);
+        let mut ring_buf = InProcessRingBuf::new(1, PerfClock::default());
 
         /* Get the reader before spawning the writer thread */
         let mut reader = ring_buf.create_reader();
@@ -1668,7 +1681,7 @@ mod tests {
         let mut temp = Vec::new();
 
         /* Create an in-process ring buffer with 1 data page */
-        let mut ring_buf = InProcessRingBuf::new(1);
+        let mut ring_buf = InProcessRingBuf::new(1, PerfClock::default());
         let mut writer = ring_buf.writer();
         let mut reader = ring_buf.create_reader();
 
@@ -1719,7 +1732,7 @@ mod tests {
     #[test]
     fn in_process_ring_buf_write_unaligned_record_aligns_head() {
         let mut temp = Vec::new();
-        let mut ring_buf = InProcessRingBuf::new(1);
+        let mut ring_buf = InProcessRingBuf::new(1, PerfClock::default());
         let mut writer = ring_buf.writer();
         let mut reader = ring_buf.create_reader();
         let mut cursor = CpuRingCursor::default();
@@ -1758,7 +1771,7 @@ mod tests {
         let mut temp = Vec::new();
 
         /* 1 data page = 4096 bytes */
-        let mut ring_buf = InProcessRingBuf::new(1);
+        let mut ring_buf = InProcessRingBuf::new(1, PerfClock::default());
         let mut writer = ring_buf.writer();
         let mut reader = ring_buf.create_reader();
 
@@ -1820,7 +1833,7 @@ mod tests {
     fn in_process_ring_buf_lost_record_accumulates() {
         let mut temp = Vec::new();
 
-        let mut ring_buf = InProcessRingBuf::new(1);
+        let mut ring_buf = InProcessRingBuf::new(1, PerfClock::default());
         let mut writer = ring_buf.writer();
         let mut reader = ring_buf.create_reader();
 
@@ -1878,7 +1891,7 @@ mod tests {
     fn in_process_ring_buf_flush_writes_lost_record() {
         let mut temp = Vec::new();
 
-        let mut ring_buf = InProcessRingBuf::new(1);
+        let mut ring_buf = InProcessRingBuf::new(1, PerfClock::default());
         let mut writer = ring_buf.writer();
         let mut reader = ring_buf.create_reader();
 
@@ -1928,7 +1941,7 @@ mod tests {
     fn in_process_ring_buf_no_lost_record_when_zero() {
         let mut temp = Vec::new();
 
-        let mut ring_buf = InProcessRingBuf::new(1);
+        let mut ring_buf = InProcessRingBuf::new(1, PerfClock::default());
         let mut writer = ring_buf.writer();
         let mut reader = ring_buf.create_reader();
 
