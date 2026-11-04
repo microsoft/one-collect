@@ -33,6 +33,8 @@ This project is currently in pre-release mode. It is expected that there may be
 breaking API and behavioral changes. We expect this to stabilize before a
 version 1.0 release.
 
+Clock API migration: `ExportMachine::qpc_time()` is now `machine.qpc_time()`, and implementations of the public `ExportMachineOSHooks` trait must provide `os_qpc_time(&self)` instead of a static method. On Linux these instance methods read the exporter's resolved session clock, not always RAW; Windows still uses QPC. The separate `os_session_qpc_time` hook is removed. The public `perf_event::rb::perf_timestamp(&perf_event_attr)` signature and zero-on-error behavior remain available but are deprecated in favor of `PerfClock::timestamp()`.
+
 ## Features
 
 - `scripting` *(default)* — enables the Rhai-based scripting support.

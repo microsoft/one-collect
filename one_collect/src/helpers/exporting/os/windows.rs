@@ -1036,7 +1036,7 @@ impl ExportMachineOSHooks for ExportMachine {
         Ok(())
     }
 
-    fn os_qpc_time() -> u64 {
+    fn os_qpc_time(&self) -> u64 {
         qpc_time()
     }
 

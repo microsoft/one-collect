@@ -1703,22 +1703,7 @@ impl ExportMachineOSHooks for ExportMachine {
         OSExportMachine::resolve_perf_map_symbols(self);
     }
 
-    fn os_qpc_time() -> u64 {
-        let mut t = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-
-        unsafe {
-            libc::clock_gettime(
-                libc::CLOCK_MONOTONIC_RAW,
-                &mut t);
-        }
-
-        ((t.tv_sec * 1000000000) + t.tv_nsec) as u64
-    }
-
-    fn os_session_qpc_time(&self) -> u64 {
+    fn os_qpc_time(&self) -> u64 {
         self.settings.os.clock.timestamp()
     }
 
