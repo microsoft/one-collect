@@ -10,23 +10,23 @@ use tracing::info;
 
 #[derive(Args, Debug)]
 pub(crate) struct OSArgs {
-    #[arg(long = "clockid", default_value_t = ClockId::MonotonicRaw, help = "Clock shared by perf events and export timestamps")]
+    #[arg(long = "clockid", visible_alias = "clock-id", short = 'k', default_value_t = ClockId::MonotonicRaw, help = "Clock shared by perf events and export timestamps")]
     clock_id: ClockId,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 enum ClockId {
-    #[value(name = "CLOCK_MONOTONIC")]
+    #[value(name = "monotonic", alias = "mono", alias = "CLOCK_MONOTONIC")]
     Monotonic,
-    #[value(name = "CLOCK_MONOTONIC_RAW")]
+    #[value(name = "monotonic_raw", alias = "raw", alias = "CLOCK_MONOTONIC_RAW")]
     MonotonicRaw,
 }
 
 impl fmt::Display for ClockId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Monotonic => write!(f, "CLOCK_MONOTONIC"),
-            Self::MonotonicRaw => write!(f, "CLOCK_MONOTONIC_RAW"),
+            Self::Monotonic => write!(f, "monotonic"),
+            Self::MonotonicRaw => write!(f, "monotonic_raw"),
         }
     }
 }
