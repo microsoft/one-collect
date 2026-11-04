@@ -22,7 +22,7 @@ exclude = [
 
 [features]
 default = ["scripting"]
-scripting = []
+scripting = ["dep:rhai"]
 
 [dependencies]
 anyhow = "1.0.75"
@@ -30,7 +30,7 @@ twox-hash = "1.6.3"
 protobuf = "3.7.*"
 flate2 = "1.0.31"
 chrono = "0.4.39"
-rhai = "1.21.0"
+rhai = { version = "1.21.0", optional = true }
 sha1 = "0.10.6"
 tracing = "0.1"
 cpp_demangle = "0.4.3"
