@@ -63,6 +63,7 @@ const TEST_KEYWORD: u64 = 0x1;
 /// `ProcessStart` / `ProcessStop` events that the test triggers on demand
 /// by spawning child processes.
 const KERNEL_PROCESS_PROVIDER: u128 = 0x22FB2CD6_0E7B_422B_A0C7_2FAD1FD0E716;
+const KERNEL_PROCESS_PROVIDER_NAME: &str = "Microsoft-Windows-Kernel-Process";
 
 /// Task names the Kernel-Process manifest assigns to process-lifetime
 /// events (Ids 1 and 2).  Both carry a Task, so the decoder's
@@ -164,6 +165,7 @@ const EXPECTED_NESTED_BOTTOM: u32 = 400;
 /// A decoded event captured by the wide-event callback.
 struct CapturedEvent {
     name: String,
+    provider_name: Option<String>,
     field_names: Vec<String>,
     field_types: Vec<String>,
     payload: Vec<u8>,
@@ -283,6 +285,7 @@ fn make_capture_sink() -> (
 
     let callback = move |decoded: &one_collect::etw::tdh::TdhDecodedEvent<'_>| {
         let name = decoded.event_name.unwrap_or("").to_string();
+        let provider_name = decoded.provider_name.map(str::to_string);
         let format = decoded.event_data.format();
 
         // Snapshot the schema + raw payload bytes so we can assert on
@@ -297,6 +300,7 @@ fn make_capture_sink() -> (
 
         captured_for_cb.borrow_mut().push(CapturedEvent {
             name,
+            provider_name,
             field_names,
             field_types,
             payload,
@@ -418,6 +422,15 @@ fn assert_schema(
     assert_eq!(
         actual_types, expected_types,
         "{ctx} field-type layout"
+    );
+}
+
+fn assert_provider_name(event: &CapturedEvent, expected: &str) {
+    assert_eq!(
+        event.provider_name.as_deref(),
+        Some(expected),
+        "{} provider name",
+        event.name
     );
 }
 
@@ -713,11 +726,13 @@ fn tdh_decodes_tracelogging_dynamic_events() {
             let mut builder = tld::EventBuilder::new();
 
             // EventNumbers: u32 + u64.
-            builder
-                .reset("EventNumbers", tlg::Level::Verbose, TEST_KEYWORD, 0)
-                .add_u32("Count", EXPECTED_U32, tlg::OutType::Default, 0)
-                .add_u64("BigCount", EXPECTED_U64, tlg::OutType::Default, 0)
-                .write(provider, None, None);
+            for _ in 0..2 {
+                builder
+                    .reset("EventNumbers", tlg::Level::Verbose, TEST_KEYWORD, 0)
+                    .add_u32("Count", EXPECTED_U32, tlg::OutType::Default, 0)
+                    .add_u64("BigCount", EXPECTED_U64, tlg::OutType::Default, 0)
+                    .write(provider, None, None);
+            }
 
             // EventStrings: counted ANSI + null-terminated UTF-16.
             builder
@@ -767,12 +782,27 @@ fn tdh_decodes_tracelogging_dynamic_events() {
         "one_collect_tdh_dynamic",
         &captured,
         counter,
-        3,
+        4,
     );
 
-    assert_numbers_event(find_event(&captured, "EventNumbers"));
-    assert_strings_event(find_event(&captured, "EventStrings"));
-    assert_scalars_event(find_event(&captured, "EventScalars"));
+    let number_events: Vec<&CapturedEvent> = captured
+        .iter()
+        .filter(|event| event.name == "EventNumbers")
+        .collect();
+    assert!(
+        number_events.len() >= 2,
+        "expected repeated EventNumbers events to exercise a schema cache hit"
+    );
+    for event in number_events {
+        assert_provider_name(event, provider_name);
+        assert_numbers_event(event);
+    }
+    let strings = find_event(&captured, "EventStrings");
+    assert_provider_name(strings, provider_name);
+    assert_strings_event(strings);
+    let scalars = find_event(&captured, "EventScalars");
+    assert_provider_name(scalars, provider_name);
+    assert_scalars_event(scalars);
 }
 
 // ── Test B: tracelogging (compile-time provider via macros) ──────────
@@ -1170,14 +1200,19 @@ fn tdh_decodes_manifest_kernel_process_events() {
     // Assert the `TaskNameOffset` path surfaced a Task-derived name for a
     // known process-lifetime event.  This is the manifest-specific
     // event-name branch (`DecodingSource != DecodingSourceTlg`).
+    let process_events: Vec<&CapturedEvent> = captured
+        .iter()
+        .filter(|event| KERNEL_PROCESS_TASKS.contains(&event.name.as_str()))
+        .collect();
     assert!(
-        captured
-            .iter()
-            .any(|e| KERNEL_PROCESS_TASKS.contains(&e.name.as_str())),
+        !process_events.is_empty(),
         "expected a Task-named ProcessStart/ProcessStop manifest event; \
          saw names: {:?}",
         captured.iter().map(|e| &e.name).collect::<Vec<_>>()
     );
+    for event in process_events {
+        assert_provider_name(event, KERNEL_PROCESS_PROVIDER_NAME);
+    }
 }
 
 // ── Test F: manifest decoding of a compiled-at-test-time manifest ─────
@@ -1217,6 +1252,7 @@ use windows_sys::Win32::System::Diagnostics::Etw::{
 /// `u128` form of the test provider GUID, used to build the framework
 /// `Guid` the capturing session subscribes to.
 const TEST_MANIFEST_PROVIDER: u128 = 0x4948EF3B_4F28_4747_9BB9_649008E2EDEF;
+const TEST_MANIFEST_PROVIDER_NAME: &str = "OneCollect-Test-Manifest";
 
 /// `windows_sys` form of the same GUID, used by `EventRegister`.
 const PROVIDER_GUID_SYS: windows_sys::core::GUID = windows_sys::core::GUID {
@@ -1590,11 +1626,11 @@ fn tdh_decodes_compiled_manifest_all_types() {
     let provider_guid = Guid::from_u128(TEST_MANIFEST_PROVIDER);
     let (captured, _counter, callback) = make_capture_sink();
 
-    // Track which of the three event Ids we've observed on the wire.
+    // Track how many times each event Id has been observed on the wire.
     let seen = Arc::new([
-        AtomicBool::new(false),
-        AtomicBool::new(false),
-        AtomicBool::new(false),
+        AtomicUsize::new(0),
+        AtomicUsize::new(0),
+        AtomicUsize::new(0),
     ]);
     let seen_cb = seen.clone();
 
@@ -1604,7 +1640,7 @@ fn tdh_decodes_compiled_manifest_all_types() {
         callback,
         move |id| {
             if (1..=3).contains(&id) {
-                seen_cb[(id - 1) as usize].store(true, Ordering::Relaxed);
+                seen_cb[(id - 1) as usize].fetch_add(1, Ordering::Relaxed);
             }
         },
     );
@@ -1654,13 +1690,18 @@ fn tdh_decodes_compiled_manifest_all_types() {
         session,
         "one_collect_tdh_manifest_all",
         &captured,
-        move || seen_drive.iter().all(|b| b.load(Ordering::Relaxed)),
+        move || {
+            seen_drive
+                .iter()
+                .all(|count| count.load(Ordering::Relaxed) >= 2)
+        },
     );
     stop.store(true, Ordering::Relaxed);
 
     // ── Scalars ─────────────────────────────────────────────────────
     let ev = find_by_first_field(&captured, "I8");
     assert_eq!(ev.name, "Scalars", "scalars task name");
+    assert_provider_name(ev, TEST_MANIFEST_PROVIDER_NAME);
     assert_schema(ev, &SCALARS_NAMES, &SCALARS_TYPES, "manifest scalars");
     assert_eq!(i8::from_le_bytes(exact::<1>(ev, "I8")), EXP_I8);
     assert_eq!(u8::from_le_bytes(exact::<1>(ev, "U8")), EXP_U8);
@@ -1691,6 +1732,7 @@ fn tdh_decodes_compiled_manifest_all_types() {
     // ── Strings ─────────────────────────────────────────────────────
     let ev = find_by_first_field(&captured, "CountedW");
     assert_eq!(ev.name, "Strings", "strings task name");
+    assert_provider_name(ev, TEST_MANIFEST_PROVIDER_NAME);
     assert_schema(ev, &STRINGS_NAMES, &STRINGS_TYPES, "manifest strings");
     let cw = field_bytes(ev, "CountedW");
     let cw_units: Vec<u16> =
@@ -1710,7 +1752,23 @@ fn tdh_decodes_compiled_manifest_all_types() {
     // ── Blob ────────────────────────────────────────────────────────
     let ev = find_by_first_field(&captured, "Blob");
     assert_eq!(ev.name, "Blobs", "blobs task name");
+    assert_provider_name(ev, TEST_MANIFEST_PROVIDER_NAME);
     assert_schema(ev, &BLOB_NAMES, &BLOB_TYPES, "manifest blob");
     assert_eq!(field_bytes(ev, "Blob"), EXP_BLOB);
-}
 
+    for first_field in ["I8", "CountedW", "Blob"] {
+        let repeated: Vec<&CapturedEvent> = captured
+            .iter()
+            .filter(|event| {
+                event.field_names.first().map(String::as_str) == Some(first_field)
+            })
+            .collect();
+        assert!(
+            repeated.len() >= 2,
+            "expected repeated {first_field} events to exercise a schema cache hit"
+        );
+        for event in repeated {
+            assert_provider_name(event, TEST_MANIFEST_PROVIDER_NAME);
+        }
+    }
+}
