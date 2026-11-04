@@ -97,11 +97,7 @@ impl Recorder {
             .with_activity_id_attributes()
             .with_cgroup_attributes();
 
-        #[cfg(target_os = "linux")]
-        {
-            use one_collect::helpers::exporting::ExportSettingsLinuxExt;
-            settings = settings.with_perf_clock(self.args.perf_clock());
-        }
+        settings = self.args.os.apply_to(settings);
 
         // CPU sampling.
         if self.args.on_cpu() {
