@@ -291,6 +291,13 @@ impl Recorder {
                 debug!("Script-based configuration enabled");
                 let mut scripted = ScriptedUniversalExporter::new(settings);
 
+                if let Some(bytes) = self.args.buffer_size_bytes() {
+                    info!("Configuring total event buffer size: bytes={}", bytes);
+                    scripted.export_swapper().borrow_mut().swap(|exporter| {
+                        exporter.with_buffer_size_bytes(bytes)
+                    });
+                }
+
                 scripted.enable_os_scripting();
                 scripted.enable_dotnet_scripting();
 
@@ -308,7 +315,14 @@ impl Recorder {
             },
             None => {
                 debug!("Using default configuration");
-                UniversalExporter::new(settings)
+                match self.args.buffer_size_bytes() {
+                    Some(bytes) => {
+                        info!("Configuring total event buffer size: bytes={}", bytes);
+                        UniversalExporter::new(settings)
+                            .with_buffer_size_bytes(bytes)
+                    },
+                    None => UniversalExporter::new(settings),
+                }
             }
         }.with_dotnet_help(dotnet);
         

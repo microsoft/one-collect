@@ -96,6 +96,20 @@ const EVENT_TRACE_REAL_TIME_MODE: u32 = 256;
 const EVENT_TRACE_SYSTEM_LOGGER_MODE: u32 = 33554432;
 const EVENT_TRACE_INDEPENDENT_SESSION_MODE: u32 = 134217728;
 
+pub(super) struct BufferCounts {
+    pub(super) minimum: u32,
+    pub(super) maximum: u32,
+}
+
+pub(super) fn buffer_counts() -> BufferCounts {
+    let cpu_count = unsafe { GetActiveProcessorCount(0xFFFF) };
+
+    BufferCounts {
+        minimum: cpu_count * 4,
+        maximum: cpu_count * 32,
+    }
+}
+
 const PROCESS_TRACE_MODE_REAL_TIME: u32 = 256;
 const PROCESS_TRACE_MODE_RAW_TIMESTAMP: u32 = 4096;
 const PROCESS_TRACE_MODE_EVENT_RECORD: u32 = 268435456;
@@ -439,13 +453,13 @@ impl EVENT_TRACE_PROPERTIES {
     }
 
     fn with_wnode(wnode: WNODE_HEADER) -> Self {
-        let cpus = unsafe { GetActiveProcessorCount(0xFFFF) };
+        let buffer_counts = buffer_counts();
 
         Self {
             Wnode: wnode,
             BufferSize: 64,
-            MinimumBuffers: cpus * 4,
-            MaximumBuffers: cpus * 32,
+            MinimumBuffers: buffer_counts.minimum,
+            MaximumBuffers: buffer_counts.maximum,
             MaximumFileSize: 0,
             LogFileMode: EVENT_TRACE_REAL_TIME_MODE |
                 EVENT_TRACE_INDEPENDENT_SESSION_MODE |

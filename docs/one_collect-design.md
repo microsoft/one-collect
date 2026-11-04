@@ -253,6 +253,7 @@ let dotnet = UniversalDotNetHelper::default()
     .with_dynamic_symbols();
 
 let universal = UniversalExporter::new(settings)
+    .with_buffer_size_bytes(256 * 1024 * 1024)
     .with_dotnet_help(dotnet);
 
 println!("Capturing...");
@@ -281,6 +282,31 @@ The dotnet helper:
 ##### Scripting Integration (`helpers::scripting`)
 
 The scripting engine integrates at the universal layer, allowing runtime customization of event capture and data processing. It hooks into the `ExportMachine` before and after all data has been aggregated:
+
+`with_buffer_size_bytes(size)` requests a total event-buffer data capacity. It
+replaces the default capacity rather than raising it, so a small value reduces
+the capacity that would otherwise be used. The Universal layer normalizes the
+size for the active platform and enforces its minimum buffer size. The
+resulting data capacity does not exceed the requested total unless the 64 KiB
+minimum for each underlying buffer requires a larger capacity. That minimum
+applies to each buffer, so on Windows the ETW pool can exceed the requested
+total by the number of buffers in the pool. Because the total is divided across
+the buffers and then reduced to a size the platform accepts, the delivered
+capacity can be as low as half the request. Platform metadata is not included
+in this limit. On Linux, metadata adds one system page for each perf ring
+buffer, which is one for each online CPU plus one for the in-process ring.
+
+`with_per_cpu_buffer_bytes(size)` sets an upper bound for each underlying
+platform buffer. On Linux, this bounds each per-CPU perf ring buffer. On
+Windows, ETW uses a session-wide buffer pool, so it bounds each ETW buffer
+rather than a per-CPU allocation. A platform minimum may require a larger
+buffer than the requested bound.
+
+The two sizing models are mutually exclusive. A script that calls both
+functions is rejected, because one of the requested sizes would otherwise be
+discarded and the trace would run with a capacity the script never asked for.
+Calling either function more than once overrides the size requested by the
+earlier call.
 
 #### Utility Modules
 
