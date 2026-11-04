@@ -536,6 +536,7 @@ impl RingBufSessionBuilder {
 
         let mut source = RingBufDataSource::new(
             self.pages,
+            self.clock,
             self.target_pids.take(),
             self.target_cpus.take(),
             self.kernel_builder.take(),
@@ -546,7 +547,6 @@ impl RingBufSessionBuilder {
             self.soft_page_faults_builder.take(),
             self.hard_page_faults_builder.take());
 
-        source.clock = self.clock;
         source.build()?;
 
         let mut session = PerfSession::new(Box::new(source));
@@ -592,6 +592,7 @@ pub struct RingBufDataSource {
 impl RingBufDataSource {
     fn new(
         pages: usize,
+        clock: PerfClock,
         target_pids: Option<Vec<i32>>,
         target_cpus: Option<Vec<u16>>,
         kernel_builder: Option<RingBufBuilder<Kernel>>,
@@ -608,7 +609,7 @@ impl RingBufDataSource {
             leader_ids: HashMap::new(),
             ring_bufs: HashMap::new(),
             pages,
-            clock: PerfClock::default(),
+            clock,
             target_pids,
             target_cpus,
             kernel_builder,
@@ -904,7 +905,7 @@ impl RingBufDataSource {
         /* Insert a dummy CpuRingBuf at id=0 so that read_time() can
          * look up the attributes for in-process records (which use
          * identifier 0). */
-        let common_attrs = Rc::new(RingBufBuilder::common_attributes(self.clock));
+        let common_attrs = common.attributes.clone();
         self.ring_bufs.insert(0, CpuRingBuf::new(0, common_attrs));
 
         info!(
@@ -1498,6 +1499,7 @@ mod tests {
          * builder's target_cpus. */
         let mut source = RingBufDataSource::new(
             1,
+            PerfClock::default(),
             None,
             Some(vec![3u16, 1u16]),
             None,
@@ -1522,6 +1524,7 @@ mod tests {
         /* With no target_cpus, every leader CPU is selected. */
         let mut source = RingBufDataSource::new(
             1,
+            PerfClock::default(),
             None,
             None,
             None,
@@ -1573,7 +1576,7 @@ mod tests {
         reader.begin_reading(&mut cursor);
 
         let mut ring_bufs = std::collections::HashMap::new();
-        let common_attrs = std::rc::Rc::new(RingBufBuilder::common_attributes(PerfClock::default()));
+        let common_attrs = std::rc::Rc::new(RingBufBuilder::common_attributes());
         ring_bufs.insert(known_id, CpuRingBuf::new(0, common_attrs));
 
         /* First call: encounters the unknown id, advances past just that one

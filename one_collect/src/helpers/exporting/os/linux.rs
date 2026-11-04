@@ -17,7 +17,7 @@ use crate::openat::{OpenAt, DupFd};
 use crate::procfs;
 use crate::perf_event::{AncillaryData, PerfClock, PerfSession};
 use crate::perf_event::{RingBufSessionBuilder, RingBufBuilder};
-use crate::perf_event::rb::{RingBufOptions, cgroup_sample_supported, perf_timestamp};
+use crate::perf_event::rb::{RingBufOptions, cgroup_sample_supported};
 use crate::perf_event::abi::PERF_RECORD_MISC_SWITCH_OUT;
 use crate::helpers::callstack::{CallstackHelp, CallstackReader};
 use crate::helpers::exporting::*;
@@ -1719,7 +1719,7 @@ impl ExportMachineOSHooks for ExportMachine {
     }
 
     fn os_session_qpc_time(&self) -> u64 {
-        perf_timestamp(&RingBufBuilder::common_attributes(self.settings.os.clock))
+        self.settings.os.clock.timestamp()
     }
 
     fn os_qpc_freq() -> u64 {

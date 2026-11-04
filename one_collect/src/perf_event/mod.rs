@@ -50,6 +50,28 @@ impl PerfClock {
             Self::MonotonicRaw => libc::CLOCK_MONOTONIC_RAW,
         }
     }
+
+    /// Read nanoseconds in this clock domain, returning zero if the OS read fails.
+    pub fn timestamp(self) -> u64 {
+        unsafe {
+            let mut tp = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+
+            match libc::clock_gettime(
+                self.clock_id(),
+                &mut tp) {
+                0 => {
+                    ((tp.tv_sec * 1000000000) + tp.tv_nsec) as u64
+                }
+                _ => {
+                    error!("clock_gettime failed: clock={:?}, error={}", self, std::io::Error::last_os_error());
+                    0
+                }
+            }
+        }
+    }
 }
 
 #[derive(Default)]

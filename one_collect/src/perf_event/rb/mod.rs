@@ -183,6 +183,8 @@ pub(super) fn ring_data_bytes(page_count: usize) -> usize {
     page_count.next_power_of_two() * page_size
 }
 
+/// Legacy attribute-based clock read. Prefer the session's resolved `PerfClock`.
+#[deprecated(note = "Use PerfClock::timestamp() with the resolved session clock")]
 pub fn perf_timestamp(
     attr: &perf_event_attr) -> u64 {
     unsafe {
@@ -244,16 +246,14 @@ pub struct RingBufBuilder<T = Profiling> {
 }
 
 impl RingBufBuilder {
-    pub(crate) fn common_attributes(clock: PerfClock) -> perf_event_attr {
+    pub(crate) fn common_attributes() -> perf_event_attr {
         perf_event_attr {
             size: PERF_ATTR_SIZE_VER4,
-            flags: FLAG_USE_CLOCKID |
-                FLAG_SAMPLE_ID_ALL |
+            flags: FLAG_SAMPLE_ID_ALL |
                 FLAG_DISABLED |
                 FLAG_EXCLUDE_HV |
                 FLAG_EXCLUDE_IDLE |
                 FLAG_INHERIT,
-            clockid: clock.clock_id(),
             read_format: abi::PERF_FORMAT_ID,
             sample_type: abi::PERF_SAMPLE_IDENTIFIER |
                 abi::PERF_SAMPLE_TIME |
@@ -264,7 +264,7 @@ impl RingBufBuilder {
     }
 
     pub fn for_kernel() -> RingBufBuilder<Kernel> {
-        let mut attributes = Self::common_attributes(PerfClock::default());
+        let mut attributes = Self::common_attributes();
 
         attributes.event_type = PERF_TYPE_SOFTWARE;
         attributes.config = PERF_COUNT_SW_DUMMY;
@@ -276,7 +276,7 @@ impl RingBufBuilder {
     }
 
     pub fn for_cswitches() -> RingBufBuilder<ContextSwitches> {
-        let mut attributes = Self::common_attributes(PerfClock::default());
+        let mut attributes = Self::common_attributes();
 
         attributes.event_type = PERF_TYPE_SOFTWARE;
         attributes.config = PERF_COUNT_SW_CONTEXT_SWITCHES;
@@ -289,7 +289,7 @@ impl RingBufBuilder {
     }
 
     pub fn for_soft_page_faults() -> RingBufBuilder<PageFaults> {
-        let mut attributes = Self::common_attributes(PerfClock::default());
+        let mut attributes = Self::common_attributes();
 
         attributes.event_type = PERF_TYPE_SOFTWARE;
         attributes.config = PERF_COUNT_SW_PAGE_FAULTS_MIN;
@@ -302,7 +302,7 @@ impl RingBufBuilder {
     }
 
     pub fn for_hard_page_faults() -> RingBufBuilder<PageFaults> {
-        let mut attributes = Self::common_attributes(PerfClock::default());
+        let mut attributes = Self::common_attributes();
 
         attributes.event_type = PERF_TYPE_SOFTWARE;
         attributes.config = PERF_COUNT_SW_PAGE_FAULTS_MAJ;
@@ -316,7 +316,7 @@ impl RingBufBuilder {
 
     pub fn for_profiling(
         sampling_frequency: u64) -> RingBufBuilder<Profiling> {
-        let mut attributes = Self::common_attributes(PerfClock::default());
+        let mut attributes = Self::common_attributes();
 
         attributes.event_type = PERF_TYPE_SOFTWARE;
         attributes.config = PERF_COUNT_SW_CPU_CLOCK;
@@ -330,7 +330,7 @@ impl RingBufBuilder {
     }
 
     pub fn for_tracepoint() -> RingBufBuilder<Tracepoint> {
-        let mut attributes = Self::common_attributes(PerfClock::default());
+        let mut attributes = Self::common_attributes();
 
         attributes.event_type = PERF_TYPE_TRACEPOINT;
         attributes.sample_period_freq = 1;
@@ -344,7 +344,7 @@ impl RingBufBuilder {
     }
 
     pub fn for_bpf() -> RingBufBuilder<Bpf> {
-        let mut attributes = Self::common_attributes(PerfClock::default());
+        let mut attributes = Self::common_attributes();
 
         attributes.event_type = PERF_TYPE_SOFTWARE;
         attributes.config = PERF_COUNT_SW_BPF_OUTPUT;
@@ -1207,7 +1207,7 @@ impl InProcessRingBuf {
 
 impl InProcessRingBufWriter {
     pub(crate) fn timestamp(&self) -> u64 {
-        perf_timestamp(&RingBufBuilder::common_attributes(self.clock))
+        self.clock.timestamp()
     }
 
     /// Maximum time to spin-wait for space to become available (100 ms).
