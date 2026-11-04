@@ -36,6 +36,8 @@ version 1.0 release.
 ## Features
 
 - `scripting` *(default)* — enables the Rhai-based scripting support.
+- `export-pprof` *(default)* — enables pprof export and its compression and protobuf
+  dependencies.
 
 ## License
 

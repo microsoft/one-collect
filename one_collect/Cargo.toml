@@ -21,14 +21,15 @@ exclude = [
 ]
 
 [features]
-default = ["scripting"]
+default = ["scripting", "export-pprof"]
 scripting = []
+export-pprof = ["dep:protobuf", "dep:flate2"]
 
 [dependencies]
 anyhow = "1.0.75"
 twox-hash = "1.6.3"
-protobuf = "3.7.*"
-flate2 = "1.0.31"
+protobuf = { version = "3.7.*", optional = true }
+flate2 = { version = "1.0.31", optional = true }
 chrono = "0.4.39"
 rhai = "1.21.0"
 sha1 = "0.10.6"
@@ -65,6 +66,7 @@ libc = "0.2.153"
 
 [dev-dependencies]
 criterion = "0.5"
+protobuf = "3.7.*"
 
 # Windows-only dev-deps used by the TDH decoder integration tests under
 # `tests/etw_tdh_integration.rs`. These crates emit real ETW TraceLogging
