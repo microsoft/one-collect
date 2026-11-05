@@ -113,10 +113,12 @@ jobs:
   # binary which starts a real ETW consumer session: `etw_tdh_integration`
   # emits real ETW TraceLogging events and decodes them through
   # `TdhDecoder`, while `etw_stats_integration` asserts on the live
-  # loss/health counters returned by `query_stats`.  Tests are
-  # `#[ignore]`'d because they require elevation to start an ETW session;
-  # `windows-latest` runners execute as `runneradmin`, which satisfies
-  # that.  Targeting each binary by name avoids sweeping up unrelated
+  # loss/health counters returned by `query_stats`. `etw_session_integration`
+  # checks mixed system/user collection and classic kernel stacks. Tests are
+  # `#[ignore]`'d because live sessions need ETW permissions. Ordinary
+  # provider tests can use Performance Log Users membership; manifest
+  # installation still needs elevation. `windows-latest` runners execute
+  # as `runneradmin`, satisfying both. Targeting each binary avoids unrelated
   # `#[ignore]`'d unit tests in `src/**`.  `--test-threads=1` serialises
   # the tests because each one owns a process-global ETW consumer session.
   integration_etw_windows_x64:
@@ -139,6 +141,9 @@ jobs:
       - name: Run etw_stats_integration
         working-directory: one_collect
         run: cargo test --locked --test etw_stats_integration -- --ignored --nocapture --test-threads=1
+      - name: Run etw_session_integration
+        working-directory: one_collect
+        run: cargo test --locked --test etw_session_integration -- --ignored --nocapture --test-threads=1
 
   # Benchmarks ordered by OS (linux, windows) then platform (glibc, musl)
   bench_linux_glibc_x64:

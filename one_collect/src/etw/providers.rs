@@ -67,7 +67,7 @@ pub struct RegisteredProvider {
 ///
 /// Both types are `#[repr(C)]` with identical `data1/2/3/4` fields, so this is
 /// a straight field copy.
-const fn win32_guid_to_guid(g: &windows_sys::core::GUID) -> Guid {
+pub(super) const fn win32_guid_to_guid(g: &windows_sys::core::GUID) -> Guid {
     Guid {
         data1: g.data1,
         data2: g.data2,
