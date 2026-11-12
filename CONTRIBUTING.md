@@ -44,6 +44,29 @@ cd record-trace
 cargo build
 ```
 
+### Versioning
+
+The `[package].version` in `one_collect/Cargo.toml` is the authoritative source
+of the major and minor versions. Public builds use `MAJOR.MINOR.0-dev`, so local
+builds, including `record-trace --version`, retain the `-dev` suffix.
+
+To change the major or minor version, submit a GitHub pull request updating the
+package versions in all four manifests together:
+
+- `one_collect/Cargo.toml`
+- `record-trace/Cargo.toml`
+- `record-trace/engine/Cargo.toml`
+- `record-trace/ffi/Cargo.toml`
+
+Update the corresponding package entries in all four `Cargo.lock` files as part
+of the same change; CI builds with `--locked`.
+
+Official builds read the major and minor versions from `one_collect/Cargo.toml`
+and generate the patch version in the build pipeline. They stamp the crate
+versions in the build checkout without changing the public development versions.
+An official build that does not change the major or minor version needs no
+versioning pull request.
+
 ### Running Tests
 
 To run tests for the main library:
