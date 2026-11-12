@@ -317,7 +317,7 @@ dependencies = [
 
 [[package]]
 name = "engine"
-version = "0.0.0-dev"
+version = "0.2.0-dev"
 dependencies = [
  "anyhow",
  "clap",
@@ -536,7 +536,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "one_collect"
-version = "0.0.0-dev"
+version = "0.2.0-dev"
 dependencies = [
  "anyhow",
  "chrono",
@@ -650,7 +650,7 @@ dependencies = [
 
 [[package]]
 name = "record-trace"
-version = "0.0.0-dev"
+version = "0.2.0-dev"
 dependencies = [
  "ctrlc",
  "engine",

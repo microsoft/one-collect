@@ -1,7 +1,7 @@
 [package]
 name = "recordtrace"
 description = "Record a machine-level trace using one-collect engine."
-version = "0.0.0-dev"
+version = "0.2.0-dev"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/microsoft/one-collect"
