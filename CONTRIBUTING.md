@@ -25,7 +25,7 @@ To build and test this repository, you need:
 
 ### Building the Project
 
-This repository contains multiple Rust crates in a Cargo workspace:
+This repository contains multiple Rust crates:
 
 - `one_collect/` - Main library for event and profiling data collection
 - `record-trace/` - Command-line tool built on top of one_collect
@@ -46,17 +46,22 @@ cargo build
 
 ### Versioning
 
-The `[workspace.package].version` in the root `Cargo.toml` is the authoritative
-source of the major and minor versions. All four crates inherit this version
-using `version.workspace = true`. Public builds use `MAJOR.MINOR.0-dev`, so local
+The `[package].version` in `one_collect/Cargo.toml` is the authoritative source
+of the major and minor versions. Public builds use `MAJOR.MINOR.0-dev`, so local
 builds, including `record-trace --version`, retain the `-dev` suffix.
 
-To change the major or minor version, submit a GitHub pull request updating this
-single workspace version. Run `cargo check --workspace` to refresh the package
-entries in the root `Cargo.lock` and include it in the same change; CI builds
-with `--locked`.
+To change the major or minor version, submit a GitHub pull request updating the
+package versions in all four manifests together:
 
-Official builds read the major and minor versions from the root `Cargo.toml`
+- `one_collect/Cargo.toml`
+- `record-trace/Cargo.toml`
+- `record-trace/engine/Cargo.toml`
+- `record-trace/ffi/Cargo.toml`
+
+Update the corresponding package entries in all four `Cargo.lock` files as part
+of the same change; CI builds with `--locked`.
+
+Official builds read the major and minor versions from `one_collect/Cargo.toml`
 and generate the patch version in the build pipeline. They stamp the crate
 versions in the build checkout without changing the public development versions.
 An official build that does not change the major or minor version needs no

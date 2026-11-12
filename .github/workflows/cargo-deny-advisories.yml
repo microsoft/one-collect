@@ -36,11 +36,18 @@ jobs:
     - name: Install cargo-deny
       run: cargo install cargo-deny --locked
 
-    # Save the full workspace scan output for the tracking issue.
+    # Check both crate roots in a single step so record-trace is always scanned
+    # even when one_collect reports an advisory (separate steps would stop at the
+    # first failure). The combined output is saved for the tracking issue.
     - name: cargo deny check advisories
-      shell: bash
       run: |
-        cargo deny --workspace --config deny.toml check advisories 2>&1 | tee advisory-report.txt
+        status=0
+        echo "## one_collect" | tee advisory-report.txt
+        cargo deny --manifest-path one_collect/Cargo.toml --config deny.toml check advisories 2>&1 | tee -a advisory-report.txt || status=1
+        echo "" | tee -a advisory-report.txt
+        echo "## record-trace" | tee -a advisory-report.txt
+        cargo deny --manifest-path record-trace/Cargo.toml --config deny.toml check advisories 2>&1 | tee -a advisory-report.txt || status=1
+        exit $status
 
     # File a single tracking issue (or comment on the existing open one so we do
     # not open a new issue every day) when advisories are found.
