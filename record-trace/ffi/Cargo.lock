@@ -279,7 +279,7 @@ dependencies = [
 
 [[package]]
 name = "engine"
-version = "0.1.0-dev"
+version = "0.2.0-dev"
 dependencies = [
  "anyhow",
  "clap",
@@ -470,7 +470,7 @@ checksum = "a4895175b425cb1f87721b59f0f286c2092bd4af812243672510e1ac53e2e0ad"
 
 [[package]]
 name = "one_collect"
-version = "0.1.0-dev"
+version = "0.2.0-dev"
 dependencies = [
  "anyhow",
  "chrono",
@@ -584,7 +584,7 @@ dependencies = [
 
 [[package]]
 name = "recordtrace"
-version = "0.1.0-dev"
+version = "0.2.0-dev"
 dependencies = [
  "engine",
  "tracing",
