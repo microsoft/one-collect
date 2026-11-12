@@ -30,9 +30,11 @@ This repository contains multiple Rust crates in a Cargo workspace:
 - `one_collect/` - Main library for event and profiling data collection
 - `record-trace/` - Command-line tool built on top of one_collect
 
-The crates share the root `Cargo.lock` and `target/` output directory. Commands
-can run from individual crate directories as shown below, or from the repository
-root using `-p` to select a package. Release builds use link-time optimization
+The crates share the root `Cargo.lock`. Build from individual crate directories
+as shown below to keep outputs in each crate's existing `target/` directory;
+member-local Cargo configuration preserves these paths. Commands run from the
+repository root use the root `target/` directory instead, even when selecting a
+member with `-p` or `--manifest-path`. Release builds use link-time optimization
 configured in the root manifest.
 
 To build the main library:
