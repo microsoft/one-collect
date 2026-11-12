@@ -46,9 +46,11 @@ cargo build
 
 ### Versioning
 
-The `[package].version` in `one_collect/Cargo.toml` is the authoritative source
-of the major and minor versions. Public builds use `MAJOR.MINOR.0-dev`, so local
-builds, including `record-trace --version`, retain the `-dev` suffix.
+Versioning is controlled per crate by `[package].version` in each crate's
+`Cargo.toml`. The versions are kept in sync across all four crates, with
+`one_collect/Cargo.toml` providing the authoritative major and minor versions
+for official builds. Public builds use `MAJOR.MINOR.0-dev`, so local builds,
+including `record-trace --version`, retain the `-dev` suffix.
 
 To change the major or minor version, submit a GitHub pull request updating the
 package versions in all four manifests together:
