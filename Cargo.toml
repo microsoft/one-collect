@@ -1,0 +1,14 @@
+[workspace]
+members = [
+    "one_collect",
+    "record-trace",
+    "record-trace/engine",
+    "record-trace/ffi",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0-dev"
+
+[profile.release]
+lto = true

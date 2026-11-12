@@ -12,7 +12,7 @@ RUN cargo build --release --example perf_export
 # Create a deployment container.
 FROM ubuntu:latest as deployment
 COPY --from=build \
-    /one-collect/one_collect/target/release/examples/perf_export \
+    /one-collect/target/release/examples/perf_export \
     /one-collect/perf_export
 
 RUN mkdir /perf_export_data

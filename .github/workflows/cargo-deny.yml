@@ -30,10 +30,5 @@ jobs:
     - name: Install cargo-deny
       run: cargo install cargo-deny --locked
 
-    # There is no workspace-level Cargo.toml, so each crate root is checked
-    # against the shared repo-root deny.toml.
-    - name: 'one_collect: cargo deny check'
-      run: cargo deny --manifest-path one_collect/Cargo.toml --config deny.toml check bans licenses sources
-
-    - name: 'record-trace: cargo deny check'
-      run: cargo deny --manifest-path record-trace/Cargo.toml --config deny.toml check bans licenses sources
+    - name: 'Workspace: cargo deny check'
+      run: cargo deny --workspace --config deny.toml check bans licenses sources

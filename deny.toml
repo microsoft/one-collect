@@ -4,8 +4,7 @@
 # duplicate crates, license compliance, and untrusted sources. See
 # https://embarkstudios.github.io/cargo-deny/ for the configuration reference.
 #
-# There is no workspace-level Cargo.toml, so CI runs cargo-deny once per crate
-# root (one_collect and record-trace) against this shared config.
+# CI audits all workspace members against this shared config and root lockfile.
 
 [graph]
 # Restrict the audited graph to the platforms one-collect actually ships and
