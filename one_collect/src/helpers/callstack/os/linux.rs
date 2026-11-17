@@ -152,7 +152,12 @@ impl MachineState {
 
     fn exit(
         &mut self,
-        pid: u32) {
+        pid: u32,
+        tid: u32) {
+        if pid != tid {
+            return;
+        }
+
         self.machine.remove_process(pid);
         debug!("Process removed from callstack tracking: pid={}", pid);
     }
@@ -751,6 +756,7 @@ impl CallstackHelp for RingBufSessionBuilder {
                 let event = session.exit_event();
                 let fmt = event.format();
                 let pid = fmt.get_field_ref_unchecked("pid");
+                let tid = fmt.get_field_ref_unchecked("tid");
                 let state = session_state.clone();
 
                 event.add_callback(move |data| {
@@ -758,9 +764,10 @@ impl CallstackHelp for RingBufSessionBuilder {
                     let data = data.event_data();
 
                     let pid = fmt.get_u32(pid, data)?;
+                    let tid = fmt.get_u32(tid, data)?;
 
                     state.write(|state| {
-                        state.exit(pid);
+                        state.exit(pid, tid);
                     });
 
                     Ok(())
@@ -773,6 +780,22 @@ impl CallstackHelp for RingBufSessionBuilder {
 mod tests {
     use super::*;
     use crate::tracefs::TraceFS;
+
+    #[test]
+    fn thread_exit_preserves_process_unwind_state() {
+        let mut state = MachineState::new();
+        state.add_comm_exec(123);
+        state.add_mmap_exec(123, 0x1000, 0x1000, 0, 0, 0, 0, "[anonymous]");
+
+        state.exit(123, 456);
+
+        let process = state.machine.find_process(123).unwrap();
+        assert!(process.find(0x1000).is_some());
+
+        state.exit(123, 123);
+
+        assert!(state.machine.find_process(123).is_none());
+    }
 
     #[test]
     #[ignore]

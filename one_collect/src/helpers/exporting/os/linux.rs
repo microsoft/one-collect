@@ -1246,6 +1246,7 @@ impl OSExportMachine {
         let event_machine = machine.clone();
         let fmt = event.format();
         let pid = fmt.get_field_ref_unchecked("pid");
+        let tid = fmt.get_field_ref_unchecked("tid");
 
         event.add_callback(move |data| {
             let fmt = data.format();
@@ -1253,6 +1254,11 @@ impl OSExportMachine {
             let data = data.event_data();
 
             let pid = fmt.get_u32(pid, data)?;
+            let tid = fmt.get_u32(tid, data)?;
+
+            if pid != tid {
+                return Ok(());
+            }
 
             event_machine.borrow_mut().add_comm_exit(
                 pid,
@@ -2007,6 +2013,39 @@ mod tests {
         session.parse_all().unwrap();
 
         assert_eq!(8, exporter.borrow().lost_events());
+    }
+
+    #[test]
+    fn thread_exit_does_not_set_process_exit_time() {
+        let source = LostDataSource::new(Vec::new());
+        let mut session = PerfSession::new(Box::new(source));
+        let settings = ExportSettings::new(CallstackHelper::new());
+        let exporter = session.build_exporter(settings).unwrap();
+        exporter.borrow_mut().add_comm_exec(123, "test", 1).unwrap();
+
+        let time_field = session.time_data_ref();
+        time_field.update(16, 8);
+        let mut errors = Vec::new();
+
+        for (tid, time, expected_exit) in [
+            (456u32, 10u64, None),
+            (123, 20, Some(20)),
+            (789, 30, Some(20)),
+        ] {
+            let mut data = Vec::new();
+            data.extend_from_slice(&123u32.to_ne_bytes());
+            data.extend_from_slice(&1u32.to_ne_bytes());
+            data.extend_from_slice(&tid.to_ne_bytes());
+            data.extend_from_slice(&1u32.to_ne_bytes());
+            data.extend_from_slice(&time.to_ne_bytes());
+
+            session.exit_event().process(&data, &data, &mut errors);
+
+            assert!(errors.is_empty(), "{:?}", errors);
+            assert_eq!(
+                exporter.borrow().find_process(123).unwrap().exit_time_qpc(),
+                expected_exit);
+        }
     }
 
     #[test]
