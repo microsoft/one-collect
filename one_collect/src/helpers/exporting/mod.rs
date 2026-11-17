@@ -1870,6 +1870,23 @@ impl ExportMachine {
         &self.kernel_dynamic_symbols
     }
 
+    /// Records that `name` was observed loaded at `[address, address + len)`
+    /// at `time` by enumerating the system (e.g. already loaded BPF
+    /// programs). Unlike [`Self::add_kernel_dynamic_symbol`], this may be
+    /// called at any point relative to records; snapshots are reconciled
+    /// with records when kernel mappings are added.
+    pub fn add_kernel_dynamic_snapshot(
+        &mut self,
+        time: u64,
+        address: u64,
+        len: u64,
+        kind: KernelDynamicSymbolKind,
+        name: &str) {
+        let name_id = self.strings.to_id(name);
+
+        self.kernel_dynamic_symbols.add_snapshot(time, address, len, kind, name_id);
+    }
+
     pub fn capture_file_symbol_metadata(&mut self) {
         self.os_capture_file_symbol_metadata();
     }

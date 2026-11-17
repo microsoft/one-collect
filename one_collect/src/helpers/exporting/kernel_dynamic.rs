@@ -124,6 +124,18 @@ pub struct KernelDynamicSymbolStats {
     /// Records with an empty or overflowing extent, which are ignored so
     /// their addresses stay unknown.
     pub invalid: u64,
+    /// Symbols taken from a snapshot of already loaded code that were not
+    /// otherwise described by records.
+    pub snapshot_symbols: u64,
+}
+
+#[derive(Clone, Debug)]
+struct SnapshotSymbol {
+    time: u64,
+    start: u64,
+    len: u64,
+    kind: KernelDynamicSymbolKind,
+    name_id: usize,
 }
 
 /// Time-scoped store of kernel dynamic symbols.
@@ -131,6 +143,7 @@ pub struct KernelDynamicSymbolStats {
 pub struct KernelDynamicSymbols {
     symbols: Vec<KernelDynamicSymbol>,
     open: HashMap<u64, usize>,
+    snapshots: Vec<SnapshotSymbol>,
     stats: KernelDynamicSymbolStats,
 }
 
@@ -285,6 +298,96 @@ impl KernelDynamicSymbols {
             });
 
         self.stats.unmatched_unregisters += 1;
+    }
+
+    /// Records that `name_id` was observed loaded at `[address, address + len)`
+    /// at `time` by a snapshot of the system (e.g. enumerating loaded BPF
+    /// programs). Unlike records, snapshots may be added in any order
+    /// relative to records; they are reconciled by [`Self::apply_snapshots`].
+    pub fn add_snapshot(
+        &mut self,
+        time: u64,
+        address: u64,
+        len: u64,
+        kind: KernelDynamicSymbolKind,
+        name_id: usize) {
+        if !Self::valid_extent(address, len) {
+            self.stats.invalid += 1;
+            return;
+        }
+
+        self.snapshots.push(
+            SnapshotSymbol {
+                time,
+                start: address,
+                len,
+                kind,
+                name_id,
+            });
+    }
+
+    /// Reconciles snapshot symbols with the recorded generations. Must be
+    /// called after all records have been supplied and before lookups.
+    ///
+    /// A snapshot symbol already described by a generation live at the
+    /// snapshot time is ignored. Otherwise a generation is added that is
+    /// valid from the latest unload of overlapping code before the snapshot
+    /// until the earliest load of overlapping code after it, or until the
+    /// end of tracking when nothing replaced it.
+    pub fn apply_snapshots(&mut self) {
+        let snapshots = std::mem::take(&mut self.snapshots);
+
+        for snapshot in snapshots {
+            let end_exclusive = snapshot.start + snapshot.len;
+            let mut load_time = 0;
+            let mut unload_time: Option<u64> = None;
+            let mut described = false;
+
+            for symbol in &self.symbols {
+                if !symbol.overlaps(snapshot.start, end_exclusive) {
+                    continue;
+                }
+
+                if symbol.is_live_at(snapshot.time) {
+                    described = true;
+                    break;
+                }
+
+                if symbol.load_time > snapshot.time {
+                    unload_time = Some(
+                        unload_time.map_or(
+                            symbol.load_time,
+                            |unload| unload.min(symbol.load_time)));
+                } else if let Some(unload) = symbol.unload_time {
+                    load_time = load_time.max(unload);
+                }
+            }
+
+            if described {
+                continue;
+            }
+
+            if unload_time.is_none() {
+                if self.open.contains_key(&snapshot.start) {
+                    continue;
+                }
+
+                self.open.insert(snapshot.start, self.symbols.len());
+            }
+
+            self.symbols.push(
+                KernelDynamicSymbol {
+                    start: snapshot.start,
+                    len: snapshot.len,
+                    name_id: snapshot.name_id,
+                    kind: snapshot.kind,
+                    load_time,
+                    unload_time,
+                    load_observed: false,
+                });
+
+            self.stats.snapshot_symbols += 1;
+        }
     }
 
     /// Finds the generation containing `address` that was live at `time`.
@@ -456,5 +559,57 @@ mod tests {
         assert_eq!(X + 63, symbols.clip_end(X + 8, X + 0x1000));
         /* Unrelated symbols are untouched */
         assert_eq!(X + 0x2000, symbols.clip_end(X + 0x1000, X + 0x2000));
+    }
+
+    #[test]
+    fn snapshot_without_records_stays_open() {
+        let bpf = KernelDynamicSymbolKind::Bpf;
+        let mut symbols = KernelDynamicSymbols::new();
+
+        symbols.add_snapshot(SEC, X, 64, bpf, 1);
+        symbols.apply_snapshots();
+
+        assert_eq!(Some(1), names(&symbols, X, 0));
+        assert_eq!(Some(1), names(&symbols, X + 63, 10 * SEC));
+        assert!(symbols.open_contains(X + 63));
+        assert_eq!(1, symbols.stats().snapshot_symbols);
+    }
+
+    #[test]
+    fn snapshot_bounded_by_surrounding_generations() {
+        let bpf = KernelDynamicSymbolKind::Bpf;
+        let mut symbols = KernelDynamicSymbols::new();
+
+        /* Unloaded before the snapshot; a register for 2 was never seen */
+        symbols.unregister(SEC, X, 64, bpf, 9);
+        /* Program 2 unloaded and its address reused by 3 after the snapshot */
+        symbols.register(5 * SEC, X, 32, bpf, 3);
+        symbols.add_snapshot(3 * SEC, X, 64, bpf, 2);
+        symbols.apply_snapshots();
+
+        assert_eq!(Some(9), names(&symbols, X, SEC - 1));
+        assert_eq!(Some(2), names(&symbols, X, SEC));
+        assert_eq!(Some(2), names(&symbols, X + 40, 4 * SEC));
+        assert_eq!(Some(3), names(&symbols, X, 5 * SEC));
+        assert_eq!(None, names(&symbols, X + 40, 5 * SEC));
+        assert!(!symbols.open_contains(X + 40));
+    }
+
+    #[test]
+    fn snapshot_described_by_records_is_ignored() {
+        let bpf = KernelDynamicSymbolKind::Bpf;
+        let mut symbols = KernelDynamicSymbols::new();
+
+        /* Loaded before tracking, unloaded during it */
+        symbols.unregister(4 * SEC, X, 64, bpf, 1);
+        /* Loaded during tracking, before the snapshot */
+        symbols.register(SEC, X + 0x100, 64, bpf, 2);
+        symbols.add_snapshot(2 * SEC, X, 64, bpf, 1);
+        symbols.add_snapshot(2 * SEC, X + 0x100, 64, bpf, 2);
+        symbols.apply_snapshots();
+
+        assert_eq!(2, symbols.symbols().len());
+        assert_eq!(0, symbols.stats().snapshot_symbols);
+        assert_eq!(None, names(&symbols, X, 4 * SEC));
     }
 }

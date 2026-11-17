@@ -1561,6 +1561,8 @@ impl ExportMachineOSHooks for ExportMachine {
         let mut all_addrs: Vec<u64> = all_addrs_set.into_iter().collect();
         all_addrs.sort();
 
+        self.kernel_dynamic_symbols.apply_snapshots();
+
         let dynamic = &self.kernel_dynamic_symbols;
 
         if !dynamic.is_empty() {
@@ -1568,10 +1570,11 @@ impl ExportMachineOSHooks for ExportMachine {
 
             info!("Kernel dynamic symbols: generations={}, registers={}, unregisters={}, \
                 unmatched_unregisters={}, implicit_unloads={}, mismatched_unregisters={}, \
-                duplicates={}, invalid={}",
+                duplicates={}, invalid={}, snapshot_symbols={}",
                 dynamic.symbols().len(), stats.registers, stats.unregisters,
                 stats.unmatched_unregisters, stats.implicit_unloads,
-                stats.mismatched_unregisters, stats.duplicates, stats.invalid);
+                stats.mismatched_unregisters, stats.duplicates, stats.invalid,
+                stats.snapshot_symbols);
 
             if stats.implicit_unloads != 0 || stats.mismatched_unregisters != 0 {
                 warn!("Kernel dynamic symbol records were lost or inconsistent, \
@@ -1987,6 +1990,193 @@ impl ExportSessionHelp for PerfSession {
     }
 }
 
+/* Loaded BPF program function as seen by snapshot_bpf_programs */
+struct LoadedBpfFunction {
+    start: u64,
+    len: u64,
+    name: String,
+}
+
+/*
+ * Enumerates loaded BPF programs and returns the extent and name of each JIT
+ * compiled function. This requires CAP_SYS_ADMIN; on failure what was found
+ * so far is returned.
+ */
+fn loaded_bpf_functions() -> Vec<LoadedBpfFunction> {
+    const BPF_PROG_GET_NEXT_ID: libc::c_long = 11;
+    const BPF_PROG_GET_FD_BY_ID: libc::c_long = 13;
+    const BPF_OBJ_GET_INFO_BY_FD: libc::c_long = 15;
+
+    /* Offsets within struct bpf_prog_info (linux/bpf.h) */
+    const INFO_TAG: usize = 8;
+    const INFO_NAME: usize = 64;
+    const INFO_NR_JITED_KSYMS: usize = 104;
+    const INFO_NR_JITED_FUNC_LENS: usize = 108;
+    const INFO_JITED_KSYMS: usize = 112;
+    const INFO_JITED_FUNC_LENS: usize = 120;
+    const INFO_LEN: usize = 128;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct NextIdAttr { start_id: u32, next_id: u32, open_flags: u32 }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct FdByIdAttr { prog_id: u32, next_id: u32, open_flags: u32 }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct InfoAttr { bpf_fd: u32, info_len: u32, info: u64 }
+
+    fn bpf<T>(cmd: libc::c_long, attr: &mut T) -> libc::c_long {
+        unsafe {
+            libc::syscall(
+                libc::SYS_bpf,
+                cmd,
+                attr as *mut T,
+                std::mem::size_of::<T>() as libc::c_uint)
+        }
+    }
+
+    fn get_info(fd: i32, info: &mut [u8; INFO_LEN]) -> bool {
+        let mut attr = InfoAttr {
+            bpf_fd: fd as u32,
+            info_len: INFO_LEN as u32,
+            info: info.as_mut_ptr() as u64,
+        };
+
+        bpf(BPF_OBJ_GET_INFO_BY_FD, &mut attr) == 0
+    }
+
+    fn u32_at(info: &[u8], offset: usize) -> u32 {
+        u32::from_ne_bytes(info[offset..offset + 4].try_into().unwrap())
+    }
+
+    /* Prefer the exact names kallsyms uses (BTF function names, etc.) */
+    let mut kallsyms_names: HashMap<u64, String> = HashMap::new();
+
+    if let Ok(kallsyms) = std::fs::read_to_string("/proc/kallsyms") {
+        for line in kallsyms.lines() {
+            if !line.ends_with("[bpf]") {
+                continue;
+            }
+
+            let mut parts = line.split_whitespace();
+
+            if let (Some(addr), Some(_), Some(name)) = (parts.next(), parts.next(), parts.next()) {
+                if let Ok(addr) = u64::from_str_radix(addr, 16) {
+                    kallsyms_names.insert(addr, name.to_string());
+                }
+            }
+        }
+    }
+
+    let mut functions = Vec::new();
+    let mut id = 0u32;
+
+    loop {
+        let mut next = NextIdAttr { start_id: id, ..Default::default() };
+
+        if bpf(BPF_PROG_GET_NEXT_ID, &mut next) != 0 {
+            let err = std::io::Error::last_os_error();
+
+            if err.raw_os_error() != Some(libc::ENOENT) {
+                debug!("Unable to enumerate BPF programs: {}", err);
+            }
+
+            break;
+        }
+
+        id = next.next_id;
+
+        let mut by_id = FdByIdAttr { prog_id: id, ..Default::default() };
+        let fd = bpf(BPF_PROG_GET_FD_BY_ID, &mut by_id);
+
+        if fd < 0 {
+            /* Unloaded since it was enumerated */
+            continue;
+        }
+
+        let fd = fd as i32;
+        let mut info = [0u8; INFO_LEN];
+
+        if get_info(fd, &mut info) {
+            let count = u32_at(&info, INFO_NR_JITED_KSYMS)
+                .min(u32_at(&info, INFO_NR_JITED_FUNC_LENS)) as usize;
+
+            if count != 0 {
+                let mut ksyms = vec![0u64; count];
+                let mut lens = vec![0u32; count];
+
+                info = [0u8; INFO_LEN];
+                info[INFO_NR_JITED_KSYMS..INFO_NR_JITED_KSYMS + 4]
+                    .copy_from_slice(&(count as u32).to_ne_bytes());
+                info[INFO_NR_JITED_FUNC_LENS..INFO_NR_JITED_FUNC_LENS + 4]
+                    .copy_from_slice(&(count as u32).to_ne_bytes());
+                info[INFO_JITED_KSYMS..INFO_JITED_KSYMS + 8]
+                    .copy_from_slice(&(ksyms.as_mut_ptr() as u64).to_ne_bytes());
+                info[INFO_JITED_FUNC_LENS..INFO_JITED_FUNC_LENS + 8]
+                    .copy_from_slice(&(lens.as_mut_ptr() as u64).to_ne_bytes());
+
+                if get_info(fd, &mut info) {
+                    let mut tag = String::new();
+
+                    for byte in &info[INFO_TAG..INFO_TAG + 8] {
+                        let _ = write!(tag, "{:02x}", byte);
+                    }
+
+                    let prog_name = &info[INFO_NAME..INFO_NAME + 16];
+                    let prog_name_len = prog_name.iter().position(|b| *b == 0).unwrap_or(16);
+                    let prog_name = String::from_utf8_lossy(&prog_name[..prog_name_len]);
+
+                    for (start, len) in ksyms.iter().zip(lens.iter()) {
+                        if *start == 0 || *len == 0 {
+                            continue;
+                        }
+
+                        let name = match kallsyms_names.get(start) {
+                            Some(name) => { name.clone() },
+                            None => { format!("bpf_prog_{}_{}", tag, prog_name) },
+                        };
+
+                        functions.push(
+                            LoadedBpfFunction {
+                                start: *start,
+                                len: *len as u64,
+                                name,
+                            });
+                    }
+                }
+            }
+        }
+
+        unsafe { libc::close(fd); }
+    }
+
+    functions
+}
+
+/*
+ * Records BPF programs that are already loaded so that samples in them can
+ * be resolved even if they unload before the trace is finalized, when no
+ * register record was seen for them.
+ */
+fn snapshot_bpf_programs(machine: &mut ExportMachine) {
+    let time = ExportMachine::qpc_time();
+    let functions = loaded_bpf_functions();
+
+    debug!("Snapshot of loaded BPF programs: functions={}", functions.len());
+
+    for function in functions {
+        machine.add_kernel_dynamic_snapshot(
+            time,
+            function.start,
+            function.len,
+            KernelDynamicSymbolKind::Bpf,
+            &format!("[bpf] {}", function.name));
+    }
+}
+
 #[cfg(target_os = "linux")]
 impl UniversalExporterOSHooks for UniversalExporter {
     fn os_parse_until(
@@ -2027,6 +2217,14 @@ impl UniversalExporterOSHooks for UniversalExporter {
 
             exporter.borrow_mut().mark_start();
             session.enable()?;
+
+            /*
+             * Snapshot already loaded BPF programs after enabling so that
+             * anything unloaded later is covered by a ksymbol record.
+             */
+            if ksymbol_records_supported() {
+                snapshot_bpf_programs(&mut exporter.borrow_mut());
+            }
 
             /* Spawn capture_environment in a background thread so that
              * the ring buffers are already enabled when .NET diagnostic
@@ -2429,6 +2627,63 @@ mod tests {
         let proc = machine.find_process(10).unwrap();
         let vmlinux = proc.find_mapping(0xffffffff81000000, Some(0)).unwrap();
         assert!(vmlinux.symbols().is_empty());
+    }
+
+    #[test]
+    fn kernel_mappings_bpf_snapshot_unloaded_after_recording() {
+        let mut machine = kernel_test_machine();
+
+        let tail_fn = BPF_X - 0x100;
+        let other = BPF_X + 0x1000;
+
+        /*
+         * Program A was loaded before recording and found by the snapshot.
+         * It unloaded after recording stopped, so no record was seen, and
+         * program Q reused its address before finalization.
+         */
+        machine.add_kernel_dynamic_snapshot(
+            SEC, BPF_X, 256, KernelDynamicSymbolKind::Bpf, "[bpf] bpf_prog_a");
+
+        /*
+         * Program B was also found by the snapshot, then unloaded during
+         * recording. Its unregister record arrived before the snapshot was
+         * added, and must not be duplicated or extended by it.
+         */
+        add_bpf(&mut machine, 3 * SEC, other, 64, true, "[bpf] bpf_prog_b");
+        machine.add_kernel_dynamic_snapshot(
+            SEC, other, 64, KernelDynamicSymbolKind::Bpf, "[bpf] bpf_prog_b");
+
+        add_kernel_sample(&mut machine, 10, 2 * SEC, &[BPF_X + 8]);
+        add_kernel_sample(&mut machine, 10, 2 * SEC, &[BPF_X + 0x80]);
+        add_kernel_sample(&mut machine, 10, 2 * SEC, &[other + 8]);
+        add_kernel_sample(&mut machine, 10, 4 * SEC, &[other + 8]);
+
+        /*
+         * Finalization view: Q occupies part of A's old extent and the
+         * preceding symbol's inferred extent covers the rest.
+         */
+        let mut kallsyms = KallsymsMock::new(vec![
+            (tail_fn, BPF_X - 1, "tail_fn"),
+            (BPF_X, BPF_X + 0x3f, "[bpf] bpf_prog_q"),
+            (BPF_X + 0x40, other + 0x7ff, "after_q"),
+        ]);
+
+        machine.add_kernel_mappings_with(&mut kallsyms);
+
+        assert_eq!(
+            Some("[bpf] bpf_prog_a".to_string()),
+            resolve_kernel(&machine, 10, BPF_X + 8, 2 * SEC));
+        assert_eq!(
+            Some("[bpf] bpf_prog_a".to_string()),
+            resolve_kernel(&machine, 10, BPF_X + 0x80, 2 * SEC));
+        assert_eq!(
+            Some("[bpf] bpf_prog_b".to_string()),
+            resolve_kernel(&machine, 10, other + 8, 2 * SEC));
+        assert_eq!(None, resolve_kernel(&machine, 10, other + 8, 4 * SEC));
+
+        let stats = machine.kernel_dynamic_symbols().stats();
+        assert_eq!(1, stats.snapshot_symbols);
+        assert_eq!(2, machine.kernel_dynamic_symbols().symbols().len());
     }
 
     #[test]
