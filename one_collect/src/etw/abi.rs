@@ -803,31 +803,54 @@ impl TraceEnable {
         &self,
         handle: u64,
         target_pids: &Option<Vec<i32>>) -> anyhow::Result<()> {
+        self.with_enable_parameters(target_pids, |params| {
+            let result = unsafe {
+                EnableTraceEx2(
+                    handle,
+                    &self.provider,
+                    EVENT_CONTROL_CODE_ENABLE_PROVIDER,
+                    self.level,
+                    self.keyword,
+                    0,
+                    0,
+                    params)
+            };
+
+            if result != 0 {
+                anyhow::bail!("EnableTraceEx2 failed with {}", result);
+            }
+
+            Ok(())
+        })
+    }
+
+    fn with_enable_parameters(
+        &self,
+        target_pids: &Option<Vec<i32>>,
+        enable: impl FnOnce(&ENABLE_TRACE_PARAMETERS) -> anyhow::Result<()>) -> anyhow::Result<()> {
         let mut params = ENABLE_TRACE_PARAMETERS::default();
+
+        // Keep every descriptor and backing buffer alive through the enable call.
+        let events_filter;
+        let callstacks_filter;
+        let callstack_kw_filter;
+        let mut filters = Vec::new();
 
         if !self.no_filtering {
             let mut events = EVENT_FILTER_DESCRIPTOR::default();
-            let events_filter = Self::build_event_filter(&self.events);
+            events_filter = Self::build_event_filter(&self.events);
             events.Type = EVENT_FILTER_TYPE_EVENT_ID;
             events.Filter = events_filter.as_ptr();
             events.Size = events_filter.len() as u32;
 
             let mut callstacks = EVENT_FILTER_DESCRIPTOR::default();
-            let callstacks_filter = Self::build_event_filter(&self.callstacks);
+            callstacks_filter = Self::build_event_filter(&self.callstacks);
             callstacks.Type = EVENT_FILTER_TYPE_STACKWALK;
             callstacks.Filter = callstacks_filter.as_ptr();
             callstacks.Size = callstacks_filter.len() as u32;
 
             let mut pids = EVENT_FILTER_DESCRIPTOR::default();
             pids.Type = EVENT_FILTER_TYPE_PID;
-
-            let mut callstack_kw_filter = EVENT_FILTER_LEVEL_KW::default();
-            let mut callstack_kw = EVENT_FILTER_DESCRIPTOR::default();
-            callstack_kw.Type = EVENT_FILTER_TYPE_STACKWALK_LEVEL_KW;
-            callstack_kw.Filter = &callstack_kw_filter as *const EVENT_FILTER_LEVEL_KW as *const u8;
-            callstack_kw.Size = std::mem::size_of::<EVENT_FILTER_LEVEL_KW>() as u32;
-
-            let mut filters = Vec::new();
 
             if let Some(custom) = &self.custom_filter {
                 let mut custom_desc = EVENT_FILTER_DESCRIPTOR::default();
@@ -860,8 +883,15 @@ impl TraceEnable {
             }
 
             if let Some(callstack_keyword) = self.callstack_keyword {
-                callstack_kw_filter.FilterIn = 1;
-                callstack_kw_filter.MatchAnyKeyword = callstack_keyword;
+                callstack_kw_filter = EVENT_FILTER_LEVEL_KW {
+                    MatchAnyKeyword: callstack_keyword,
+                    FilterIn: 1,
+                    ..EVENT_FILTER_LEVEL_KW::default()
+                };
+                let mut callstack_kw = EVENT_FILTER_DESCRIPTOR::default();
+                callstack_kw.Type = EVENT_FILTER_TYPE_STACKWALK_LEVEL_KW;
+                callstack_kw.Filter = &callstack_kw_filter as *const EVENT_FILTER_LEVEL_KW as *const u8;
+                callstack_kw.Size = std::mem::size_of::<EVENT_FILTER_LEVEL_KW>() as u32;
 
                 filters.push(callstack_kw);
             }
@@ -871,23 +901,7 @@ impl TraceEnable {
             params.FilterDescCount = filters.len() as u32;
         }
 
-        unsafe {
-            let result = EnableTraceEx2(
-                handle,
-                &self.provider,
-                EVENT_CONTROL_CODE_ENABLE_PROVIDER,
-                self.level,
-                self.keyword,
-                0,
-                0,
-                &params);
-
-            if result != 0 {
-                anyhow::bail!("EnableTraceEx2 failed with {}", result);
-            }
-        }
-
-        Ok(())
+        enable(&params)
     }
 }
 
