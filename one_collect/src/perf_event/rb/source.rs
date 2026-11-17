@@ -163,11 +163,10 @@ impl RingBufSessionBuilder {
     /// Raising the watermark amortizes wakeup cost in exchange for
     /// additional latency.
     ///
-    /// This setting only takes effect for consumers that wait on the
-    /// per-CPU perf fds (for example via `epoll(2)` or
-    /// `tokio::io::unix::AsyncFd`). The default [`PerfSession`] read
-    /// loop sleeps on a timeout and does not consult the fd's readable
-    /// state, so it sees no behavior change from this method.
+    /// The default [`PerfSession`] read loop waits on the per-CPU perf
+    /// fds when drained, up to its configured read timeout. This setting
+    /// also applies to consumers waiting via `epoll(2)` or
+    /// `tokio::io::unix::AsyncFd`.
     ///
     /// `bytes` must be strictly smaller than the per-CPU ring data area
     /// configured by [`Self::with_page_count`]; otherwise the kernel
@@ -534,6 +533,7 @@ pub struct RingBufDataSource {
     next_time: Option<u64>,
     oldest_cpu: Option<usize>,
     cpu_to_reader_index: Vec<Option<usize>>,
+    wait_fds: Vec<pollfd>,
     in_process_ring_buf: Option<InProcessRingBuf>,
 }
 
@@ -568,6 +568,7 @@ impl RingBufDataSource {
             next_time: None,
             oldest_cpu: None,
             cpu_to_reader_index: Vec::new(),
+            wait_fds: Vec::new(),
             enabled: false,
             in_process_ring_buf: None,
         }
@@ -729,6 +730,11 @@ impl RingBufDataSource {
                     self.cpu_to_reader_index[i as usize] = Some(reader_index);
                     self.readers.push(reader);
                     self.cursors.push(CpuRingCursor::default());
+                    self.wait_fds.push(pollfd {
+                        fd: cpu_buf.fd.unwrap() as i32,
+                        events: POLLIN,
+                        revents: 0,
+                    });
 
                     debug!("build: leader ring buffer created, cpu={}, id={}", i, id);
 
@@ -937,6 +943,38 @@ impl RingBufDataSource {
                 Some(target_cpus) => target_cpus.contains(&(*cpu as u16)),
                 None => true,
             })
+    }
+
+    fn wait_for_data(&mut self, timeout: Duration) {
+        if timeout.is_zero() {
+            return;
+        }
+
+        /* Poll every leader, including masked-out CPUs which can still
+         * receive no_cpu_mask events. The in-process ring has no fd, so
+         * retain the timeout as an upper bound on its latency. */
+        let timeout_ms = timeout.as_millis()
+            .saturating_add(u128::from(timeout.subsec_nanos() % 1_000_000 != 0))
+            .min(i32::MAX as u128) as i32;
+        let result = unsafe {
+            poll(self.wait_fds.as_mut_ptr(), self.wait_fds.len() as nfds_t, timeout_ms)
+        };
+        if result < 0 {
+            let err = IOError::last_os_error();
+            if err.kind() != std::io::ErrorKind::Interrupted {
+                warn!("Waiting for perf data failed: {}", err);
+                std::thread::sleep(timeout);
+            }
+        } else {
+            self.wait_fds.retain(|fd| {
+                if fd.revents & (POLLERR | POLLNVAL) != 0 {
+                    warn!("Perf wait fd={} reported poll events={:#x}", fd.fd, fd.revents);
+                }
+                /* Exited target tasks can hang up their perf fds. Keep
+                 * draining the rings, but don't spin on their readiness. */
+                fd.revents & (POLLHUP | POLLERR | POLLNVAL) == 0
+            });
+        }
     }
 
     fn read_time<'a>(
@@ -1257,8 +1295,9 @@ impl PerfDataSource for RingBufDataSource {
         timeout: Duration) -> Option<PerfData<'_>> {
         /* Bail if we couldn't find a current buffer */
         if self.oldest_cpu.is_none() {
-            trace!("read: no data available, sleeping for {:?}", timeout);
-            std::thread::sleep(timeout);
+            if self.enabled {
+                self.wait_for_data(timeout);
+            }
             return None;
         }
 
@@ -1452,6 +1491,43 @@ mod tests {
 
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn empty_ring_wait_wakes_on_readiness() {
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        let mut source = RingBufDataSource::new(
+            1, None, Some(vec![1]), None, None, None, None, None, None, None);
+        source.enabled = true;
+        source.wait_fds.push(pollfd {
+            fd: reader.as_raw_fd(),
+            events: POLLIN,
+            revents: 0,
+        });
+        writer.write_all(&[1]).unwrap();
+
+        assert!(source.read(Duration::from_secs(1)).is_none());
+        assert_ne!(0, source.wait_fds[0].revents & POLLIN);
+    }
+
+    #[test]
+    fn empty_ring_wait_removes_hung_up_fds() {
+        let (reader, writer) = UnixStream::pair().unwrap();
+        let mut source = RingBufDataSource::new(
+            1, None, None, None, None, None, None, None, None, None);
+        source.enabled = true;
+        source.wait_fds.push(pollfd {
+            fd: reader.as_raw_fd(),
+            events: POLLIN,
+            revents: 0,
+        });
+        drop(writer);
+
+        assert!(source.read(Duration::from_secs(1)).is_none());
+        assert!(source.wait_fds.is_empty());
+    }
 
     #[test]
     fn config() {

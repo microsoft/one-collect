@@ -15,6 +15,19 @@ The record-trace system provides a command-line interface for recording system-w
 - **Output Management**: Coordinate trace data export to various output formats
 - **Error Reporting**: Present clear, actionable error messages to users
 
+### Linux perf record loss
+
+Linux collection waits on the per-CPU perf file descriptors when the rings
+are drained, rather than sleeping unconditionally between reads. The read
+timeout still bounds latency for in-process environment records.
+
+If perf reports `PERF_RECORD_LOST` or `PERF_RECORD_LOST_SAMPLES`, the collection
+log warns with the record type and lost count. Both counts contribute to the
+NetTrace final sequence gap, allowing readers to report an incomplete trace.
+Retained event counts and sampled CPU in such a trace are not complete totals.
+Ring capacity can be increased with `with_per_cpu_buffer_bytes(bytes)` in a
+collection script; no finite capacity guarantees loss-free collection.
+
 ## Module Deep Dive
 
 ### Command Line Interface (`commandline.rs`)

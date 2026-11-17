@@ -932,6 +932,8 @@ impl OSExportMachine {
                 lost_field,
                 data.event_data())?;
 
+            warn!(record_type = "PERF_RECORD_LOST", lost,
+                "Perf records lost; trace is incomplete");
             loss_machine.borrow().add_lost_events(lost);
 
             Ok(())
@@ -946,6 +948,8 @@ impl OSExportMachine {
                 lost_field,
                 data.event_data())?;
 
+            warn!(record_type = "PERF_RECORD_LOST_SAMPLES", lost,
+                "Perf samples lost; trace is incomplete");
             loss_machine.borrow().add_lost_events(lost);
 
             Ok(())

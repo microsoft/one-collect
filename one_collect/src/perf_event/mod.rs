@@ -634,7 +634,7 @@ impl PerfSession {
     ///
     /// Intended for consumers that want to wait on the perf fds directly
     /// (for example via `epoll(2)` or `tokio::io::unix::AsyncFd`) instead
-    /// of relying on the built-in poll/sleep read loop. Pair this with
+    /// of relying on the built-in polling read loop. Pair this with
     /// [`RingBufSessionBuilder::with_wakeup_watermark`]
     /// to control how often the kernel marks the fds readable.
     ///
@@ -643,10 +643,10 @@ impl PerfSession {
     /// [`Self::set_read_timeout`] with `Duration::ZERO`. The drain
     /// methods ([`Self::parse_all`], [`Self::parse_for_duration`],
     /// [`Self::parse_until`]) internally call
-    /// `std::thread::sleep(read_timeout)` when the ring is drained,
+    /// a blocking wait up to `read_timeout` when the ring is drained,
     /// which would block the runtime thread and starve every other
-    /// task on it. With `read_timeout = 0` that sleep becomes a no-op
-    /// syscall and the consumer should drive successive drains from
+    /// task on it. With `read_timeout = 0` that wait is skipped
+    /// and the consumer should drive successive drains from
     /// fd readiness rather than from the drain method itself.
     ///
     /// Returned `BorrowedFd`s are tied to `&self`, so the session must
