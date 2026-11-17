@@ -899,7 +899,6 @@ impl ExportProcess {
         match mapping {
             Some(mapping) => {
                 let start = ips.partition_point(|ip| *ip < mapping.start());
-                /* ExportMapping includes both endpoints. */
                 let end = ips[start..].partition_point(|ip| *ip <= mapping.end()) + start;
                 &ips[start..end]
             },
