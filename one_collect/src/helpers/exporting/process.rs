@@ -998,6 +998,63 @@ mod tests {
     }
 
     #[test]
+    fn cached_user_ips_match_legacy_scan_randomized() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        /* Clustered user addresses near zero and the kernel boundary, plus kernel addresses. */
+        let random_ip = |r: u64| match r % 4 {
+            0 => r >> 52,
+            1 => KERNEL_START - 1 - ((r >> 50) % 64),
+            2 => KERNEL_START + ((r >> 50) % 64),
+            _ => 0x1000_0000 + ((r >> 40) % 0x10000),
+        };
+
+        for _ in 0..200 {
+            let mut proc = ExportProcess::new(1);
+            let mut callstacks = InternedCallstacks::new(64);
+            let stack_count = (next() % 32) as usize;
+            let stacks: Vec<_> = (0..stack_count).map(|_| {
+                let frames: Vec<_> = (0..next() % 24).map(|_| random_ip(next())).collect();
+                callstacks.to_id(&frames)
+            }).collect();
+
+            for time in 0..next() % 256 {
+                let stack = if stacks.is_empty() || next() % 16 == 0 {
+                    u32::MAX as usize
+                } else {
+                    stacks[(next() % stacks.len() as u64) as usize]
+                };
+                proc.add_sample(ExportProcessSample::new(
+                    time, MetricValue::Count(1), 0, 0, 1, random_ip(next()), stack));
+            }
+
+            let mut addrs = HashSet::new();
+            let mut frames = Vec::new();
+            for _ in 0..32 {
+                let (a, b) = (random_ip(next()), random_ip(next()));
+                let map = new_mapping(0, a.min(b), a.max(b), 0);
+                ExportProcess::get_unique_user_ips(
+                    proc.samples(), &mut addrs, &mut frames, &callstacks, Some(&map));
+                let mut expected: Vec<_> = addrs.iter().copied().collect();
+                expected.sort_unstable();
+                assert_eq!(proc.cached_user_ips(&callstacks, Some(&map)), expected);
+            }
+
+            ExportProcess::get_unique_user_ips(
+                proc.samples(), &mut addrs, &mut frames, &callstacks, None);
+            let mut expected: Vec<_> = addrs.into_iter().collect();
+            expected.sort_unstable();
+            assert_eq!(proc.cached_user_ips(&callstacks, None), expected);
+        }
+    }
+
+    #[test]
     fn cached_user_ips_invalidated_with_samples() {
         let mut proc = ExportProcess::new(1);
         let mut callstacks = InternedCallstacks::new(8);
