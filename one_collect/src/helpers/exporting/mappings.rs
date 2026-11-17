@@ -350,6 +350,29 @@ impl ExportMappingLookup {
         self.lookup.borrow_mut().update(&mut items);
     }
 
+    /*
+     * Picks between two mappings that both contain an address at a time.
+     * The most recently loaded mapping wins. When both were loaded at the
+     * same time, the narrower one is more specific (e.g. dynamic kernel code
+     * vs. the whole kernel image) and wins; if they are the same size, the
+     * one added last wins.
+     */
+    fn is_better(
+        candidate: &ExportMapping,
+        existing: &ExportMapping) -> bool {
+        if candidate.time() != existing.time() {
+            return candidate.time() > existing.time();
+        }
+
+        let candidate_size = candidate.end() - candidate.start();
+        let existing_size = existing.end() - existing.start();
+
+        if candidate_size != existing_size {
+            return candidate_size < existing_size;
+        }
+
+        candidate.id() > existing.id()
+    }
     pub fn find_index(
         &self,
         address: u64,
@@ -375,7 +398,7 @@ impl ExportMappingLookup {
                 if map.contains_ip(address) && map.time() <= time {
                     match best {
                         Some(existing) => {
-                            if map.time() > existing.time() {
+                            if Self::is_better(map, existing) {
                                 best = Some(map);
                                 best_index = *index as usize;
                             }
@@ -393,7 +416,7 @@ impl ExportMappingLookup {
                 if map.contains_ip(address) && map.time() <= time {
                     match best {
                         Some(existing) => {
-                            if map.time() > existing.time() {
+                            if Self::is_better(map, existing) {
                                 best = Some(map);
                                 best_index = index;
                             }

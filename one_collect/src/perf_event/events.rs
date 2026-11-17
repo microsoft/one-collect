@@ -199,6 +199,44 @@ pub(crate) fn mmap() -> Event {
     event
 }
 
+pub(crate) fn ksymbol() -> Event {
+    let mut event = Event::new(0, "__ksymbol".into());
+    let mut offset: usize = 0;
+    let mut len: usize;
+    let format = event.format_mut();
+
+    len = 8;
+    format.add_field(EventField::new(
+        "addr".into(), "u64".into(),
+        LocationType::Static, offset, len));
+    offset += len;
+
+    len = 4;
+    format.add_field(EventField::new(
+        "len".into(), "u32".into(),
+        LocationType::Static, offset, len));
+    offset += len;
+
+    len = 2;
+    format.add_field(EventField::new(
+        "ksym_type".into(), "u16".into(),
+        LocationType::Static, offset, len));
+    offset += len;
+
+    format.add_field(EventField::new(
+        "flags".into(), "u16".into(),
+        LocationType::Static, offset, len));
+    offset += len;
+
+    format.add_field(EventField::new(
+        "name[]".into(), "char".into(),
+        LocationType::StaticString, offset, 0));
+
+    event.set_no_cpu_mask_flag();
+
+    event
+}
+
 pub(crate) fn lost_samples() -> Event {
     let mut event = Event::new(0, "__lost_samples".into());
     let offset: usize = 0;

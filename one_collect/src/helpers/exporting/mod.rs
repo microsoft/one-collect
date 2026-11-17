@@ -92,6 +92,14 @@ pub use mappings::{
     ExportMapping,
 };
 
+pub mod kernel_dynamic;
+pub use kernel_dynamic::{
+    KernelDynamicSymbol,
+    KernelDynamicSymbolKind,
+    KernelDynamicSymbolStats,
+    KernelDynamicSymbols,
+};
+
 #[derive(Default)]
 #[allow(dead_code)]
 struct ExportCSwitch {
@@ -1335,6 +1343,7 @@ pub struct ExportMachine {
     kinds: Vec<String>,
     record_types: Vec<ExportRecordType>,
     map_index: usize,
+    kernel_dynamic_symbols: KernelDynamicSymbols,
     drop_closures: Vec<Box<dyn FnMut()>>,
     start_date: Option<DateTime<Utc>>,
     start_qpc: Option<u64>,
@@ -1423,6 +1432,7 @@ impl ExportMachine {
             kinds: Vec::new(),
             record_types,
             map_index: 0,
+            kernel_dynamic_symbols: KernelDynamicSymbols::new(),
             drop_closures: Vec::new(),
             start_date: None,
             start_qpc: None,
@@ -1832,6 +1842,32 @@ impl ExportMachine {
         &mut self,
         symbol: &DynamicSymbol) -> anyhow::Result<()> {
         self.os_add_dynamic_symbol(symbol)
+    }
+
+    /// Records a kernel dynamic symbol (e.g. a BPF JIT image) being
+    /// registered or unregistered at `time`. These are used when kernel
+    /// mappings are added so that samples resolve against the code that was
+    /// loaded when they were taken, even if it was unloaded before the
+    /// trace was finalized. Records must be supplied in time order.
+    pub fn add_kernel_dynamic_symbol(
+        &mut self,
+        time: u64,
+        address: u64,
+        len: u64,
+        kind: KernelDynamicSymbolKind,
+        unregister: bool,
+        name: &str) {
+        let name_id = self.strings.to_id(name);
+
+        if unregister {
+            self.kernel_dynamic_symbols.unregister(time, address, len, kind, name_id);
+        } else {
+            self.kernel_dynamic_symbols.register(time, address, len, kind, name_id);
+        }
+    }
+
+    pub fn kernel_dynamic_symbols(&self) -> &KernelDynamicSymbols {
+        &self.kernel_dynamic_symbols
     }
 
     pub fn capture_file_symbol_metadata(&mut self) {

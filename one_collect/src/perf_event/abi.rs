@@ -79,6 +79,14 @@ pub const PERF_RECORD_SAMPLE: u32 = 9;
 pub const PERF_RECORD_MMAP2: u32 = 10;
 pub const PERF_RECORD_LOST_SAMPLES: u32 = 13;
 pub const PERF_RECORD_SWITCH_CPU_WIDE: u32 = 15;
+pub const PERF_RECORD_KSYMBOL: u32 = 17;
+
+// PERF_RECORD_KSYMBOL ksym_type values
+pub const PERF_RECORD_KSYMBOL_TYPE_BPF: u16 = 1;
+pub const PERF_RECORD_KSYMBOL_TYPE_OOL: u16 = 2;
+
+// PERF_RECORD_KSYMBOL flags
+pub const PERF_RECORD_KSYMBOL_FLAGS_UNREGISTER: u16 = 1 << 0;
 
 // Known read formats
 pub const PERF_FORMAT_TOTAL_TIME_ENABLED: u64 = 1 << 0;

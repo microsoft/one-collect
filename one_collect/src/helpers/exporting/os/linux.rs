@@ -17,7 +17,7 @@ use crate::openat::{OpenAt, DupFd};
 use crate::procfs;
 use crate::perf_event::{AncillaryData, PerfSession};
 use crate::perf_event::{RingBufSessionBuilder, RingBufBuilder};
-use crate::perf_event::rb::{RingBufOptions, cgroup_sample_supported};
+use crate::perf_event::rb::{RingBufOptions, cgroup_sample_supported, ksymbol_records_supported};
 use crate::perf_event::abi::PERF_RECORD_MISC_SWITCH_OUT;
 use crate::helpers::callstack::{CallstackHelp, CallstackReader};
 use crate::helpers::exporting::*;
@@ -1259,6 +1259,43 @@ impl OSExportMachine {
                 time_field.get_u64(full_data)?)
         });
 
+        /* Hook kernel dynamic symbol (BPF JIT, trampoline) records */
+        let time_field = session.time_data_ref();
+        let event = session.ksymbol_event();
+        let event_machine = machine.clone();
+        let fmt = event.format();
+        let addr = fmt.get_field_ref_unchecked("addr");
+        let len = fmt.get_field_ref_unchecked("len");
+        let ksym_type = fmt.get_field_ref_unchecked("ksym_type");
+        let flags = fmt.get_field_ref_unchecked("flags");
+        let name = fmt.get_field_ref_unchecked("name[]");
+
+        event.add_callback(move |data| {
+            let fmt = data.format();
+            let full_data = data.full_data();
+            let data = data.event_data();
+
+            let flags = fmt.get_u16(flags, data)?;
+            let unregister = flags & crate::perf_event::abi::PERF_RECORD_KSYMBOL_FLAGS_UNREGISTER != 0;
+
+            /*
+             * Match the "<module> <name>" format KernelSymbolReader uses
+             * for these symbols in /proc/kallsyms.
+             */
+            let name = format!("[bpf] {}", fmt.get_str(name, data)?);
+
+            event_machine.borrow_mut().add_kernel_dynamic_symbol(
+                time_field.get_u64(full_data)?,
+                fmt.get_u64(addr, data)?,
+                fmt.get_u32(len, data)? as u64,
+                KernelDynamicSymbolKind::from_ksym_type(
+                    fmt.get_u16(ksym_type, data)?),
+                unregister,
+                &name);
+
+            Ok(())
+        });
+
         /* Hook fork records */
         let event = session.fork_event();
         let event_machine = machine.clone();
@@ -1492,6 +1529,12 @@ impl ExportMachineOSHooks for ExportMachine {
             start: u64,
             end: u64,
             name_id: usize,
+            /*
+             * Whether the symbol lies in an address range used by tracked
+             * kernel dynamic code. Such symbols describe what was loaded at
+             * finalization, so they are only valid after that code unloaded.
+             */
+            in_dynamic_range: bool,
         }
 
         let mut frames = Vec::new();
@@ -1518,6 +1561,24 @@ impl ExportMachineOSHooks for ExportMachine {
         let mut all_addrs: Vec<u64> = all_addrs_set.into_iter().collect();
         all_addrs.sort();
 
+        let dynamic = &self.kernel_dynamic_symbols;
+
+        if !dynamic.is_empty() {
+            let stats = dynamic.stats();
+
+            info!("Kernel dynamic symbols: generations={}, registers={}, unregisters={}, \
+                unmatched_unregisters={}, implicit_unloads={}, mismatched_unregisters={}, \
+                duplicates={}, invalid={}",
+                dynamic.symbols().len(), stats.registers, stats.unregisters,
+                stats.unmatched_unregisters, stats.implicit_unloads,
+                stats.mismatched_unregisters, stats.duplicates, stats.invalid);
+
+            if stats.implicit_unloads != 0 || stats.mismatched_unregisters != 0 {
+                warn!("Kernel dynamic symbol records were lost or inconsistent, \
+                    some BPF frames may be attributed with approximate lifetimes");
+            }
+        }
+
         // Phase 2: Read kernel symbols once, keeping only those that match
         // a collected IP. This avoids re-reading /proc/kallsyms per-process.
         kernel_symbols.reset();
@@ -1525,7 +1586,25 @@ impl ExportMachineOSHooks for ExportMachine {
 
         while kernel_symbols.next() {
             let start = kernel_symbols.start();
-            let end = kernel_symbols.end();
+            let mut end = kernel_symbols.end();
+            let mut in_dynamic_range = false;
+
+            if !dynamic.is_empty() {
+                /*
+                 * Code still loaded that we saw register is described by
+                 * its generation, which has an exact extent and lifetime.
+                 */
+                if dynamic.open_contains(start) {
+                    continue;
+                }
+
+                /*
+                 * Never let an inferred kallsyms extent run into code that
+                 * was loaded or unloaded during tracking.
+                 */
+                end = dynamic.clip_end(start, end);
+                in_dynamic_range = dynamic.any_contains(start);
+            }
 
             let has_match = match all_addrs.binary_search(&start) {
                 Ok(_) => true,
@@ -1538,10 +1617,30 @@ impl ExportMachineOSHooks for ExportMachine {
                     start,
                     end,
                     name_id,
+                    in_dynamic_range,
                 });
             }
         }
         // matched_symbols is sorted by start (kallsyms is sorted).
+
+        // Kernel dynamic code generations that any sample touched, ordered
+        // by start so they can be matched against sorted process IPs.
+        let mut generations: Vec<&KernelDynamicSymbol> = dynamic
+            .symbols()
+            .iter()
+            .filter(|symbol| {
+                match all_addrs.binary_search(&symbol.start()) {
+                    Ok(_) => true,
+                    Err(i) => i < all_addrs.len() && all_addrs[i] <= symbol.end(),
+                }
+            })
+            .collect();
+
+        generations.sort_by_key(|symbol| (symbol.load_time(), symbol.start()));
+
+        let vmlinux_id = self.strings.to_id("vmlinux");
+        let bpf_id = self.strings.to_id("[bpf]");
+        let mut proc_addrs: Vec<u64> = Vec::new();
 
         // Phase 3: For each process, assign symbols from the matched set.
         let mut seen = vec![false; matched_symbols.len()];
@@ -1558,7 +1657,7 @@ impl ExportMachineOSHooks for ExportMachine {
 
             let mut kernel = ExportMapping::new(
                 0,
-                self.strings.to_id("vmlinux"),
+                vmlinux_id,
                 KERNEL_START,
                 KERNEL_END,
                 0,
@@ -1580,7 +1679,8 @@ impl ExportMachineOSHooks for ExportMachine {
                 };
 
                 let sym = &matched_symbols[idx];
-                if *addr >= sym.start && *addr < sym.end && !seen[idx] {
+                if *addr >= sym.start && *addr < sym.end && !seen[idx] &&
+                   !sym.in_dynamic_range {
                     seen[idx] = true;
                     added += 1;
 
@@ -1600,9 +1700,91 @@ impl ExportMachineOSHooks for ExportMachine {
             }
 
             proc.add_mapping(kernel);
+
+            if generations.is_empty() {
+                continue;
+            }
+
+            proc_addrs.clear();
+            proc_addrs.extend(addrs.iter().copied());
+            proc_addrs.sort();
+
+            /*
+             * Each generation becomes a mapping scoped to its load time.
+             * Once it unloads, a tombstone mapping over the same range takes
+             * over so later samples do not resolve to stale code. The
+             * tombstone only carries kallsyms symbols that are in tracked
+             * dynamic ranges, i.e. code loaded after this generation that we
+             * did not see register.
+             */
+            for generation in &generations {
+                let first = proc_addrs.partition_point(|addr| *addr < generation.start());
+                let last = proc_addrs.partition_point(|addr| *addr <= generation.end());
+
+                if first == last {
+                    continue;
+                }
+
+                let mut mapping = ExportMapping::new(
+                    generation.load_time(),
+                    bpf_id,
+                    generation.start(),
+                    generation.end(),
+                    0,
+                    false,
+                    self.map_index,
+                    UnwindType::DWARF);
+
+                self.map_index += 1;
+
+                mapping.add_symbol(
+                    ExportSymbol::new(
+                        generation.name_id(),
+                        generation.start(),
+                        generation.end()));
+
+                proc.add_mapping(mapping);
+
+                if let Some(unload_time) = generation.unload_time() {
+                    let mut tombstone = ExportMapping::new(
+                        unload_time,
+                        vmlinux_id,
+                        generation.start(),
+                        generation.end(),
+                        0,
+                        false,
+                        self.map_index,
+                        UnwindType::DWARF);
+
+                    self.map_index += 1;
+                    seen.fill(false);
+
+                    for addr in &proc_addrs[first..last] {
+                        let idx = match matched_symbols.binary_search_by_key(addr, |s| s.start) {
+                            Ok(i) => i,
+                            Err(0) => continue,
+                            Err(i) => i - 1,
+                        };
+
+                        let sym = &matched_symbols[idx];
+
+                        if *addr >= sym.start && *addr < sym.end && !seen[idx] &&
+                           sym.in_dynamic_range && generation.contains(sym.start) {
+                            seen[idx] = true;
+
+                            tombstone.add_symbol(
+                                ExportSymbol::new(
+                                    sym.name_id,
+                                    sym.start,
+                                    sym.end.min(generation.end())));
+                        }
+                    }
+
+                    proc.add_mapping(tombstone);
+                }
+            }
         }
     }
-
     fn os_add_dynamic_symbol(
         &mut self,
         symbol: &DynamicSymbol) -> anyhow::Result<()> {
@@ -1744,6 +1926,10 @@ impl ExportBuilderHelp for RingBufSessionBuilder {
             .with_executable_mmap_records()
             .with_comm_records()
             .with_task_records();
+
+        if ksymbol_records_supported() {
+            kernel = kernel.with_ksymbol_records();
+        }
 
         if settings.cpu_profiling {
             let profiling = RingBufBuilder::for_profiling(settings.cpu_freq);
@@ -2007,6 +2193,242 @@ mod tests {
         session.parse_all().unwrap();
 
         assert_eq!(8, exporter.borrow().lost_events());
+    }
+
+    struct KallsymsMock {
+        symbols: Vec<(u64, u64, &'static str)>,
+        index: usize,
+    }
+
+    impl KallsymsMock {
+        fn new(symbols: Vec<(u64, u64, &'static str)>) -> Self {
+            Self {
+                symbols,
+                index: 0,
+            }
+        }
+    }
+
+    impl ExportSymbolReader for KallsymsMock {
+        fn reset(&mut self) { self.index = 0; }
+
+        fn next(&mut self) -> bool {
+            if self.index < self.symbols.len() {
+                self.index += 1;
+                true
+            } else {
+                false
+            }
+        }
+
+        fn start(&self) -> u64 { self.symbols[self.index - 1].0 }
+
+        fn end(&self) -> u64 { self.symbols[self.index - 1].1 }
+
+        fn name(&self) -> &str { self.symbols[self.index - 1].2 }
+
+        fn demangle(&mut self) -> Option<String> { None }
+    }
+
+    const SEC: u64 = 1_000_000_000;
+    const BPF_X: u64 = 0xffffffffc0001000;
+
+    fn kernel_test_machine() -> ExportMachine {
+        let settings = ExportSettings::new(CallstackHelper::new())
+            .without_process_fs();
+
+        ExportMachine::new(settings)
+    }
+
+    fn add_kernel_sample(
+        machine: &mut ExportMachine,
+        pid: u32,
+        time: u64,
+        frames: &[u64]) {
+        let cpu = machine.sample_kind("cpu");
+
+        machine.add_sample(
+            time,
+            MetricValue::Count(1),
+            pid,
+            pid,
+            0,
+            cpu,
+            frames).unwrap();
+    }
+
+    fn resolve_kernel(
+        machine: &ExportMachine,
+        pid: u32,
+        ip: u64,
+        time: u64) -> Option<String> {
+        let mapping = machine.find_process(pid)?.find_mapping(ip, Some(time))?;
+
+        for symbol in mapping.symbols() {
+            if ip >= symbol.start() && ip <= symbol.end() {
+                return Some(
+                    machine.strings().from_id(symbol.name_id()).unwrap().to_string());
+            }
+        }
+
+        None
+    }
+
+    fn add_bpf(
+        machine: &mut ExportMachine,
+        time: u64,
+        addr: u64,
+        len: u64,
+        unregister: bool,
+        name: &str) {
+        machine.add_kernel_dynamic_symbol(
+            time,
+            addr,
+            len,
+            KernelDynamicSymbolKind::Bpf,
+            unregister,
+            name);
+    }
+
+    #[test]
+    fn kernel_mappings_scope_bpf_symbols_by_time() {
+        let mut machine = kernel_test_machine();
+
+        let static_fn = 0xffffffff81000000;
+        let tail_fn = BPF_X - 0x100;
+        let live = BPF_X + 0x4000;
+
+        /*
+         * Program A [X, X+256) lives [1s, 2s), program B [X, X+128) lives
+         * [3s, 4s). Both are gone by finalization.
+         */
+        add_bpf(&mut machine, SEC, BPF_X, 256, false, "[bpf] bpf_prog_a");
+        add_bpf(&mut machine, 2 * SEC, BPF_X, 256, true, "[bpf] bpf_prog_a");
+        add_bpf(&mut machine, 3 * SEC, BPF_X, 128, false, "[bpf] bpf_prog_b");
+        add_bpf(&mut machine, 4 * SEC, BPF_X, 128, true, "[bpf] bpf_prog_b");
+
+        let at = BPF_X + 64;
+        let times = [SEC / 2, SEC + SEC / 2, 2 * SEC, 2 * SEC + SEC / 2, 3 * SEC + SEC / 2, 4 * SEC];
+
+        for time in times {
+            add_kernel_sample(&mut machine, 10, time, &[at]);
+        }
+
+        /* Other processes run the programs and static code */
+        add_kernel_sample(&mut machine, 20, SEC + SEC / 2, &[static_fn + 0x10, BPF_X + 0x80]);
+        add_kernel_sample(&mut machine, 20, 3 * SEC + SEC / 2, &[BPF_X + 128]);
+        add_kernel_sample(&mut machine, 20, 2 * SEC + SEC / 2, &[live + 8]);
+        add_kernel_sample(&mut machine, 20, SEC + SEC / 2, &[tail_fn + 0x10]);
+
+        /*
+         * Finalization view of kallsyms: neither program is present, so the
+         * preceding symbol's inferred extent runs over their addresses. A
+         * program loaded before recording is still live.
+         */
+        let mut kallsyms = KallsymsMock::new(vec![
+            (static_fn, static_fn + 0xff, "do_work"),
+            (tail_fn, live - 1, "tail_fn"),
+            (live, live + 0x7f, "[bpf] bpf_prog_live"),
+        ]);
+
+        machine.add_kernel_mappings_with(&mut kallsyms);
+
+        let expected = [
+            None,
+            Some("[bpf] bpf_prog_a"),
+            None,
+            None,
+            Some("[bpf] bpf_prog_b"),
+            None,
+        ];
+
+        for (time, expected) in times.iter().zip(expected) {
+            assert_eq!(
+                expected.map(String::from),
+                resolve_kernel(&machine, 10, at, *time),
+                "time {}", time);
+        }
+
+        let mapping = machine.find_process(10).unwrap()
+            .find_mapping(at, Some(SEC + SEC / 2)).unwrap();
+        assert_eq!("[bpf]", machine.strings().from_id(mapping.filename_id()).unwrap());
+
+        /* Callstack frame in another process */
+        assert_eq!(
+            Some("[bpf] bpf_prog_a".to_string()),
+            resolve_kernel(&machine, 20, BPF_X + 0x80, SEC + SEC / 2));
+
+        /* Exclusive end of B, still inside A's old extent */
+        assert_eq!(None, resolve_kernel(&machine, 20, BPF_X + 128, 3 * SEC + SEC / 2));
+
+        /* Static and still-live symbols keep resolving from kallsyms */
+        assert_eq!(
+            Some("do_work".to_string()),
+            resolve_kernel(&machine, 20, static_fn + 0x10, SEC + SEC / 2));
+        assert_eq!(
+            Some("[bpf] bpf_prog_live".to_string()),
+            resolve_kernel(&machine, 20, live + 8, 2 * SEC + SEC / 2));
+        assert_eq!(
+            Some("tail_fn".to_string()),
+            resolve_kernel(&machine, 20, tail_fn + 0x10, SEC + SEC / 2));
+    }
+
+    #[test]
+    fn kernel_mappings_bpf_loaded_before_recording() {
+        let mut machine = kernel_test_machine();
+
+        /* Loaded before recording (no register seen), unloaded at 2s */
+        add_bpf(&mut machine, 2 * SEC, BPF_X, 256, true, "[bpf] bpf_prog_a");
+
+        add_kernel_sample(&mut machine, 10, SEC, &[BPF_X + 8]);
+        add_kernel_sample(&mut machine, 10, 3 * SEC, &[BPF_X + 8]);
+        add_kernel_sample(&mut machine, 10, 3 * SEC, &[BPF_X + 0x80]);
+
+        /* Program C reused the address after A, but its load was not seen */
+        let mut kallsyms = KallsymsMock::new(vec![
+            (BPF_X, BPF_X + 0x3f, "[bpf] bpf_prog_c"),
+        ]);
+
+        machine.add_kernel_mappings_with(&mut kallsyms);
+
+        assert_eq!(
+            Some("[bpf] bpf_prog_a".to_string()),
+            resolve_kernel(&machine, 10, BPF_X + 8, SEC));
+        assert_eq!(
+            Some("[bpf] bpf_prog_c".to_string()),
+            resolve_kernel(&machine, 10, BPF_X + 8, 3 * SEC));
+        assert_eq!(None, resolve_kernel(&machine, 10, BPF_X + 0x80, 3 * SEC));
+    }
+
+    #[test]
+    fn kernel_mappings_bpf_replaced_at_same_time() {
+        let mut machine = kernel_test_machine();
+
+        add_bpf(&mut machine, SEC, BPF_X, 128, false, "[bpf] bpf_prog_a");
+        add_bpf(&mut machine, 2 * SEC, BPF_X, 128, true, "[bpf] bpf_prog_a");
+        add_bpf(&mut machine, 2 * SEC, BPF_X, 128, false, "[bpf] bpf_prog_b");
+
+        add_kernel_sample(&mut machine, 10, 2 * SEC - 1, &[BPF_X + 8]);
+        add_kernel_sample(&mut machine, 10, 2 * SEC, &[BPF_X + 8]);
+
+        /* B is still loaded at finalization and in kallsyms */
+        let mut kallsyms = KallsymsMock::new(vec![
+            (BPF_X, BPF_X + 0x7f, "[bpf] bpf_prog_b"),
+        ]);
+
+        machine.add_kernel_mappings_with(&mut kallsyms);
+
+        assert_eq!(
+            Some("[bpf] bpf_prog_a".to_string()),
+            resolve_kernel(&machine, 10, BPF_X + 8, 2 * SEC - 1));
+        assert_eq!(
+            Some("[bpf] bpf_prog_b".to_string()),
+            resolve_kernel(&machine, 10, BPF_X + 8, 2 * SEC));
+
+        /* B's live kallsyms entry is superseded by its generation */
+        let proc = machine.find_process(10).unwrap();
+        let vmlinux = proc.find_mapping(0xffffffff81000000, Some(0)).unwrap();
+        assert!(vmlinux.symbols().is_empty());
     }
 
     #[test]

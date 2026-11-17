@@ -362,6 +362,7 @@ pub struct PerfSession {
     exit_event: Event,
     fork_event: Event,
     mmap_event: Event,
+    ksymbol_event: Event,
     lost_samples_event: Event,
     cswitch_event: Event,
     soft_page_fault_event: Event,
@@ -467,6 +468,7 @@ impl PerfSession {
             exit_event: events::exit(),
             fork_event: events::fork(),
             mmap_event: events::mmap(),
+            ksymbol_event: events::ksymbol(),
             lost_samples_event: events::lost_samples(),
             cswitch_event: events::cswitch(),
             drop_event: Event::new(0, "__session_drop".into()),
@@ -530,6 +532,10 @@ impl PerfSession {
 
     pub fn mmap_event(&mut self) -> &mut Event {
         &mut self.mmap_event
+    }
+
+    pub fn ksymbol_event(&mut self) -> &mut Event {
+        &mut self.ksymbol_event
     }
 
     pub fn lost_samples_event(&mut self) -> &mut Event {
@@ -1286,6 +1292,17 @@ impl PerfSession {
                 self.log_errors(&self.mmap_event);
             },
 
+            abi::PERF_RECORD_KSYMBOL => {
+                let offset = abi::Header::data_offset();
+
+                self.ksymbol_event.process(
+                    perf_data.raw_data,
+                    &perf_data.raw_data[offset..],
+                    &mut self.errors);
+
+                self.log_errors(&self.ksymbol_event);
+            },
+
             abi::PERF_RECORD_LOST_SAMPLES => {
                 let offset = abi::Header::data_offset();
 
@@ -1523,6 +1540,7 @@ impl PerfSession {
 mod tests {
     use super::*;
 
+    use std::cell::RefCell;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
@@ -1693,6 +1711,120 @@ mod tests {
         });
 
         session.add_event(e).unwrap();
+    }
+
+    fn ksymbol_record(
+        time: u64,
+        addr: u64,
+        len: u32,
+        ksym_type: u16,
+        flags: u16,
+        name: &str) -> Vec<u8> {
+        let mut payload = Vec::new();
+        let mut record = Vec::new();
+
+        payload.extend_from_slice(&addr.to_ne_bytes());
+        payload.extend_from_slice(&len.to_ne_bytes());
+        payload.extend_from_slice(&ksym_type.to_ne_bytes());
+        payload.extend_from_slice(&flags.to_ne_bytes());
+        payload.extend_from_slice(name.as_bytes());
+        payload.push(0);
+
+        while payload.len() % 8 != 0 {
+            payload.push(0);
+        }
+
+        /* sample_id: pid, tid, time, id */
+        payload.extend_from_slice(&1234u32.to_ne_bytes());
+        payload.extend_from_slice(&1235u32.to_ne_bytes());
+        payload.extend_from_slice(&time.to_ne_bytes());
+        payload.extend_from_slice(&7u64.to_ne_bytes());
+
+        abi::Header::write(abi::PERF_RECORD_KSYMBOL, 0, &payload, &mut record);
+
+        record
+    }
+
+    #[test]
+    fn ksymbol_records_parse() {
+        let mut mock = MockData::new(
+            abi::PERF_SAMPLE_TID | abi::PERF_SAMPLE_TIME | abi::PERF_SAMPLE_ID,
+            0);
+
+        let mut attr = perf_event_attr::default();
+        attr.sample_type = mock.attr.sample_type;
+        attr.flags = abi::FLAG_SAMPLE_ID_ALL;
+        mock.attr = Rc::new(attr);
+
+        mock.push(&ksymbol_record(
+            100,
+            0xffffffffc0001000,
+            256,
+            abi::PERF_RECORD_KSYMBOL_TYPE_BPF,
+            0,
+            "bpf_prog_0123456789abcdef_short"));
+
+        mock.push(&ksymbol_record(
+            200,
+            0xffffffffc0001000,
+            256,
+            abi::PERF_RECORD_KSYMBOL_TYPE_BPF,
+            abi::PERF_RECORD_KSYMBOL_FLAGS_UNREGISTER,
+            "bpf_prog_0123456789abcdef_short"));
+
+        mock.push(&ksymbol_record(
+            300,
+            0xffffffffc0002000,
+            64,
+            abi::PERF_RECORD_KSYMBOL_TYPE_OOL,
+            0,
+            "bpf_trampoline_6442491234"));
+
+        let mut session = PerfSession::new(Box::new(mock));
+        let time_field = session.time_data_ref();
+        let pid_field = session.pid_field_ref();
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let seen_cb = seen.clone();
+        let event = session.ksymbol_event();
+        let fmt = event.format();
+        let addr = fmt.get_field_ref_unchecked("addr");
+        let len = fmt.get_field_ref_unchecked("len");
+        let ksym_type = fmt.get_field_ref_unchecked("ksym_type");
+        let flags = fmt.get_field_ref_unchecked("flags");
+        let name = fmt.get_field_ref_unchecked("name[]");
+
+        event.add_callback(move |data| {
+            let fmt = data.format();
+            let full_data = data.full_data();
+            let data = data.event_data();
+
+            seen_cb.borrow_mut().push((
+                time_field.get_u64(full_data)?,
+                pid_field.get_u32(full_data)?,
+                fmt.get_u64(addr, data)?,
+                fmt.get_u32(len, data)?,
+                fmt.get_u16(ksym_type, data)?,
+                fmt.get_u16(flags, data)?,
+                fmt.get_str(name, data)?.to_string()));
+
+            Ok(())
+        });
+
+        session.parse_all().unwrap();
+
+        let seen = seen.borrow();
+
+        assert_eq!(3, seen.len());
+        assert_eq!(
+            (100, 1234, 0xffffffffc0001000, 256, 1, 0,
+             "bpf_prog_0123456789abcdef_short".to_string()),
+            seen[0]);
+        assert_eq!(200, seen[1].0);
+        assert_eq!(abi::PERF_RECORD_KSYMBOL_FLAGS_UNREGISTER, seen[1].5);
+        assert_eq!(
+            (300, 1234, 0xffffffffc0002000, 64, 2, 0,
+             "bpf_trampoline_6442491234".to_string()),
+            seen[2]);
     }
 
     #[test]
