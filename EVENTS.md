@@ -23,6 +23,10 @@ Each Event has an EventFormat that is accessible via format(). EventFormat then 
 about a part of the data the event contains. The details include the name and type of data as well as the offset it is located.
 Event data is almost always a set of many fields, each having a different offset within that data. 
 
+Linux tracepoint offsets include native alignment padding. NetTrace export packs supported fixed-size fields
+using those offsets, so numeric payload values match its sequential metadata. The stored event data retains
+its native layout for other consumers. Unsupported field types still limit the exported metadata.
+
 ```mermaid
 flowchart TD
     event[Event] --> fmt
