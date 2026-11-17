@@ -53,6 +53,8 @@ struct MetadataBlock {
 
 #[derive(Default)]
 struct RecordDataLayout {
+    // Bounded runs before the last gap, followed by one open-ended run at tail_offset.
+    // An already-packed layout has no bounded runs and a tail_offset of zero.
     ranges: Vec<std::ops::Range<usize>>,
     tail_offset: usize,
     minimum_size: usize,
@@ -289,6 +291,7 @@ struct NetTraceWriter {
     symbol_event_id: u32,
     mapping_meta_event_id: u32,
     original_meta_event_ids: HashSet<u32>,
+    // Indexed by record-type ID, not metadata ID; dropped with this export's writer.
     record_data_layouts: Vec<RecordDataLayout>,
     last_time: u64,
     sync_time: u64,
@@ -1032,6 +1035,8 @@ impl NetTraceWriter {
         layout: &RecordDataLayout,
         record_type: &ExportRecordType,
         data: &[u8]) -> anyhow::Result<()> {
+        // Metadata validation bounds every cached range and tail_offset by minimum_size,
+        // so one length check covers all copies without inspecting fields per event.
         anyhow::ensure!(
             data.len() >= layout.minimum_size,
             "NetTrace record {} exceeds the record data size: minimum size {}, data size {}",
@@ -1079,6 +1084,8 @@ impl NetTraceWriter {
         self.record_id_offset = meta_id;
 
         let mut record_fields = Vec::new();
+        // Build plans once alongside metadata. Cache size depends on types and gaps,
+        // not event count; no payload bytes or per-event plans are retained.
         self.record_data_layouts.clear();
 
         for record_type in record_types {
@@ -1125,7 +1132,8 @@ impl NetTraceWriter {
                                 record_type.name(), field.name))?;
                         if !variable {
                             if field.offset > offset {
-                                // Coalesce adjacent fields; only gaps split copy runs.
+                                // Adjacent fields share a copy. For example, fields at
+                                // 0..4, 4..12, 16..24 produce a 0..12 run and a tail at 16.
                                 if layout.tail_offset < offset {
                                     layout.ranges.push(layout.tail_offset..offset);
                                 }
@@ -1133,6 +1141,8 @@ impl NetTraceWriter {
                             }
                             layout.minimum_size = end;
                         }
+                        // Only the fixed prefix has usable offsets. The first variable
+                        // field and everything after it remain in the final, unchanged run.
                         variable |= field.size == 0;
                         offset = end;
 
