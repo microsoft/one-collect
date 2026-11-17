@@ -1,9 +1,11 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
+use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
 use criterion::{
     black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput,
@@ -351,6 +353,48 @@ fn benchmark_export_machine(
     group.finish();
 }
 
+struct TrackingAllocator;
+
+static TRACK_HEAP: AtomicBool = AtomicBool::new(false);
+static HEAP_CURRENT: AtomicIsize = AtomicIsize::new(0);
+static HEAP_PEAK: AtomicIsize = AtomicIsize::new(0);
+
+// Heap accounting is only active while a memory measurement is running.
+unsafe impl GlobalAlloc for TrackingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let ptr = System.alloc(layout);
+        if !ptr.is_null() && TRACK_HEAP.load(Ordering::Relaxed) {
+            let size = layout.size() as isize;
+            let current = HEAP_CURRENT.fetch_add(size, Ordering::Relaxed) + size;
+            HEAP_PEAK.fetch_max(current, Ordering::Relaxed);
+        }
+        ptr
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        if TRACK_HEAP.load(Ordering::Relaxed) {
+            HEAP_CURRENT.fetch_sub(layout.size() as isize, Ordering::Relaxed);
+        }
+        System.dealloc(ptr, layout);
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: TrackingAllocator = TrackingAllocator;
+
+/// Returns (peak, retained) heap bytes allocated by `f`, net of its frees.
+fn measure_heap(f: impl FnOnce()) -> (isize, isize) {
+    HEAP_CURRENT.store(0, Ordering::Relaxed);
+    HEAP_PEAK.store(0, Ordering::Relaxed);
+    TRACK_HEAP.store(true, Ordering::SeqCst);
+    f();
+    TRACK_HEAP.store(false, Ordering::SeqCst);
+    (
+        HEAP_PEAK.load(Ordering::Relaxed),
+        HEAP_CURRENT.load(Ordering::Relaxed),
+    )
+}
+
 const USER_IP_MAPPING_LEN: u64 = 0x10000;
 const USER_IP_STACKS: usize = 512;
 const USER_IP_FRAMES: usize = 20;
@@ -469,6 +513,34 @@ fn benchmark_sampled_user_ips(c: &mut Criterion) {
         }
 
         group.throughput(Throughput::Elements(sample_count as u64));
+        if std::env::var_os("ONE_COLLECT_BENCH_MEMORY").is_some() {
+            let mut process = user_ip_process(sample_count, mapping_count, &stack_ids);
+            let (peak, retained) = measure_heap(|| {
+                let mut addrs = HashSet::new();
+                let mut frames = Vec::new();
+                process.add_matching_anon_symbols(
+                    &mut addrs,
+                    &mut frames,
+                    &mut reader,
+                    &callstacks,
+                    &mut strings,
+                );
+            });
+            let mut unique = HashSet::new();
+            ExportProcess::get_unique_user_ips(
+                process.samples(),
+                &mut unique,
+                &mut Vec::new(),
+                &callstacks,
+                None,
+            );
+            println!(
+                "memory/sampled_user_ips/{sample_count}_samples/{mapping_count}_mappings: \
+                 unique_ips={} peak_heap_bytes={peak} retained_heap_bytes={retained}",
+                unique.len()
+            );
+            black_box(process);
+        }
         group.bench_function(
             BenchmarkId::new(
                 format!("{sample_count}_samples"),

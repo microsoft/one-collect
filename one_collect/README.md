@@ -50,6 +50,13 @@ callstacks, including cache construction but excluding file I/O. To compare
 revisions, use `--save-baseline before` on the first run and `--baseline before`
 on the second, with the benchmark present in both and the same target directory.
 
+Set `ONE_COLLECT_BENCH_MEMORY=1` to also print, for one untimed pass per
+workload, the peak and retained heap bytes allocated during resolution:
+
+```sh
+ONE_COLLECT_BENCH_MEMORY=1 cargo bench --manifest-path one_collect/Cargo.toml --bench symbols -- symbol_resolution/sampled_user_ips --test
+```
+
 ## License
 
 Licensed under the [MIT](https://github.com/microsoft/one-collect/blob/main/LICENSE)
