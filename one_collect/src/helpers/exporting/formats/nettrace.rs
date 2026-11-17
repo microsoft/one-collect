@@ -898,16 +898,12 @@ impl NetTraceWriter {
         machine: &ExportMachine,
         replay: &ExportProcessReplay,
         converter: &dyn ExportGraphMetricValueConverter) -> anyhow::Result<()> {
-        if let Some(sample) = replay.sample_event() {
-            self.write_sample_replay_event(machine, replay, sample, converter)?;
-        }
-
+        /*
+         * Readers apply events in order, so at equal times the process
+         * must exist and mappings must precede the samples they govern.
+         */
         if replay.created_event() {
             self.write_created_replay_event(machine, replay)?;
-        }
-
-        if replay.exited_event() {
-            self.write_exited_replay_event(machine, replay)?;
         }
 
         if let Some(mapping) = replay.mapping_event() {
@@ -920,6 +916,14 @@ impl NetTraceWriter {
                     mapping,
                     symbol)?;
             }
+        }
+
+        if let Some(sample) = replay.sample_event() {
+            self.write_sample_replay_event(machine, replay, sample, converter)?;
+        }
+
+        if replay.exited_event() {
+            self.write_exited_replay_event(machine, replay)?;
         }
 
         Ok(())

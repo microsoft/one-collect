@@ -400,6 +400,7 @@ impl ExportProcessSample {
 
 const EXPORT_PROCESS_FLAG_CREATED: u8 = 1 << 0;
 const EXPORT_PROCESS_FLAG_EXITED: u8 = 1 << 1;
+const EXPORT_PROCESS_FLAG_CREATE_REPORTED: u8 = 1 << 2;
 
 pub struct ExportProcessReplay<'a> {
     process: &'a ExportProcess,
@@ -429,7 +430,16 @@ impl<'a> ExportProcessReplay<'a> {
 
     pub fn time(&self) -> u64 { self.current_time }
 
+    /*
+     * Several replay steps can share a time. Create is reported on the
+     * first of them, mappings before samples (a mapping governs samples
+     * at its own time), and exit on the last of them.
+     */
     pub fn created_event(&self) -> bool {
+        if self.flags & EXPORT_PROCESS_FLAG_CREATE_REPORTED != 0 {
+            return false;
+        }
+
         if let Some(time) = self.process.create_time_qpc {
             if time == self.current_time {
                 return true;
@@ -442,7 +452,7 @@ impl<'a> ExportProcessReplay<'a> {
     pub fn exited_event(&self) -> bool {
         if let Some(time) = self.process.exit_time_qpc {
             if time == self.current_time {
-                return true;
+                return !self.more_at_current_time();
             }
         }
 
@@ -450,6 +460,10 @@ impl<'a> ExportProcessReplay<'a> {
     }
 
     pub fn sample_event(&self) -> Option<&'a ExportProcessSample> {
+        if self.mapping_event().is_some() {
+            return None;
+        }
+
         if let Some(sample) = self.try_get_sample() {
             if sample.time() == self.current_time {
                 return Some(sample);
@@ -457,6 +471,21 @@ impl<'a> ExportProcessReplay<'a> {
         }
 
         None
+    }
+
+    fn more_at_current_time(&self) -> bool {
+        let at_time = |time: Option<u64>| time == Some(self.current_time);
+
+        if self.mapping_event().is_some() {
+            return at_time(self.process.mappings().get(self.mapping_index + 1).map(|m| m.time())) ||
+                at_time(self.try_get_sample().map(|s| s.time()));
+        }
+
+        if self.sample_event().is_some() {
+            return at_time(self.process.samples().get(self.sample_index + 1).map(|s| s.time()));
+        }
+
+        false
     }
 
     pub fn mapping_event(&self) -> Option<&'a ExportMapping> {
@@ -480,6 +509,10 @@ impl<'a> ExportProcessReplay<'a> {
     pub(crate) const fn done(&self) -> bool { self.current_time == u64::MAX }
 
     pub(crate) fn advance(&mut self) {
+        if self.created_event() {
+            self.flags |= EXPORT_PROCESS_FLAG_CREATE_REPORTED;
+        }
+
         /* Advance index by time */
         if self.sample_event().is_some() {
             self.sample_index += 1;
@@ -1156,6 +1189,45 @@ mod tests {
         for (i,sample) in proc.samples().iter().enumerate() {
             assert_eq!(i as u64, sample.time());
         }
+    }
+
+    #[test]
+    fn replay_orders_events_at_same_time() {
+        let mut proc = ExportProcess::new(1);
+
+        proc.set_create_time_qpc(10);
+        proc.set_exit_time_qpc(10);
+        proc.add_sample(ExportProcessSample::new(10, MetricValue::Count(0), 0, 0, 0, 0, 0));
+        proc.add_sample(ExportProcessSample::new(10, MetricValue::Count(0), 0, 0, 0, 0, 0));
+        proc.add_mapping(new_mapping(10, 10, 19, 1));
+        proc.add_mapping(new_mapping(10, 20, 29, 2));
+
+        proc.sort_samples_by_time();
+        proc.sort_mappings_by_time();
+
+        let mut replay = proc.to_replay();
+        let mut steps = Vec::new();
+
+        while !replay.done() {
+            assert_eq!(10, replay.time());
+
+            steps.push((
+                replay.created_event(),
+                replay.mapping_event().is_some(),
+                replay.sample_event().is_some(),
+                replay.exited_event()));
+
+            replay.advance();
+        }
+
+        assert_eq!(
+            vec![
+                (true, true, false, false),
+                (false, true, false, false),
+                (false, false, true, false),
+                (false, false, true, true),
+            ],
+            steps);
     }
 
     #[test]
