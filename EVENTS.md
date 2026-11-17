@@ -25,7 +25,8 @@ Event data is almost always a set of many fields, each having a different offset
 
 Linux tracepoint offsets include native alignment padding. NetTrace export packs supported fixed-size fields
 using those offsets, so numeric payload values match its sequential metadata. The stored event data retains
-its native layout for other consumers. Unsupported field types still limit the exported metadata.
+its native layout for other consumers. Copy ranges are computed once per event type, coalescing adjacent fields;
+already-packed layouts use a single payload copy. Unsupported field types still limit the exported metadata.
 
 The `nettrace` Criterion benchmark measures complete exports of 100,000 prebuilt records to a temporary file,
 with packed and padded six-field syscall layouts and 32-field layouts. Run it with
