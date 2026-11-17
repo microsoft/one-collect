@@ -533,7 +533,6 @@ pub struct RingBufDataSource {
     next_time: Option<u64>,
     oldest_cpu: Option<usize>,
     cpu_to_reader_index: Vec<Option<usize>>,
-    #[cfg(target_os = "linux")]
     wait_fds: Vec<pollfd>,
     in_process_ring_buf: Option<InProcessRingBuf>,
 }
@@ -569,7 +568,6 @@ impl RingBufDataSource {
             next_time: None,
             oldest_cpu: None,
             cpu_to_reader_index: Vec::new(),
-            #[cfg(target_os = "linux")]
             wait_fds: Vec::new(),
             enabled: false,
             in_process_ring_buf: None,
