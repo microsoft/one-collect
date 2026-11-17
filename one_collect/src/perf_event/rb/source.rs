@@ -953,9 +953,7 @@ impl RingBufDataSource {
         /* Poll every leader, including masked-out CPUs which can still
          * receive no_cpu_mask events. The in-process ring has no fd, so
          * retain the timeout as an upper bound on its latency. */
-        let timeout_ms = timeout.as_millis()
-            .saturating_add(u128::from(timeout.subsec_nanos() % 1_000_000 != 0))
-            .min(i32::MAX as u128) as i32;
+        let timeout_ms = timeout.as_millis().min(i32::MAX as u128) as i32;
         let result = unsafe {
             poll(self.wait_fds.as_mut_ptr(), self.wait_fds.len() as nfds_t, timeout_ms)
         };
