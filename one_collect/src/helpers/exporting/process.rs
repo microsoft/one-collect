@@ -844,6 +844,47 @@ impl ExportProcess {
         }
     }
 
+    /// Collects `(address, sample time)` for every kernel frame accepted by
+    /// `filter`, sorted and deduplicated.
+    pub fn get_kernel_ip_times(
+        &self,
+        filter: impl Fn(u64) -> bool,
+        ip_times: &mut Vec<(u64, u64)>,
+        frames: &mut Vec<u64>,
+        callstacks: &InternedCallstacks) {
+        ip_times.clear();
+        frames.clear();
+
+        for sample in &self.samples {
+            if sample.ip() < KERNEL_START {
+                continue;
+            }
+
+            let time = sample.time();
+
+            if filter(sample.ip()) {
+                ip_times.push((sample.ip(), time));
+            }
+
+            if callstacks.from_id(
+                sample.callstack_id(),
+                frames).is_ok() {
+                for frame in frames.iter() {
+                    if *frame < KERNEL_START {
+                        break;
+                    }
+
+                    if filter(*frame) {
+                        ip_times.push((*frame, time));
+                    }
+                }
+            }
+        }
+
+        ip_times.sort_unstable();
+        ip_times.dedup();
+    }
+
     pub fn add_matching_anon_symbols(
         &mut self,
         addrs: &mut HashSet<u64>,

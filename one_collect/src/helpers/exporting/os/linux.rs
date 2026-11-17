@@ -1580,6 +1580,13 @@ impl ExportMachineOSHooks for ExportMachine {
                 warn!("Kernel dynamic symbol records were lost or inconsistent, \
                     some BPF frames may be attributed with approximate lifetimes");
             }
+
+            let lost = self.lost_events();
+
+            if lost != 0 {
+                warn!("{} events were lost, kernel dynamic symbol records may be missing \
+                    so some BPF frames may be unknown or have approximate lifetimes", lost);
+            }
         }
 
         // Phase 2: Read kernel symbols once, keeping only those that match
@@ -1641,9 +1648,22 @@ impl ExportMachineOSHooks for ExportMachine {
 
         generations.sort_by_key(|symbol| (symbol.load_time(), symbol.start()));
 
+        /* Sampled addresses inside any generation, which need time scoping */
+        let mut dynamic_addrs: HashSet<u64> = HashSet::new();
+
+        for generation in &generations {
+            let first = all_addrs.partition_point(|addr| *addr < generation.start());
+            let last = all_addrs.partition_point(|addr| *addr <= generation.end());
+
+            dynamic_addrs.extend(all_addrs[first..last].iter().copied());
+        }
+
         let vmlinux_id = self.strings.to_id("vmlinux");
         let bpf_id = self.strings.to_id("[bpf]");
-        let mut proc_addrs: Vec<u64> = Vec::new();
+        let mut ip_times: Vec<(u64, u64)> = Vec::new();
+        let mut states: Vec<Option<usize>> = Vec::new();
+        let mut emitted: Vec<usize> = Vec::new();
+        let mut time_ambiguous = 0u64;
 
         // Phase 3: For each process, assign symbols from the matched set.
         let mut seen = vec![false; matched_symbols.len()];
@@ -1708,9 +1728,19 @@ impl ExportMachineOSHooks for ExportMachine {
                 continue;
             }
 
-            proc_addrs.clear();
-            proc_addrs.extend(addrs.iter().copied());
-            proc_addrs.sort();
+            proc.get_kernel_ip_times(
+                |addr| dynamic_addrs.contains(&addr),
+                &mut ip_times,
+                &mut frames,
+                &self.callstacks);
+
+            if ip_times.is_empty() {
+                continue;
+            }
+
+            states.clear();
+            states.resize(ip_times.len(), None);
+            emitted.clear();
 
             /*
              * Each generation becomes a mapping scoped to its load time.
@@ -1719,39 +1749,36 @@ impl ExportMachineOSHooks for ExportMachine {
              * tombstone only carries kallsyms symbols that are in tracked
              * dynamic ranges, i.e. code loaded after this generation that we
              * did not see register.
+             *
+             * Only generations this process sampled while they were live
+             * are added, so readers that resolve by address without time
+             * do not see code the process never ran.
              */
-            for generation in &generations {
-                let first = proc_addrs.partition_point(|addr| *addr < generation.start());
-                let last = proc_addrs.partition_point(|addr| *addr <= generation.end());
+            for (gen_index, generation) in generations.iter().enumerate() {
+                let first = ip_times.partition_point(|(addr, _)| *addr < generation.start());
+                let last = ip_times.partition_point(|(addr, _)| *addr <= generation.end());
 
                 if first == last {
                     continue;
                 }
 
-                let mut mapping = ExportMapping::new(
-                    generation.load_time(),
-                    bpf_id,
-                    generation.start(),
-                    generation.end(),
-                    0,
-                    false,
-                    self.map_index,
-                    UnwindType::DWARF);
+                let unload_time = generation.unload_time();
+                let mut live = false;
+                let mut after_unload = false;
 
-                self.map_index += 1;
+                for (index, (_, time)) in ip_times[first..last].iter().enumerate() {
+                    if generation.is_live_at(*time) {
+                        live = true;
+                        states[first + index] = Some(gen_index);
+                    } else if unload_time.map_or(false, |unload| *time >= unload) {
+                        after_unload = true;
+                    }
+                }
 
-                mapping.add_symbol(
-                    ExportSymbol::new(
-                        generation.name_id(),
-                        generation.start(),
-                        generation.end()));
-
-                proc.add_mapping(mapping);
-
-                if let Some(unload_time) = generation.unload_time() {
-                    let mut tombstone = ExportMapping::new(
-                        unload_time,
-                        vmlinux_id,
+                if live {
+                    let mut mapping = ExportMapping::new(
+                        generation.load_time(),
+                        bpf_id,
                         generation.start(),
                         generation.end(),
                         0,
@@ -1760,33 +1787,104 @@ impl ExportMachineOSHooks for ExportMachine {
                         UnwindType::DWARF);
 
                     self.map_index += 1;
-                    seen.fill(false);
 
-                    for addr in &proc_addrs[first..last] {
-                        let idx = match matched_symbols.binary_search_by_key(addr, |s| s.start) {
-                            Ok(i) => i,
-                            Err(0) => continue,
-                            Err(i) => i - 1,
-                        };
+                    mapping.add_symbol(
+                        ExportSymbol::new(
+                            generation.name_id(),
+                            generation.start(),
+                            generation.end()));
 
-                        let sym = &matched_symbols[idx];
+                    proc.add_mapping(mapping);
+                    emitted.push(gen_index);
+                }
 
-                        if *addr >= sym.start && *addr < sym.end && !seen[idx] &&
-                           sym.in_dynamic_range && generation.contains(sym.start) {
-                            seen[idx] = true;
+                let Some(unload_time) = unload_time else {
+                    continue;
+                };
 
-                            tombstone.add_symbol(
-                                ExportSymbol::new(
-                                    sym.name_id,
-                                    sym.start,
-                                    sym.end.min(generation.end())));
-                        }
+                if !live && !after_unload {
+                    continue;
+                }
+
+                let mut tombstone = ExportMapping::new(
+                    unload_time,
+                    vmlinux_id,
+                    generation.start(),
+                    generation.end(),
+                    0,
+                    false,
+                    self.map_index,
+                    UnwindType::DWARF);
+
+                self.map_index += 1;
+                seen.fill(false);
+
+                for (addr, time) in &ip_times[first..last] {
+                    if *time < unload_time {
+                        continue;
                     }
 
-                    proc.add_mapping(tombstone);
+                    let idx = match matched_symbols.binary_search_by_key(addr, |s| s.start) {
+                        Ok(i) => i,
+                        Err(0) => continue,
+                        Err(i) => i - 1,
+                    };
+
+                    let sym = &matched_symbols[idx];
+
+                    if *addr >= sym.start && *addr < sym.end && !seen[idx] &&
+                       sym.in_dynamic_range && generation.contains(sym.start) {
+                        seen[idx] = true;
+
+                        tombstone.add_symbol(
+                            ExportSymbol::new(
+                                sym.name_id,
+                                sym.start,
+                                sym.end.min(generation.end())));
+                    }
                 }
+
+                proc.add_mapping(tombstone);
+            }
+
+            /*
+             * Count addresses that only resolve correctly with time: their
+             * samples span generations or gaps, or another emitted
+             * generation's symbol also covers them.
+             */
+            let mut index = 0;
+
+            while index < ip_times.len() {
+                let addr = ip_times[index].0;
+                let state = states[index];
+                let mut end = index + 1;
+
+                while end < ip_times.len() && ip_times[end].0 == addr {
+                    end += 1;
+                }
+
+                if states[index..end].iter().any(|other| *other != state) ||
+                   emitted.iter().any(|gen_index| {
+                       Some(*gen_index) != state &&
+                       generations[*gen_index].contains(addr)
+                   }) {
+                    time_ambiguous += 1;
+                }
+
+                index = end;
             }
         }
+
+        if time_ambiguous != 0 {
+            warn!("{} sampled kernel dynamic code addresses need time to resolve: \
+                within the same process they ran under more than one code generation \
+                (or while nothing was loaded there), or overlap another generation's \
+                symbol. Exported symbols are time scoped, but readers that resolve \
+                symbols by address alone (e.g. TraceEvent universal symbols) may \
+                attribute these frames to the wrong generation", time_ambiguous);
+        }
+
+        self.kernel_dynamic_symbols.stats_mut().time_ambiguous_addresses = time_ambiguous;
     }
     fn os_add_dynamic_symbol(
         &mut self,
@@ -2081,7 +2179,10 @@ fn loaded_bpf_functions() -> Vec<LoadedBpfFunction> {
             let err = std::io::Error::last_os_error();
 
             if err.raw_os_error() != Some(libc::ENOENT) {
-                debug!("Unable to enumerate BPF programs: {}", err);
+                warn!("Unable to enumerate loaded BPF programs ({}); samples in BPF \
+                    programs loaded before tracing began whose unload is not recorded \
+                    (they unload after recording stops but before trace finalization, \
+                    or their unload record is lost) will be unknown", err);
             }
 
             break;
@@ -2569,6 +2670,77 @@ mod tests {
         assert_eq!(
             Some("tail_fn".to_string()),
             resolve_kernel(&machine, 20, tail_fn + 0x10, SEC + SEC / 2));
+    }
+
+    #[test]
+    fn kernel_mappings_bpf_emitted_only_when_sampled_live() {
+        let mut machine = kernel_test_machine();
+
+        add_bpf(&mut machine, SEC, BPF_X, 256, false, "[bpf] bpf_prog_a");
+        add_bpf(&mut machine, 2 * SEC, BPF_X, 256, true, "[bpf] bpf_prog_a");
+        add_bpf(&mut machine, 3 * SEC, BPF_X, 128, false, "[bpf] bpf_prog_b");
+        add_bpf(&mut machine, 4 * SEC, BPF_X, 128, true, "[bpf] bpf_prog_b");
+
+        let at = BPF_X + 64;
+
+        /* Runs A, then the gap, then B at the same address */
+        for time in [SEC + SEC / 2, 2 * SEC + SEC / 2, 3 * SEC + SEC / 2] {
+            add_kernel_sample(&mut machine, 10, time, &[at]);
+        }
+
+        /* Only runs B */
+        add_kernel_sample(&mut machine, 30, 3 * SEC + SEC / 2, &[at]);
+
+        /* Only runs in the gap after A */
+        add_kernel_sample(&mut machine, 40, 2 * SEC + SEC / 2, &[at]);
+
+        /* Only runs A, twice */
+        add_kernel_sample(&mut machine, 50, SEC + SEC / 4, &[at]);
+        add_kernel_sample(&mut machine, 50, SEC + SEC / 2, &[at]);
+
+        /* Runs A's tail, then B at an address A's extent also covers */
+        add_kernel_sample(&mut machine, 60, SEC + SEC / 2, &[BPF_X + 200]);
+        add_kernel_sample(&mut machine, 60, 3 * SEC + SEC / 2, &[BPF_X + 100]);
+
+        machine.add_kernel_mappings_with(&mut KallsymsMock::new(Vec::new()));
+
+        let names = |pid: u32| -> Vec<String> {
+            let mut names: Vec<String> = machine.find_process(pid).unwrap()
+                .mappings()
+                .iter()
+                .flat_map(|mapping| mapping.symbols())
+                .map(|symbol| machine.strings().from_id(symbol.name_id()).unwrap().to_string())
+                .collect();
+
+            names.sort();
+            names
+        };
+
+        assert_eq!(vec!["[bpf] bpf_prog_a", "[bpf] bpf_prog_b"], names(10));
+        assert_eq!(vec!["[bpf] bpf_prog_b"], names(30));
+        assert!(names(40).is_empty());
+        assert_eq!(vec!["[bpf] bpf_prog_a"], names(50));
+
+        assert_eq!(
+            Some("[bpf] bpf_prog_b".to_string()),
+            resolve_kernel(&machine, 30, at, 3 * SEC + SEC / 2));
+        assert_eq!(None, resolve_kernel(&machine, 40, at, 2 * SEC + SEC / 2));
+        assert_eq!(
+            Some("[bpf] bpf_prog_a".to_string()),
+            resolve_kernel(&machine, 50, at, SEC + SEC / 4));
+
+        /*
+         * Process 10 ran the same address under different generations and
+         * process 60 ran B's code inside A's extent; only time can resolve
+         * those. A's tail in process 60 is unambiguous.
+         */
+        assert_eq!(
+            Some("[bpf] bpf_prog_a".to_string()),
+            resolve_kernel(&machine, 60, BPF_X + 200, SEC + SEC / 2));
+        assert_eq!(
+            Some("[bpf] bpf_prog_b".to_string()),
+            resolve_kernel(&machine, 60, BPF_X + 100, 3 * SEC + SEC / 2));
+        assert_eq!(2, machine.kernel_dynamic_symbols().stats().time_ambiguous_addresses);
     }
 
     #[test]

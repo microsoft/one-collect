@@ -577,6 +577,26 @@ impl RingBufBuilder<Kernel> {
     pub(crate) fn build(&self) -> CommonRingBuf {
         CommonRingBuf::new(self.attributes)
     }
+
+    /*
+     * Returns a ring buffer producing only kernel dynamic symbol records with
+     * the same record layout, or None if those records were not requested.
+     * Used to observe code loaded by tasks outside of a PID filtered set.
+     */
+    pub(crate) fn ksymbol_only(&self) -> Option<CommonRingBuf> {
+        if self.attributes.flags & FLAG_KSYMBOL == 0 {
+            return None;
+        }
+
+        let mut attributes = self.attributes;
+
+        attributes.flags &= !(FLAG_MMAP | FLAG_MMAP2 | FLAG_MMAP_DATA |
+            FLAG_COMM | FLAG_COMM_EXEC | FLAG_TASK | FLAG_CONTEXT_SWITCH |
+            FLAG_NAMESPACES | FLAG_CGROUP | FLAG_BPF_EVENT | FLAG_TEXT_POKE |
+            FLAG_INHERIT);
+
+        Some(CommonRingBuf::new(attributes))
+    }
 }
 
 #[repr(C)]
@@ -1436,6 +1456,31 @@ mod tests {
             dest[i] = *b;
             i += 1;
         }
+    }
+
+    #[test]
+    fn ksymbol_only_keeps_layout_and_drops_other_records() {
+        let kernel = RingBufBuilder::for_kernel()
+            .with_comm_records()
+            .with_task_records()
+            .with_all_mmap_records();
+
+        assert!(kernel.ksymbol_only().is_none());
+
+        let kernel = kernel.with_ksymbol_records();
+        let full = kernel.build();
+        let ksymbols = kernel.ksymbol_only().unwrap();
+
+        let records = FLAG_MMAP | FLAG_MMAP2 | FLAG_MMAP_DATA |
+            FLAG_COMM | FLAG_COMM_EXEC | FLAG_TASK;
+
+        assert_eq!(0, ksymbols.attributes.flags & records);
+        assert_ne!(0, ksymbols.attributes.flags & FLAG_KSYMBOL);
+        assert_eq!(full.attributes.sample_type, ksymbols.attributes.sample_type);
+        assert_eq!(full.attributes.clockid, ksymbols.attributes.clockid);
+        assert_eq!(
+            full.attributes.flags & (FLAG_SAMPLE_ID_ALL | FLAG_USE_CLOCKID),
+            ksymbols.attributes.flags & (FLAG_SAMPLE_ID_ALL | FLAG_USE_CLOCKID));
     }
 
     #[test]

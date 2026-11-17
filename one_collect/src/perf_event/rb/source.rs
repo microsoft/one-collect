@@ -759,6 +759,33 @@ impl RingBufDataSource {
                     &common,
                     None)?;
             }
+
+            /*
+             * Task bound events only receive kernel dynamic symbol records
+             * for code the task itself loads or unloads. Target processes
+             * can run BPF programs loaded by others, so also observe those
+             * system wide when permitted.
+             */
+            if let Some(ksymbols) = self.kernel_builder
+                .as_ref()
+                .and_then(|builder| builder.ksymbol_only()) {
+                let before: HashSet<u64> = self.ring_bufs.keys().copied().collect();
+
+                if let Err(err) = Self::add_cpu_bufs(
+                    None,
+                    &None,
+                    &self.leader_ids,
+                    &mut self.ring_bufs,
+                    &ksymbols,
+                    None) {
+                    Self::remove_new_bufs(&mut self.ring_bufs, &before);
+
+                    warn!("Unable to observe kernel dynamic symbols system wide ({}); \
+                        symbols of BPF programs loaded or unloaded by processes other \
+                        than the targets may be unknown if they unload before trace \
+                        finalization", err);
+                }
+            }
         }
 
         /* Add in profiling samples and redirect to kernel outputs */

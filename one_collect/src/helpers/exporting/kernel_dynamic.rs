@@ -127,6 +127,11 @@ pub struct KernelDynamicSymbolStats {
     /// Symbols taken from a snapshot of already loaded code that were not
     /// otherwise described by records.
     pub snapshot_symbols: u64,
+    /// Distinct (process, address) pairs whose samples fall in more than
+    /// one generation, or in a generation and outside of any, or that are
+    /// also covered by another generation emitted for the process. Readers
+    /// that resolve symbols by address without time can misattribute these.
+    pub time_ambiguous_addresses: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -156,6 +161,8 @@ impl KernelDynamicSymbols {
     pub fn symbols(&self) -> &[KernelDynamicSymbol] { &self.symbols }
 
     pub fn stats(&self) -> &KernelDynamicSymbolStats { &self.stats }
+
+    pub(crate) fn stats_mut(&mut self) -> &mut KernelDynamicSymbolStats { &mut self.stats }
 
     fn valid_extent(
         address: u64,
