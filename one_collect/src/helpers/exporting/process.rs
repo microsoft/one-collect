@@ -550,6 +550,7 @@ pub struct ExportProcess {
     create_time_qpc: Option<u64>,
     exit_time_qpc: Option<u64>,
     dyn_symbols: Vec<ExportTimeSymbol>,
+    user_ips: OnceCell<Vec<u64>>,
     user_page_map: OnceCell<SymbolPageMap>,
 }
 
@@ -584,6 +585,7 @@ impl ExportProcess {
             create_time_qpc: None,
             exit_time_qpc: None,
             dyn_symbols: Vec::new(),
+            user_ips: OnceCell::new(),
             user_page_map: OnceCell::new(),
         }
     }
@@ -640,18 +642,9 @@ impl ExportProcess {
             /* Only build the map once until new samples come in */
             let page_map = self.user_page_map.get_or_init(|| {
                 let mut page_map = SymbolPageMap::new(256);
-                let mut addrs = HashSet::new();
-                let mut frames = Vec::new();
 
-                Self::get_unique_user_ips(
-                    &self.samples,
-                    &mut addrs,
-                    &mut frames,
-                    callstacks,
-                    None);
-
-                for addr in addrs {
-                    page_map.mark_ip(addr);
+                for addr in self.cached_user_ips(callstacks, None) {
+                    page_map.mark_ip(*addr);
                 }
 
                 page_map
@@ -763,7 +756,8 @@ impl ExportProcess {
         sample: ExportProcessSample) {
         self.samples.push(sample);
 
-        /* Clear page map */
+        /* Invalidate sample-derived caches. */
+        self.user_ips = OnceCell::new();
         self.user_page_map = OnceCell::new();
     }
 
@@ -855,17 +849,14 @@ impl ExportProcess {
         frames.clear();
 
         let pid = self.pid();
-        for map in self.mappings.mappings_mut() {
+        for map_index in 0..self.mappings().len() {
+            let map = &self.mappings()[map_index];
             if !map.anon() {
                 continue;
             }
 
-            Self::get_unique_user_ips(
-                &self.samples,
-                addrs,
-                frames,
-                &callstacks,
-                Some(map));
+            addrs.clear();
+            addrs.extend(self.cached_user_ips(callstacks, Some(map)));
 
             if addrs.is_empty() {
                 debug!("add_matching_anon_symbols: no unique IPs in anonymous mapping: pid={}, mapping_start={:#x}",
@@ -878,10 +869,41 @@ impl ExportProcess {
                 frames.push(*addr);
             }
 
-            map.add_matching_symbols(
+            self.mappings_mut()[map_index].add_matching_symbols(
                 frames,
                 sym_reader,
                 strings);
+        }
+    }
+
+    /* Share one sample scan across symbol readers and restrict each mapping by binary search. */
+    pub(crate) fn cached_user_ips(
+        &self,
+        callstacks: &InternedCallstacks,
+        mapping: Option<&ExportMapping>) -> &[u64] {
+        let ips = self.user_ips.get_or_init(|| {
+            let mut addrs = HashSet::new();
+            let mut frames = Vec::new();
+            Self::get_unique_user_ips(
+                &self.samples,
+                &mut addrs,
+                &mut frames,
+                callstacks,
+                None);
+
+            let mut ips: Vec<_> = addrs.into_iter().collect();
+            ips.sort_unstable();
+            ips
+        });
+
+        match mapping {
+            Some(mapping) => {
+                let start = ips.partition_point(|ip| *ip < mapping.start());
+                /* ExportMapping includes both endpoints. */
+                let end = ips[start..].partition_point(|ip| *ip <= mapping.end()) + start;
+                &ips[start..end]
+            },
+            None => ips,
         }
     }
 
@@ -943,6 +965,62 @@ impl ExportProcess {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_user_ips_preserve_mapping_matches() {
+        let mut proc = ExportProcess::new(1);
+        let mut callstacks = InternedCallstacks::new(8);
+        let stack = callstacks.to_id(&[KERNEL_START, 30, 10, 30, 0, KERNEL_START - 1]);
+        proc.add_sample(ExportProcessSample::new(
+            0, MetricValue::Count(1), 0, 0, 1, 20, stack));
+        proc.add_sample(ExportProcessSample::new(
+            1, MetricValue::Count(1), 0, 0, 1, KERNEL_START, stack));
+        proc.add_sample(ExportProcessSample::new(
+            2, MetricValue::Count(1), 0, 0, 1, 40, u32::MAX as usize));
+
+        assert_eq!(proc.cached_user_ips(&callstacks, None),
+            &[0, 10, 20, 30, 40, KERNEL_START - 1]);
+        let cached = proc.user_ips.get().unwrap().as_ptr();
+        let mut addrs = HashSet::new();
+        let mut frames = Vec::new();
+        for (start, end) in [
+            (0, 0), (0, 10), (10, 30), (11, 29), (30, 40), (41, 50),
+            (KERNEL_START - 1, u64::MAX), (KERNEL_START, u64::MAX),
+        ] {
+            let map = new_mapping(0, start, end, 0);
+            ExportProcess::get_unique_user_ips(
+                proc.samples(), &mut addrs, &mut frames, &callstacks, Some(&map));
+            let mut expected: Vec<_> = addrs.iter().copied().collect();
+            expected.sort_unstable();
+            assert_eq!(proc.cached_user_ips(&callstacks, Some(&map)), expected);
+            assert_eq!(proc.user_ips.get().unwrap().as_ptr(), cached);
+        }
+    }
+
+    #[test]
+    fn cached_user_ips_invalidated_with_samples() {
+        let mut proc = ExportProcess::new(1);
+        let mut callstacks = InternedCallstacks::new(8);
+        let mut symbol = DynamicSymbol::new(0, 1, 0x1000, 0x10ff, "sampled");
+        symbol.set_flag(SYM_FLAG_MUST_MATCH);
+        assert!(!proc.needs_dynamic_symbol(&symbol, &callstacks));
+        assert!(proc.cached_user_ips(&callstacks, None).is_empty());
+
+        let stack = callstacks.to_id(&[0x1000]);
+        proc.add_sample(ExportProcessSample::new(
+            0, MetricValue::Count(1), 0, 0, 1, 0x2000, stack));
+        assert!(proc.user_ips.get().is_none());
+        assert!(proc.user_page_map.get().is_none());
+        assert_eq!(proc.cached_user_ips(&callstacks, None), &[0x1000, 0x2000]);
+        assert!(proc.needs_dynamic_symbol(&symbol, &callstacks));
+
+        proc.add_sample(ExportProcessSample::new(
+            1, MetricValue::Count(1), 0, 0, 1, 0x3000, stack));
+        assert_eq!(proc.cached_user_ips(&callstacks, None), &[0x1000, 0x2000, 0x3000]);
+
+        let fork = proc.fork(2);
+        assert!(fork.cached_user_ips(&callstacks, None).is_empty());
+    }
 
     fn new_mapping(
         time: u64,
