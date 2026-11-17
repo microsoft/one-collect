@@ -27,6 +27,11 @@ Linux tracepoint offsets include native alignment padding. NetTrace export packs
 using those offsets, so numeric payload values match its sequential metadata. The stored event data retains
 its native layout for other consumers. Unsupported field types still limit the exported metadata.
 
+The `nettrace` Criterion benchmark measures complete exports of 100,000 prebuilt records to a temporary file,
+with packed and padded six-field syscall layouts and 32-field layouts. Run it with
+`cargo bench --manifest-path one_collect/Cargo.toml --bench nettrace`. Record construction is excluded;
+serialization and buffered file I/O are included, but durable disk flushes are not.
+
 ```mermaid
 flowchart TD
     event[Event] --> fmt
