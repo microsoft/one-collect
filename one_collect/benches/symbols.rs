@@ -1,22 +1,23 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use criterion::{
     black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput,
 };
+use one_collect::helpers::exporting::process::MetricValue;
 use one_collect::helpers::exporting::symbols::{ElfSymbolReader, GoPclnTabSymbolReader};
-use one_collect::helpers::exporting::{ExportMachine, ExportMapping, ExportSymbolReader};
-use one_collect::intern::InternedStrings;
+use one_collect::helpers::exporting::{
+    ExportMachine, ExportMapping, ExportProcess, ExportProcessSample, ExportSymbolReader,
+};
+use one_collect::intern::{InternedCallstacks, InternedStrings};
 use one_collect::unwind::{ElfLoadHeader, UnwindType};
 
 #[cfg(target_os = "linux")]
-use one_collect::helpers::exporting::process::MetricValue;
-#[cfg(target_os = "linux")]
-use one_collect::helpers::exporting::{ExportProcessSample, ExportSettings};
+use one_collect::helpers::exporting::ExportSettings;
 
 const LOAD_VADDR: u64 = 0x400000;
 const MAPPING_START: u64 = 0x10000000;
@@ -350,6 +351,151 @@ fn benchmark_export_machine(
     group.finish();
 }
 
+const USER_IP_MAPPING_LEN: u64 = 0x10000;
+const USER_IP_STACKS: usize = 512;
+const USER_IP_FRAMES: usize = 20;
+
+fn user_ip(stack: usize, frame: usize, mapping_count: usize) -> u64 {
+    let mapping = (stack * 37 + frame * 17) % mapping_count;
+    let offset = ((stack * 103 + frame * 29) as u64 % (USER_IP_MAPPING_LEN / 16)) * 16;
+    MAPPING_START + mapping as u64 * USER_IP_MAPPING_LEN + offset
+}
+
+fn user_ip_process(
+    sample_count: usize,
+    mapping_count: usize,
+    stack_ids: &[usize],
+) -> ExportProcess {
+    let mut process = ExportProcess::new(1);
+    for mapping in 0..mapping_count {
+        let start = MAPPING_START + mapping as u64 * USER_IP_MAPPING_LEN;
+        process.add_mapping(ExportMapping::new(
+            0,
+            0,
+            start,
+            start + USER_IP_MAPPING_LEN - 1,
+            0,
+            true,
+            mapping,
+            UnwindType::Prolog,
+        ));
+    }
+
+    for sample in 0..sample_count {
+        let stack = sample % stack_ids.len();
+        process.add_sample(ExportProcessSample::new(
+            sample as u64,
+            MetricValue::Count(1),
+            0,
+            0,
+            1,
+            user_ip(stack, 0, mapping_count),
+            stack_ids[stack],
+        ));
+    }
+    process
+}
+
+struct UserIpSymbolReader {
+    mapping_count: usize,
+    index: usize,
+}
+
+impl ExportSymbolReader for UserIpSymbolReader {
+    fn reset(&mut self) {
+        self.index = 0;
+    }
+
+    fn next(&mut self) -> bool {
+        if self.index == self.mapping_count {
+            return false;
+        }
+        self.index += 1;
+        true
+    }
+
+    fn start(&self) -> u64 {
+        MAPPING_START + (self.index - 1) as u64 * USER_IP_MAPPING_LEN
+    }
+
+    fn end(&self) -> u64 {
+        self.start() + USER_IP_MAPPING_LEN - 1
+    }
+
+    fn name(&self) -> &str {
+        "sampled_symbol"
+    }
+
+    fn demangle(&mut self) -> Option<String> {
+        None
+    }
+}
+
+fn benchmark_sampled_user_ips(c: &mut Criterion) {
+    let mut group = c.benchmark_group("symbol_resolution/sampled_user_ips");
+    group.sample_size(10);
+
+    // The synthetic reader removes file I/O while still matching symbols for every mapping.
+    for (sample_count, mapping_count) in [(25_000, 16), (25_000, 256), (200_000, 256)] {
+        let mut callstacks = InternedCallstacks::new(USER_IP_STACKS * 2);
+        let stack_ids: Vec<_> = (0..USER_IP_STACKS)
+            .map(|stack| {
+                let frames: Vec<_> = (0..USER_IP_FRAMES)
+                    .map(|frame| user_ip(stack, frame, mapping_count))
+                    .collect();
+                callstacks.to_id(&frames)
+            })
+            .collect();
+        let mut reader = UserIpSymbolReader {
+            mapping_count,
+            index: 0,
+        };
+        let mut addrs = HashSet::new();
+        let mut frames = Vec::new();
+        let mut strings = InternedStrings::new(32);
+
+        let mut process = user_ip_process(sample_count, mapping_count, &stack_ids);
+        process.add_matching_anon_symbols(
+            &mut addrs,
+            &mut frames,
+            &mut reader,
+            &callstacks,
+            &mut strings,
+        );
+        for mapping in process.mappings() {
+            assert_eq!(mapping.symbols().len(), 1);
+            assert_eq!(mapping.symbols()[0].start(), mapping.start());
+            assert_eq!(mapping.symbols()[0].end(), mapping.end());
+        }
+
+        group.throughput(Throughput::Elements(sample_count as u64));
+        group.bench_function(
+            BenchmarkId::new(
+                format!("{sample_count}_samples"),
+                format!("{mapping_count}_mappings"),
+            ),
+            |b| {
+                // A fresh process ensures that each measured pass builds its own IP cache.
+                b.iter_batched(
+                    || user_ip_process(sample_count, mapping_count, &stack_ids),
+                    |mut process| {
+                        process.add_matching_anon_symbols(
+                            &mut addrs,
+                            &mut frames,
+                            &mut reader,
+                            &callstacks,
+                            &mut strings,
+                        );
+                        black_box(process);
+                    },
+                    BatchSize::PerIteration,
+                )
+            },
+        );
+    }
+    group.finish();
+}
+
 pub fn criterion_benchmark(c: &mut Criterion) {
     let elf_path = fixture("symbol_benchmark_elf");
     let go_path = fixture("symbol_benchmark_go");
@@ -383,6 +529,8 @@ pub fn criterion_benchmark(c: &mut Criterion) {
             .collect();
         benchmark_export_machine(c, &elf_path, &go_path, &symbol_vas);
     }
+
+    benchmark_sampled_user_ips(c);
 }
 
 criterion_group!(benches, criterion_benchmark);

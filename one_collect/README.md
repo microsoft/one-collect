@@ -37,6 +37,19 @@ version 1.0 release.
 
 - `scripting` *(default)* — enables the Rhai-based scripting support.
 
+## Benchmarks
+
+From the repository root, run the sampled user IP resolution benchmark with:
+
+```sh
+cargo bench --manifest-path one_collect/Cargo.toml --bench symbols -- symbol_resolution/sampled_user_ips
+```
+
+It measures anonymous-mapping resolution with synthetic symbols and 20-frame
+callstacks, including cache construction but excluding file I/O. To compare
+revisions, use `--save-baseline before` on the first run and `--baseline before`
+on the second, with the benchmark present in both and the same target directory.
+
 ## License
 
 Licensed under the [MIT](https://github.com/microsoft/one-collect/blob/main/LICENSE)
