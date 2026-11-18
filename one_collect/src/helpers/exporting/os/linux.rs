@@ -1744,11 +1744,8 @@ impl ExportMachineOSHooks for ExportMachine {
 
             /*
              * Each generation becomes a mapping scoped to its load time.
-             * Once it unloads, a tombstone mapping over the same range takes
-             * over so later samples do not resolve to stale code. The
-             * tombstone only carries kallsyms symbols that are in tracked
-             * dynamic ranges, i.e. code loaded after this generation that we
-             * did not see register.
+             * Its unload event ends that mapping's lifetime without
+             * synthesizing a replacement mapping over the address range.
              *
              * Only generations this process sampled while they were live
              * are added, so readers that resolve by address without time
@@ -1764,18 +1761,16 @@ impl ExportMachineOSHooks for ExportMachine {
 
                 let unload_time = generation.unload_time();
                 let mut live = false;
-                let mut after_unload = false;
 
                 for (index, (_, time)) in ip_times[first..last].iter().enumerate() {
                     if generation.is_live_at(*time) {
                         live = true;
                         states[first + index] = Some(gen_index);
-                    } else if unload_time.map_or(false, |unload| *time >= unload) {
-                        after_unload = true;
                     }
                 }
 
                 if live {
+                    let mapping_id = self.map_index;
                     let mut mapping = ExportMapping::new(
                         generation.load_time(),
                         bpf_id,
@@ -1796,55 +1791,16 @@ impl ExportMachineOSHooks for ExportMachine {
 
                     proc.add_mapping(mapping);
                     emitted.push(gen_index);
-                }
 
-                let Some(unload_time) = unload_time else {
-                    continue;
-                };
-
-                if !live && !after_unload {
-                    continue;
-                }
-
-                let mut tombstone = ExportMapping::new(
-                    unload_time,
-                    vmlinux_id,
-                    generation.start(),
-                    generation.end(),
-                    0,
-                    false,
-                    self.map_index,
-                    UnwindType::DWARF);
-
-                self.map_index += 1;
-                seen.fill(false);
-
-                for (addr, time) in &ip_times[first..last] {
-                    if *time < unload_time {
-                        continue;
-                    }
-
-                    let idx = match matched_symbols.binary_search_by_key(addr, |s| s.start) {
-                        Ok(i) => i,
-                        Err(0) => continue,
-                        Err(i) => i - 1,
-                    };
-
-                    let sym = &matched_symbols[idx];
-
-                    if *addr >= sym.start && *addr < sym.end && !seen[idx] &&
-                       sym.in_dynamic_range && generation.contains(sym.start) {
-                        seen[idx] = true;
-
-                        tombstone.add_symbol(
-                            ExportSymbol::new(
-                                sym.name_id,
-                                sym.start,
-                                sym.end.min(generation.end())));
+                    if let Some(unload_time) = unload_time {
+                        proc.add_mapping_unload(
+                            ExportMappingUnload::new(
+                                unload_time,
+                                mapping_id,
+                                generation.start(),
+                                generation.end()));
                     }
                 }
-
-                proc.add_mapping(tombstone);
             }
 
             /*
@@ -2651,6 +2607,15 @@ mod tests {
         let mapping = machine.find_process(10).unwrap()
             .find_mapping(at, Some(SEC + SEC / 2)).unwrap();
         assert_eq!("[bpf]", machine.strings().from_id(mapping.filename_id()).unwrap());
+        let process = machine.find_process(10).unwrap();
+        assert_eq!(2, process.mapping_unloads().len());
+        for unload in process.mapping_unloads() {
+            assert!(process.mappings().iter().any(|mapping| {
+                mapping.id() == unload.id() &&
+                    mapping.start() == unload.start() &&
+                    mapping.end() == unload.end()
+            }));
+        }
 
         /* Callstack frame in another process */
         assert_eq!(
@@ -2764,9 +2729,8 @@ mod tests {
         assert_eq!(
             Some("[bpf] bpf_prog_a".to_string()),
             resolve_kernel(&machine, 10, BPF_X + 8, SEC));
-        assert_eq!(
-            Some("[bpf] bpf_prog_c".to_string()),
-            resolve_kernel(&machine, 10, BPF_X + 8, 3 * SEC));
+        /* C's load was not observed, so it remains unknown after A unloads. */
+        assert_eq!(None, resolve_kernel(&machine, 10, BPF_X + 8, 3 * SEC));
         assert_eq!(None, resolve_kernel(&machine, 10, BPF_X + 0x80, 3 * SEC));
     }
 

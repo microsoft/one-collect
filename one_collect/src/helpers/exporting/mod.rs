@@ -85,6 +85,7 @@ pub use process::{
     ExportProcess,
     ExportProcessSample,
     ExportProcessReplay,
+    ExportMappingUnload,
 };
 
 pub mod mappings;
@@ -1536,6 +1537,7 @@ impl ExportMachine {
             /* Sort */
             process.sort_samples_by_time();
             process.sort_mappings_by_time();
+            process.sort_mapping_unloads_by_time();
         }
 
         /* Replays are immutable refs */

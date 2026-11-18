@@ -378,6 +378,14 @@ impl ExportMappingLookup {
         &self,
         address: u64,
         time: Option<u64>) -> Option<usize> {
+        self.find_index_where(address, time, |_| true)
+    }
+
+    pub fn find_index_where(
+        &self,
+        address: u64,
+        time: Option<u64>,
+        mut include: impl FnMut(&ExportMapping) -> bool) -> Option<usize> {
         let time = match time {
             Some(time) => { time },
             None => { u64::MAX },
@@ -396,7 +404,7 @@ impl ExportMappingLookup {
             for index in self.lookup.borrow_mut().find(address) {
                 let map = &self.mappings[*index as usize];
 
-                if map.contains_ip(address) && map.time() <= time {
+                if map.contains_ip(address) && map.time() <= time && include(map) {
                     match best {
                         Some(existing) => {
                             if Self::is_better(map, existing) {
@@ -414,7 +422,7 @@ impl ExportMappingLookup {
         } else {
             /* Minimal items, no lookup, scan range */
             for (index, map) in self.mappings.iter().enumerate() {
-                if map.contains_ip(address) && map.time() <= time {
+                if map.contains_ip(address) && map.time() <= time && include(map) {
                     match best {
                         Some(existing) => {
                             if Self::is_better(map, existing) {

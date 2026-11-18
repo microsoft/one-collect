@@ -166,6 +166,12 @@ const PROCESS_MAPPING_FIELDS: [NetTraceField; 6] = [
     META_ID_FIELD,
 ];
 
+const PROCESS_MAPPING_UNLOAD_FIELDS: [NetTraceField; 3] = [
+    ID_FIELD,
+    START_ADDRESS_FIELD,
+    END_ADDRESS_FIELD,
+];
+
 const PROCESS_MAPPING_META_FIELDS: [NetTraceField; 3] = [
     ID_FIELD,
     SYMBOL_META_FIELD,
@@ -279,6 +285,7 @@ struct NetTraceWriter {
     create_event_id: u32,
     exit_event_id: u32,
     mapping_event_id: u32,
+    mapping_unload_event_id: u32,
     symbol_event_id: u32,
     mapping_meta_event_id: u32,
     original_meta_event_ids: HashSet<u32>,
@@ -324,6 +331,7 @@ impl NetTraceWriter {
             create_event_id: 0,
             exit_event_id: 0,
             mapping_event_id: 0,
+            mapping_unload_event_id: 0,
             symbol_event_id: 0,
             mapping_meta_event_id: 0,
             original_meta_event_ids: HashSet::new(),
@@ -864,6 +872,25 @@ impl NetTraceWriter {
             replay)
     }
 
+    fn write_mapping_unload_replay_event(
+        &mut self,
+        machine: &ExportMachine,
+        replay: &ExportProcessReplay,
+        unload: &ExportMappingUnload) -> anyhow::Result<()> {
+        self.buffer.clear();
+        self.buffer.write_varint(unload.id() as u64)?;
+        self.buffer.write_varint(unload.start())?;
+        self.buffer.write_varint(unload.end())?;
+
+        self.write_event_blob_from_buffer(
+            machine,
+            self.mapping_unload_event_id,
+            0,
+            None,
+            None,
+            replay)
+    }
+
     fn write_mapping_symbol_replay_event(
         &mut self,
         machine: &ExportMachine,
@@ -900,10 +927,14 @@ impl NetTraceWriter {
         converter: &dyn ExportGraphMetricValueConverter) -> anyhow::Result<()> {
         /*
          * Readers apply events in order, so at equal times the process
-         * must exist and mappings must precede the samples they govern.
+         * must exist; unloads precede mappings, which precede samples.
          */
         if replay.created_event() {
             self.write_created_replay_event(machine, replay)?;
+        }
+
+        if let Some(unload) = replay.mapping_unload_event() {
+            self.write_mapping_unload_replay_event(machine, replay, unload)?;
         }
 
         if let Some(mapping) = replay.mapping_event() {
@@ -1218,6 +1249,18 @@ impl NetTraceWriter {
             5, /* Stable ID */
             "ProcessMappingMetadata",
             &PROCESS_MAPPING_META_FIELDS)?;
+
+        meta_id += 1;
+
+        self.mapping_unload_event_id = meta_id;
+
+        self.write_event_metadata(
+            &mut block_start,
+            meta_id,
+            "Universal.System",
+            6, /* Stable ID */
+            "ProcessMappingUnload",
+            &PROCESS_MAPPING_UNLOAD_FIELDS)?;
 
         /* Done writing metadata */
         self.write_end_block(block_start.start, 3)
@@ -1915,7 +1958,7 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, 3);
-        assert_eq!(next_id, 607);
+        assert_eq!(next_id, 608);
     }
 
     #[test]
@@ -2252,6 +2295,11 @@ mod tests {
         expected.extend_from_slice(name.as_bytes());
         expected.push(0); // No mapping metadata.
         assert_eq!(writer.buffer, expected);
+        writer.write_mapping_unload_replay_event(
+            &machine,
+            &replay,
+            &ExportMappingUnload::new(1, 7, 0x1000, 0x2000)).unwrap();
+        assert_eq!(writer.buffer, vec![7, 0x80, 0x20, 0x80, 0x40]);
         writer.output.flush().unwrap();
         drop(writer);
 
@@ -2269,14 +2317,16 @@ mod tests {
             let mut row = CodedInputStream::from_bytes(&row);
             row.read_raw_varint32().unwrap();
             assert_eq!(row.read_string().unwrap(), "Universal.System");
-            row.read_raw_varint32().unwrap();
-            row.read_string().unwrap();
+            let stable_id = row.read_raw_varint32().unwrap();
+            let event_name = row.read_string().unwrap();
             let count = read_u16(&mut row);
+            let mut field_names = Vec::new();
             for _ in 0..count {
                 let size = read_u16(&mut row);
                 let field = row.read_raw_bytes(size as u32).unwrap();
                 let mut field = CodedInputStream::from_bytes(&field);
                 let name = field.read_string().unwrap();
+                field_names.push(name.clone());
                 let type_id = field.read_raw_byte().unwrap();
                 if matches!(name.as_str(),
                     "Name" | "NamespaceName" | "FileName" | "SymbolMetadata" | "VersionMetadata") {
@@ -2287,6 +2337,10 @@ mod tests {
                     assert_eq!(type_id, 21);
                 }
                 assert!(field.eof().unwrap());
+            }
+            if event_name == "ProcessMappingUnload" {
+                assert_eq!(stable_id, 6);
+                assert_eq!(field_names, vec!["Id", "StartAddress", "EndAddress"]);
             }
             assert_eq!(read_u16(&mut row), 0);
             assert!(row.eof().unwrap());
