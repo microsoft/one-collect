@@ -94,6 +94,10 @@ name = "export"
 harness = false
 
 [[bench]]
+name = "nettrace"
+harness = false
+
+[[bench]]
 name = "kallsyms"
 harness = false
 
