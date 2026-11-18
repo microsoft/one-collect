@@ -377,6 +377,16 @@ unsafe impl GlobalAlloc for TrackingAllocator {
         }
         System.dealloc(ptr, layout);
     }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        let new_ptr = System.realloc(ptr, layout, new_size);
+        if !new_ptr.is_null() && TRACK_HEAP.load(Ordering::Relaxed) {
+            let change = new_size as isize - layout.size() as isize;
+            let current = HEAP_CURRENT.fetch_add(change, Ordering::Relaxed) + change;
+            HEAP_PEAK.fetch_max(current, Ordering::Relaxed);
+        }
+        new_ptr
+    }
 }
 
 #[global_allocator]
