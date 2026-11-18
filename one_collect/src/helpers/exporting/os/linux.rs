@@ -132,12 +132,8 @@ impl ExportProcessLinuxExt for ExportProcess {
                 continue;
             }
 
-            ExportProcess::get_unique_user_ips(
-                &self.samples(),
-                addrs,
-                frames,
-                &callstacks,
-                Some(map));
+            addrs.clear();
+            addrs.extend(self.cached_user_ips(callstacks, Some(map)));
 
             if addrs.is_empty() {
                 continue;
@@ -551,12 +547,8 @@ impl ExportProcessLinuxExt for ExportProcess {
                 continue;
             }
 
-            Self::get_unique_user_ips(
-                &self.samples(),
-                addrs,
-                frames,
-                &callstacks,
-                Some(map));
+            addrs.clear();
+            addrs.extend(self.cached_user_ips(callstacks, Some(map)));
 
             if addrs.is_empty() {
                 continue;
