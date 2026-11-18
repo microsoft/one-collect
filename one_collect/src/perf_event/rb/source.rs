@@ -958,7 +958,20 @@ impl RingBufDataSource {
          * retain the timeout as an upper bound on its latency. */
         let timeout_ms = timeout.as_millis().min(i32::MAX as u128) as i32;
         let result = unsafe {
-            poll(self.wait_fds.as_mut_ptr(), self.wait_fds.len() as nfds_t, timeout_ms)
+            if timeout_ms == 0 {
+                // poll would turn a positive submillisecond timeout into a busy wait.
+                let timeout_spec = timespec {
+                    tv_sec: 0,
+                    tv_nsec: timeout.subsec_nanos() as _,
+                };
+                ppoll(
+                    self.wait_fds.as_mut_ptr(),
+                    self.wait_fds.len() as nfds_t,
+                    &timeout_spec,
+                    std::ptr::null())
+            } else {
+                poll(self.wait_fds.as_mut_ptr(), self.wait_fds.len() as nfds_t, timeout_ms)
+            }
         };
         if result < 0 {
             let err = IOError::last_os_error();
@@ -1511,6 +1524,9 @@ mod tests {
 
         assert!(source.read(Duration::from_secs(1)).is_none());
         assert_ne!(0, source.wait_fds[0].revents & POLLIN);
+        source.wait_fds[0].revents = 0;
+        assert!(source.read(Duration::from_micros(900)).is_none());
+        assert_ne!(0, source.wait_fds[0].revents & POLLIN);
     }
 
     #[test]
@@ -1528,6 +1544,25 @@ mod tests {
 
         assert!(source.read(Duration::from_secs(1)).is_none());
         assert!(source.wait_fds.is_empty());
+    }
+
+    #[test]
+    fn empty_ring_wait_blocks_for_submillisecond_timeout() {
+        let (reader, _writer) = UnixStream::pair().unwrap();
+        let mut source = RingBufDataSource::new(
+            1, None, None, None, None, None, None, None, None, None);
+        source.enabled = true;
+        source.wait_fds.push(pollfd {
+            fd: reader.as_raw_fd(),
+            events: POLLIN,
+            revents: 0,
+        });
+
+        let start = std::time::Instant::now();
+        for _ in 0..10 {
+            assert!(source.read(Duration::from_micros(900)).is_none());
+        }
+        assert!(start.elapsed() >= Duration::from_millis(3));
     }
 
     #[test]
