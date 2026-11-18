@@ -68,7 +68,11 @@ fn benchmark(c: &mut Criterion) {
         }));
     }
     group.finish();
-    std::fs::remove_file(path).unwrap();
+    if let Err(error) = std::fs::remove_file(path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            panic!("Failed to remove NetTrace benchmark output: {error}");
+        }
+    }
 }
 
 criterion_group!(benches, benchmark);
