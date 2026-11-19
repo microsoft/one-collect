@@ -375,6 +375,8 @@ impl RingBufBuilder {
         attributes.event_type = PERF_TYPE_SOFTWARE;
         attributes.config = PERF_COUNT_SW_BPF_OUTPUT;
         attributes.sample_period_freq = 1;
+        /* PERF_EVENT_ARRAY rejects inherited events. */
+        attributes.flags &= !FLAG_INHERIT;
 
         attributes.sample_type |= abi::PERF_SAMPLE_RAW;
 
@@ -1499,6 +1501,12 @@ mod tests {
         assert_eq!(
             full.attributes.flags & (FLAG_SAMPLE_ID_ALL | FLAG_USE_CLOCKID),
             ksymbols.attributes.flags & (FLAG_SAMPLE_ID_ALL | FLAG_USE_CLOCKID));
+    }
+
+    #[test]
+    fn bpf_output_disables_inherit_for_perf_event_array() {
+        let bpf = RingBufBuilder::for_bpf().build();
+        assert_eq!(0, bpf.attributes.flags & FLAG_INHERIT);
     }
 
     #[test]

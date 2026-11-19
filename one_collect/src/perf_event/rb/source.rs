@@ -523,6 +523,7 @@ pub struct RingBufDataSource {
     ksymbol_buf_ids: HashSet<u64>,
     pages: usize,
     enabled: bool,
+    recording_started: bool,
     target_pids: Option<Vec<i32>>,
     target_cpus: Option<Vec<u16>>,
     kernel_builder: Option<RingBufBuilder<Kernel>>,
@@ -571,6 +572,7 @@ impl RingBufDataSource {
             oldest_cpu: None,
             cpu_to_reader_index: Vec::new(),
             enabled: false,
+            recording_started: false,
             in_process_ring_buf: None,
         }
     }
@@ -660,25 +662,17 @@ impl RingBufDataSource {
         ring_bufs.retain(|id, _| before.contains(id));
     }
 
-    fn add_required_bufs(
+    fn reclaim_ksymbol_bufs(
         ring_bufs: &mut HashMap<u64, CpuRingBuf>,
         ksymbol_buf_ids: &mut HashSet<u64>,
         allow_reclaim: bool,
-        mut add: impl FnMut(&mut HashMap<u64, CpuRingBuf>) -> IOResult<()>) -> IOResult<HashSet<u64>> {
-        let before: HashSet<u64> = ring_bufs.keys().copied().collect();
-        match add(ring_bufs) {
-            Ok(()) => return Ok(before),
-            Err(err) => {
-                Self::remove_new_bufs(ring_bufs, &before);
-                if !matches!(err.raw_os_error(), Some(libc::EMFILE | libc::ENFILE))
-                    || ksymbol_buf_ids.is_empty() || !allow_reclaim {
-                    return Err(err);
-                }
-            },
+        required: &str) -> bool {
+        if !allow_reclaim || ksymbol_buf_ids.is_empty() {
+            return false;
         }
 
-        warn!("Closing optional kernel dynamic symbol descriptors to make room for a tracepoint; \
-            BPF symbols may be unknown");
+        warn!("Closing optional kernel dynamic symbol descriptors to make room for {}; \
+            BPF symbols may be unknown", required);
         for id in ksymbol_buf_ids.drain() {
             if let Some(buf) = ring_bufs.get_mut(&id) {
                 if let Some(fd) = buf.fd.take() {
@@ -688,12 +682,55 @@ impl RingBufDataSource {
         }
 
         // Keep the closed buffers' metadata so already queued records remain decodable.
+        true
+    }
+
+    fn add_required_bufs<T>(
+        ring_bufs: &mut HashMap<u64, CpuRingBuf>,
+        ksymbol_buf_ids: &mut HashSet<u64>,
+        allow_reclaim: bool,
+        required: &str,
+        mut add: impl FnMut(&mut HashMap<u64, CpuRingBuf>) -> IOResult<T>) -> IOResult<(HashSet<u64>, T)> {
         let before: HashSet<u64> = ring_bufs.keys().copied().collect();
-        if let Err(err) = add(ring_bufs) {
-            Self::remove_new_bufs(ring_bufs, &before);
-            return Err(err);
+        match add(ring_bufs) {
+            Ok(value) => return Ok((before, value)),
+            Err(err) => {
+                Self::remove_new_bufs(ring_bufs, &before);
+                if !matches!(err.raw_os_error(), Some(libc::EMFILE | libc::ENFILE))
+                    || !Self::reclaim_ksymbol_bufs(
+                        ring_bufs, ksymbol_buf_ids, allow_reclaim, required) {
+                    return Err(err);
+                }
+            },
         }
-        Ok(before)
+
+        let before: HashSet<u64> = ring_bufs.keys().copied().collect();
+        match add(ring_bufs) {
+            Ok(value) => Ok((before, value)),
+            Err(err) => {
+                Self::remove_new_bufs(ring_bufs, &before);
+                Err(err)
+            },
+        }
+    }
+
+    fn add_required_bpf_bufs(
+        ring_bufs: &mut HashMap<u64, CpuRingBuf>,
+        ksymbol_buf_ids: &mut HashSet<u64>,
+        allow_reclaim: bool,
+        mut add: impl FnMut(&mut HashMap<u64, CpuRingBuf>, &mut Vec<PerfDataFile>) -> IOResult<()>) -> IOResult<Vec<PerfDataFile>> {
+        let (_, files) = Self::add_required_bufs(
+            ring_bufs,
+            ksymbol_buf_ids,
+            allow_reclaim,
+            "BPF output",
+            |ring_bufs| {
+                // A failed attempt's file entries must not survive the retry.
+                let mut files = Vec::new();
+                add(ring_bufs, &mut files)?;
+                Ok(files)
+            })?;
+        Ok(files)
     }
 
     fn tasks_for_pids(pids: &mut Vec<i32>) {
@@ -907,8 +944,9 @@ impl RingBufDataSource {
 
         /*
          * Allocate the optional sideband after the fixed required descriptors.
-         * Before recording starts, later tracepoints can reclaim it if
-         * they run out of fds. Never stop lifecycle capture mid-recording.
+         * Before recording starts, later required events and BPF maps can
+         * reclaim it if they run out of fds. Never stop lifecycle capture
+         * once recording has started.
          * Use one scope at a time: duplicate task and CPU subscriptions can
          * corrupt ksymbol record trailers on some kernels.
          */
@@ -968,6 +1006,8 @@ impl RingBufDataSource {
     fn enable(&mut self) -> IOResult<()> {
         debug!("RingBufDataSource::enable: enabling {} ring buffers", self.ring_bufs.len());
 
+        // An unsuccessful enable may already have enabled some descriptors.
+        self.recording_started = true;
         for rb in self.ring_bufs.values() {
             if !rb.is_open() {
                 continue;
@@ -1165,11 +1205,17 @@ impl PerfDataSource for RingBufDataSource {
         }
     }
 
+    fn reclaim_optional_fds(&mut self) -> bool {
+        Self::reclaim_ksymbol_bufs(
+            &mut self.ring_bufs,
+            &mut self.ksymbol_buf_ids,
+            !self.recording_started,
+            "a BPF map")
+    }
+
     fn create_bpf_files(
         &mut self,
         event: Option<&Event>) -> IOResult<Vec<PerfDataFile>> {
-        let mut files = Vec::new();
-
         if let Some(bpf_builder) = self.bpf_builder.as_mut() {
             debug!("create_bpf_files: creating BPF event buffers");
 
@@ -1188,35 +1234,40 @@ impl PerfDataSource for RingBufDataSource {
                 }
             }
 
-            match &self.target_pids {
-                None => {
-                    Self::add_cpu_bufs(
-                        None,
-                        target_cpus,
-                        &self.leader_ids,
-                        &mut self.ring_bufs,
-                        &common,
-                        Some(&mut files))?;
-                },
-                Some(pids) => {
-                    for pid in pids {
+            let files = Self::add_required_bpf_bufs(
+                &mut self.ring_bufs,
+                &mut self.ksymbol_buf_ids,
+                !self.recording_started,
+                |ring_bufs, files| match &self.target_pids {
+                    None => {
                         Self::add_cpu_bufs(
-                            Some(*pid),
+                            None,
                             target_cpus,
                             &self.leader_ids,
-                            &mut self.ring_bufs,
+                            ring_bufs,
                             &common,
-                            Some(&mut files))?;
-                    }
-                },
-            }
+                            Some(files))
+                    },
+                    Some(pids) => {
+                        for pid in pids {
+                            Self::add_cpu_bufs(
+                                Some(*pid),
+                                target_cpus,
+                                &self.leader_ids,
+                                ring_bufs,
+                                &common,
+                                Some(&mut *files))?;
+                        }
+                        Ok(())
+                    },
+                })?;
 
             info!("BPF files created: file_count={}", files.len());
+            Ok(files)
         } else {
             warn!("create_bpf_files: no BPF builder configured");
+            Ok(Vec::new())
         }
-
-        Ok(files)
     }
 
     fn add_event(
@@ -1245,10 +1296,11 @@ impl PerfDataSource for RingBufDataSource {
                 .map_err(|_| io_error("Invalid perf filter string"))?;
 
             let result = (|| -> IOResult<()> {
-                let before = Self::add_required_bufs(
+                let (before, ()) = Self::add_required_bufs(
                     &mut self.ring_bufs,
                     &mut self.ksymbol_buf_ids,
-                    !self.enabled,
+                    !self.recording_started,
+                    "a tracepoint",
                     |ring_bufs| match &self.target_pids {
                         None => {
                             Self::add_cpu_bufs(
@@ -1528,8 +1580,19 @@ impl PerfDataSource for RingBufDataSource {
 mod tests {
     use super::*;
 
+    use std::io::Read;
+    use std::os::fd::IntoRawFd;
+    use std::os::unix::net::UnixStream;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn test_open_buf(attributes: Rc<perf_event_attr>) -> (CpuRingBuf, UnixStream) {
+        let (descriptor, peer) = UnixStream::pair().unwrap();
+        peer.set_nonblocking(true).unwrap();
+        let mut buf = CpuRingBuf::new(0, attributes);
+        buf.fd = Some(descriptor.into_raw_fd());
+        (buf, peer)
+    }
 
     #[test]
     fn config() {
@@ -1627,10 +1690,6 @@ mod tests {
 
     #[test]
     fn tracepoint_fd_exhaustion_reclaims_optional_ksymbols_and_retries() {
-        use std::io::Read;
-        use std::os::fd::IntoRawFd;
-        use std::os::unix::net::UnixStream;
-
         let attrs = Rc::new(RingBufBuilder::common_attributes());
         let mut ring_bufs = HashMap::new();
         ring_bufs.insert(1, CpuRingBuf::new(0, attrs.clone()));
@@ -1642,10 +1701,11 @@ mod tests {
         let mut ksymbol_buf_ids = HashSet::from([2]);
         let mut attempts = 0;
 
-        let before = RingBufDataSource::add_required_bufs(
+        let (before, ()) = RingBufDataSource::add_required_bufs(
             &mut ring_bufs,
             &mut ksymbol_buf_ids,
             true,
+            "a tracepoint",
             |bufs| {
                 attempts += 1;
                 if attempts == 1 {
@@ -1671,10 +1731,11 @@ mod tests {
         let mut ring_bufs = HashMap::new();
         ring_bufs.insert(1, CpuRingBuf::new(0, attrs.clone()));
         let mut ksymbol_buf_ids = HashSet::from([1]);
-        let before = RingBufDataSource::add_required_bufs(
+        let (before, ()) = RingBufDataSource::add_required_bufs(
             &mut ring_bufs,
             &mut ksymbol_buf_ids,
             true,
+            "a tracepoint",
             |bufs| {
                 bufs.insert(2, CpuRingBuf::new(0, attrs.clone()));
                 Ok(())
@@ -1701,7 +1762,8 @@ mod tests {
                 &mut ring_bufs,
                 &mut ksymbol_buf_ids,
                 true,
-                |bufs| {
+                "a tracepoint",
+                |bufs| -> IOResult<()> {
                     attempts += 1;
                     bufs.insert(2, CpuRingBuf::new(0, attrs.clone()));
                     Err(IOError::from_raw_os_error(error))
@@ -1724,7 +1786,8 @@ mod tests {
             &mut ring_bufs,
             &mut ksymbol_buf_ids,
             true,
-            |bufs| {
+            "a tracepoint",
+            |bufs| -> IOResult<()> {
                 attempts += 1;
                 bufs.insert(2, CpuRingBuf::new(0, attrs.clone()));
                 Err(IOError::from_raw_os_error(if attempts == 1 {
@@ -1750,7 +1813,8 @@ mod tests {
             &mut ring_bufs,
             &mut ksymbol_buf_ids,
             false,
-            |bufs| {
+            "a tracepoint",
+            |bufs| -> IOResult<()> {
                 attempts += 1;
                 bufs.insert(2, CpuRingBuf::new(0, attrs.clone()));
                 Err(IOError::from_raw_os_error(libc::EMFILE))
@@ -1759,6 +1823,271 @@ mod tests {
         assert_eq!(1, attempts);
         assert_eq!(HashSet::from([1]), ksymbol_buf_ids);
         assert_eq!(HashSet::from([1]), ring_bufs.keys().copied().collect());
+    }
+
+    #[test]
+    fn bpf_buf_exhaustion_retries_without_stale_files() {
+        let attrs = Rc::new(RingBufBuilder::common_attributes());
+        let (optional1, mut optional1_peer) = test_open_buf(attrs.clone());
+        let (optional2, mut optional2_peer) = test_open_buf(attrs.clone());
+        let (partial, mut partial_peer) = test_open_buf(attrs.clone());
+        let (retry, mut retry_peer) = test_open_buf(attrs.clone());
+        let retry_fd = retry.fd.unwrap();
+        let mut partial = Some(partial);
+        let mut retry = Some(retry);
+        let mut ring_bufs = HashMap::from([
+            (1, CpuRingBuf::new(0, attrs)),
+            (2, optional1),
+            (3, optional2),
+        ]);
+        let mut ksymbol_buf_ids = HashSet::from([2, 3]);
+        let mut attempts = 0;
+
+        let files = RingBufDataSource::add_required_bpf_bufs(
+            &mut ring_bufs,
+            &mut ksymbol_buf_ids,
+            true,
+            |bufs, files| {
+                attempts += 1;
+                if attempts == 1 {
+                    let buf = partial.take().unwrap();
+                    files.push(PerfDataFile::new(4, buf.fd.unwrap()));
+                    bufs.insert(4, buf);
+                    return Err(IOError::from_raw_os_error(libc::EMFILE));
+                }
+
+                assert!(files.is_empty());
+                assert!(!bufs.contains_key(&4));
+                assert_eq!(0, partial_peer.read(&mut [0]).unwrap());
+                assert_eq!(0, optional1_peer.read(&mut [0]).unwrap());
+                assert_eq!(0, optional2_peer.read(&mut [0]).unwrap());
+                let buf = retry.take().unwrap();
+                files.push(PerfDataFile::new(5, buf.fd.unwrap()));
+                bufs.insert(5, buf);
+                Ok(())
+            }).unwrap();
+
+        assert_eq!(2, attempts);
+        assert_eq!(1, files.len());
+        assert_eq!((5, retry_fd), (files[0].id(), files[0].fd()));
+        assert!(ksymbol_buf_ids.is_empty());
+        assert_eq!(HashSet::from([1, 2, 3, 5]), ring_bufs.keys().copied().collect());
+        assert!(!ring_bufs[&2].is_open());
+        assert!(!ring_bufs[&3].is_open());
+        drop(ring_bufs);
+        assert_eq!(0, retry_peer.read(&mut [0]).unwrap());
+    }
+
+    #[test]
+    fn bpf_buf_retry_failure_rolls_back_both_attempts() {
+        let attrs = Rc::new(RingBufBuilder::common_attributes());
+        let (optional, mut optional_peer) = test_open_buf(attrs.clone());
+        let (first, mut first_peer) = test_open_buf(attrs.clone());
+        let (second, mut second_peer) = test_open_buf(attrs);
+        let mut first = Some(first);
+        let mut second = Some(second);
+        let mut ring_bufs = HashMap::from([(1, optional)]);
+        let mut ksymbol_buf_ids = HashSet::from([1]);
+        let mut attempts = 0;
+
+        let result = RingBufDataSource::add_required_bpf_bufs(
+            &mut ring_bufs,
+            &mut ksymbol_buf_ids,
+            true,
+            |bufs, files| {
+                attempts += 1;
+                assert!(files.is_empty());
+                let (id, buf, error) = if attempts == 1 {
+                    (2, first.take().unwrap(), libc::ENFILE)
+                } else {
+                    assert_eq!(0, first_peer.read(&mut [0]).unwrap());
+                    assert_eq!(0, optional_peer.read(&mut [0]).unwrap());
+                    (3, second.take().unwrap(), libc::EINVAL)
+                };
+                files.push(PerfDataFile::new(id, buf.fd.unwrap()));
+                bufs.insert(id, buf);
+                Err(IOError::from_raw_os_error(error))
+            });
+
+        assert_eq!(Some(libc::EINVAL), result.err().unwrap().raw_os_error());
+        assert_eq!(2, attempts);
+        assert_eq!(HashSet::from([1]), ring_bufs.keys().copied().collect());
+        assert!(ksymbol_buf_ids.is_empty());
+        assert_eq!(0, second_peer.read(&mut [0]).unwrap());
+    }
+
+    #[test]
+    fn bpf_buf_success_and_non_exhaustion_failure_preserve_symbols() {
+        for fail in [false, true] {
+            let attrs = Rc::new(RingBufBuilder::common_attributes());
+            let (optional, mut optional_peer) = test_open_buf(attrs.clone());
+            let (required, mut required_peer) = test_open_buf(attrs);
+            let required_fd = required.fd.unwrap();
+            let mut required = Some(required);
+            let mut ring_bufs = HashMap::from([(1, optional)]);
+            let mut ksymbol_buf_ids = HashSet::from([1]);
+            let mut attempts = 0;
+
+            let result = RingBufDataSource::add_required_bpf_bufs(
+                &mut ring_bufs,
+                &mut ksymbol_buf_ids,
+                true,
+                |bufs, files| {
+                    attempts += 1;
+                    let buf = required.take().unwrap();
+                    files.push(PerfDataFile::new(2, buf.fd.unwrap()));
+                    bufs.insert(2, buf);
+                    if fail {
+                        Err(IOError::from_raw_os_error(libc::EINVAL))
+                    } else {
+                        Ok(())
+                    }
+                });
+
+            assert_eq!(1, attempts);
+            assert_eq!(HashSet::from([1]), ksymbol_buf_ids);
+            assert_eq!(
+                std::io::ErrorKind::WouldBlock,
+                optional_peer.read(&mut [0]).unwrap_err().kind());
+            if fail {
+                assert_eq!(Some(libc::EINVAL), result.err().unwrap().raw_os_error());
+                assert_eq!(HashSet::from([1]), ring_bufs.keys().copied().collect());
+                assert_eq!(0, required_peer.read(&mut [0]).unwrap());
+            } else {
+                let files = result.unwrap();
+                assert_eq!(1, files.len());
+                assert_eq!((2, required_fd), (files[0].id(), files[0].fd()));
+                assert_eq!(HashSet::from([1, 2]), ring_bufs.keys().copied().collect());
+                drop(ring_bufs);
+                assert_eq!(0, required_peer.read(&mut [0]).unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn bpf_map_open_exhaustion_reclaims_symbols_and_retries() {
+        for (error, retry_error) in [
+            (libc::EMFILE, None),
+            (libc::ENFILE, None),
+            (libc::EMFILE, Some(libc::EACCES)),
+        ] {
+            let attrs = Rc::new(RingBufBuilder::common_attributes());
+            let (optional, mut peer) = test_open_buf(attrs);
+            let mut source = RingBufDataSource::new(
+                1, None, None, None, None, None, None, None, None, None);
+            source.ring_bufs.insert(1, optional);
+            source.ksymbol_buf_ids.insert(1);
+            let mut attempts = 0;
+
+            let result = PerfSession::open_bpf_map_with_retry(&mut source, || {
+                attempts += 1;
+                if attempts == 1 {
+                    Err(IOError::from_raw_os_error(error))
+                } else {
+                    assert_eq!(0, peer.read(&mut [0]).unwrap());
+                    match retry_error {
+                        Some(error) => Err(IOError::from_raw_os_error(error)),
+                        None => Ok(42),
+                    }
+                }
+            });
+
+            match retry_error {
+                Some(error) => assert_eq!(Some(error), result.unwrap_err().raw_os_error()),
+                None => assert_eq!(42, result.unwrap()),
+            }
+            assert_eq!(2, attempts);
+            assert!(source.ksymbol_buf_ids.is_empty());
+            assert!(!source.ring_bufs[&1].is_open());
+        }
+    }
+
+    #[test]
+    fn bpf_map_open_success_and_other_errors_keep_symbols() {
+        for error in [None, Some(libc::EINVAL)] {
+            let attrs = Rc::new(RingBufBuilder::common_attributes());
+            let (optional, mut peer) = test_open_buf(attrs);
+            let mut source = RingBufDataSource::new(
+                1, None, None, None, None, None, None, None, None, None);
+            source.ring_bufs.insert(1, optional);
+            source.ksymbol_buf_ids.insert(1);
+            let mut attempts = 0;
+
+            let result = PerfSession::open_bpf_map_with_retry(&mut source, || {
+                attempts += 1;
+                match error {
+                    Some(error) => Err(IOError::from_raw_os_error(error)),
+                    None => Ok(42),
+                }
+            });
+
+            match error {
+                Some(error) => assert_eq!(Some(error), result.unwrap_err().raw_os_error()),
+                None => assert_eq!(42, result.unwrap()),
+            }
+            assert_eq!(1, attempts);
+            assert_eq!(HashSet::from([1]), source.ksymbol_buf_ids);
+            assert_eq!(
+                std::io::ErrorKind::WouldBlock,
+                peer.read(&mut [0]).unwrap_err().kind());
+        }
+    }
+
+    #[test]
+    fn bpf_exhaustion_never_reclaims_symbols_after_recording_starts() {
+        let attrs = Rc::new(RingBufBuilder::common_attributes());
+        let mut source = RingBufDataSource::new(
+            1, None, None, None, None, None, None, None, None, None);
+        source.ring_bufs.insert(1, CpuRingBuf::new(0, attrs.clone()));
+        source.ksymbol_buf_ids.insert(1);
+        source.enable().unwrap();
+
+        for disabled in [false, true] {
+            if disabled {
+                source.disable().unwrap();
+            }
+            let mut map_attempts = 0;
+            let result = PerfSession::open_bpf_map_with_retry(&mut source, || {
+                map_attempts += 1;
+                Err(IOError::from_raw_os_error(libc::EMFILE))
+            });
+            assert_eq!(Some(libc::EMFILE), result.unwrap_err().raw_os_error());
+            assert_eq!(1, map_attempts);
+
+            let mut buf_attempts = 0;
+            let result = RingBufDataSource::add_required_bpf_bufs(
+                &mut source.ring_bufs,
+                &mut source.ksymbol_buf_ids,
+                !source.recording_started,
+                |bufs, files| {
+                    buf_attempts += 1;
+                    bufs.insert(2, CpuRingBuf::new(0, attrs.clone()));
+                    files.push(PerfDataFile::new(2, 123));
+                    Err(IOError::from_raw_os_error(libc::ENFILE))
+                });
+            assert_eq!(Some(libc::ENFILE), result.err().unwrap().raw_os_error());
+            assert_eq!(1, buf_attempts);
+            assert_eq!(HashSet::from([1]), source.ksymbol_buf_ids);
+            assert_eq!(HashSet::from([1]), source.ring_bufs.keys().copied().collect());
+        }
+    }
+
+    #[test]
+    fn failed_enable_does_not_allow_symbol_reclamation() {
+        let attrs = Rc::new(RingBufBuilder::common_attributes());
+        let (optional, mut peer) = test_open_buf(attrs);
+        let mut source = RingBufDataSource::new(
+            1, None, None, None, None, None, None, None, None, None);
+        source.ring_bufs.insert(1, optional);
+        source.ksymbol_buf_ids.insert(1);
+
+        assert!(source.enable().is_err());
+        assert!(!source.enabled);
+        assert!(!source.reclaim_optional_fds());
+        assert_eq!(HashSet::from([1]), source.ksymbol_buf_ids);
+        assert_eq!(
+            std::io::ErrorKind::WouldBlock,
+            peer.read(&mut [0]).unwrap_err().kind());
     }
 
     #[test]

@@ -8,6 +8,10 @@ use std::path::{Path, PathBuf};
 use std::fs::File;
 use std::fmt::Write;
 use std::io::BufReader;
+#[cfg(target_os = "linux")]
+use std::io::{BufRead, Seek, SeekFrom};
+#[cfg(target_os = "linux")]
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use tracing::{debug, info, trace, warn};
 
 use crate::{ReadOnly, Writable};
@@ -2108,6 +2112,22 @@ struct LoadedBpfFunction {
 }
 
 #[cfg(target_os = "linux")]
+struct BpfSnapshotFunction {
+    time: u64,
+    start: u64,
+    len: u64,
+    tag: [u8; 8],
+    tag_is_known: bool,
+    prog_name: String,
+}
+
+#[cfg(target_os = "linux")]
+struct PinnedBpfProgram {
+    _fd: OwnedFd,
+    functions: Vec<BpfSnapshotFunction>,
+}
+
+#[cfg(target_os = "linux")]
 fn bpf_snapshot_name(
     kallsyms_name: Option<&String>,
     tag: &[u8],
@@ -2124,6 +2144,71 @@ fn bpf_snapshot_name(
     }
 }
 
+#[cfg(target_os = "linux")]
+fn bpf_kallsyms_names(
+    reader: &mut (impl BufRead + Seek),
+    addresses: &HashSet<u64>) -> std::io::Result<HashMap<u64, String>> {
+    reader.seek(SeekFrom::Start(0))?;
+    let mut names = HashMap::new();
+    let mut line = String::new();
+
+    while names.len() < addresses.len() {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            break;
+        }
+        if !line.trim_end().ends_with("[bpf]") {
+            continue;
+        }
+
+        let mut parts = line.split_whitespace();
+        if let (Some(addr), Some(_), Some(name)) = (parts.next(), parts.next(), parts.next()) {
+            if let Ok(addr) = u64::from_str_radix(addr, 16) {
+                if addresses.contains(&addr) {
+                    names.insert(addr, name.to_string());
+                }
+            }
+        }
+    }
+
+    Ok(names)
+}
+
+#[cfg(target_os = "linux")]
+fn finish_bpf_snapshot_batch(
+    programs: Vec<PinnedBpfProgram>,
+    read_names: impl FnOnce(&HashSet<u64>) -> HashMap<u64, String>) -> Vec<LoadedBpfFunction> {
+    let addresses: HashSet<_> = programs.iter()
+        .flat_map(|program| program.functions.iter().map(|function| function.start))
+        .collect();
+
+    /* Each program remains pinned until all of these names have been read. */
+    let names = read_names(&addresses);
+    let mut functions = Vec::new();
+
+    for program in programs {
+        for function in program.functions {
+            let kallsyms_name = names.get(&function.start);
+            let (name, name_is_exact) = match kallsyms_name {
+                Some(name) if !function.tag_is_known && name.starts_with("bpf_prog_") => {
+                    (name.clone(), true)
+                },
+                _ => bpf_snapshot_name(kallsyms_name, &function.tag, &function.prog_name),
+            };
+            functions.push(LoadedBpfFunction {
+                time: function.time,
+                start: function.start,
+                len: function.len,
+                name,
+                name_is_exact,
+                tag_is_known: function.tag_is_known,
+            });
+        }
+    }
+
+    functions
+}
+
 /*
  * Enumerates loaded BPF programs and returns the extent and name of each JIT
  * compiled function. This requires CAP_SYS_ADMIN; on failure what was found
@@ -2134,6 +2219,7 @@ fn loaded_bpf_functions() -> Vec<LoadedBpfFunction> {
     const BPF_PROG_GET_NEXT_ID: libc::c_long = 11;
     const BPF_PROG_GET_FD_BY_ID: libc::c_long = 13;
     const BPF_OBJ_GET_INFO_BY_FD: libc::c_long = 15;
+    const BATCH_SIZE: usize = 32;
 
     /* Offsets within struct bpf_prog_info (linux/bpf.h) */
     const INFO_TAG: usize = 8;
@@ -2182,26 +2268,42 @@ fn loaded_bpf_functions() -> Vec<LoadedBpfFunction> {
         u32::from_ne_bytes(info[offset..offset + 4].try_into().unwrap())
     }
 
-    /* Prefer the exact names kallsyms uses (BTF function names, etc.) */
-    let mut kallsyms_names: HashMap<u64, String> = HashMap::new();
-
-    if let Ok(kallsyms) = std::fs::read_to_string("/proc/kallsyms") {
-        for line in kallsyms.lines() {
-            if !line.ends_with("[bpf]") {
-                continue;
-            }
-
-            let mut parts = line.split_whitespace();
-
-            if let (Some(addr), Some(_), Some(name)) = (parts.next(), parts.next(), parts.next()) {
-                if let Ok(addr) = u64::from_str_radix(addr, 16) {
-                    kallsyms_names.insert(addr, name.to_string());
-                }
-            }
+    fn finish_batch(
+        batch: &mut Vec<PinnedBpfProgram>,
+        kallsyms: &mut Option<BufReader<File>>,
+        functions: &mut Vec<LoadedBpfFunction>) {
+        if batch.is_empty() {
+            return;
         }
+
+        functions.extend(finish_bpf_snapshot_batch(
+            std::mem::take(batch),
+            |addresses| {
+                match kallsyms.as_mut() {
+                    Some(reader) => match bpf_kallsyms_names(reader, addresses) {
+                        Ok(names) => names,
+                        Err(err) => {
+                            warn!("Unable to read BPF names from kallsyms ({}); \
+                                using program names where possible", err);
+                            *kallsyms = None;
+                            HashMap::new()
+                        },
+                    },
+                    None => HashMap::new(),
+                }
+            }));
     }
 
+    let mut kallsyms = match File::open("/proc/kallsyms") {
+        Ok(file) => Some(BufReader::new(file)),
+        Err(err) => {
+            warn!("Unable to open kallsyms for the BPF snapshot ({}); \
+                using program names where possible", err);
+            None
+        },
+    };
     let mut functions = Vec::new();
+    let mut batch = Vec::new();
     let mut id = 0u32;
 
     loop {
@@ -2223,17 +2325,39 @@ fn loaded_bpf_functions() -> Vec<LoadedBpfFunction> {
         id = next.next_id;
 
         let mut by_id = FdByIdAttr { prog_id: id, ..Default::default() };
-        let fd = bpf(BPF_PROG_GET_FD_BY_ID, &mut by_id);
-
+        let mut fd = bpf(BPF_PROG_GET_FD_BY_ID, &mut by_id);
+        if fd < 0 &&
+            matches!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EMFILE | libc::ENFILE)) &&
+            !batch.is_empty() {
+            finish_batch(&mut batch, &mut kallsyms, &mut functions);
+            fd = bpf(BPF_PROG_GET_FD_BY_ID, &mut by_id);
+        }
+        if fd < 0 &&
+            matches!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EMFILE | libc::ENFILE)) &&
+            kallsyms.is_some() {
+            warn!("Unable to open a BPF program while kallsyms is open; \
+                using program names where possible");
+            kallsyms = None;
+            fd = bpf(BPF_PROG_GET_FD_BY_ID, &mut by_id);
+        }
         if fd < 0 {
-            /* Unloaded since it was enumerated */
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::ENOENT) {
+                /* Unloaded since it was enumerated. */
+                continue;
+            }
+            warn!("Unable to open BPF program {} for the snapshot ({}); \
+                its symbols may be unknown", id, err);
+            if matches!(err.raw_os_error(), Some(libc::EMFILE | libc::ENFILE)) {
+                break;
+            }
             continue;
         }
 
-        let fd = fd as i32;
+        let fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
         let mut info = [0u8; INFO_LEN];
 
-        if get_info(fd, &mut info) {
+        if get_info(fd.as_raw_fd(), &mut info) {
             let count = u32_at(&info, INFO_NR_JITED_KSYMS)
                 .min(u32_at(&info, INFO_NR_JITED_FUNC_LENS)) as usize;
 
@@ -2257,7 +2381,7 @@ fn loaded_bpf_functions() -> Vec<LoadedBpfFunction> {
                 info[INFO_PROG_TAGS..INFO_PROG_TAGS + 8]
                     .copy_from_slice(&(tags.as_mut_ptr() as u64).to_ne_bytes());
 
-                if get_info(fd, &mut info) {
+                if get_info(fd.as_raw_fd(), &mut info) {
                     /* The open fd pins this program at the observation time. */
                     let time = ExportMachine::qpc_time();
 
@@ -2265,6 +2389,7 @@ fn loaded_bpf_functions() -> Vec<LoadedBpfFunction> {
                     let prog_name_len = prog_name.iter().position(|b| *b == 0).unwrap_or(16);
                     let prog_name = String::from_utf8_lossy(&prog_name[..prog_name_len]);
 
+                    let mut program_functions = Vec::new();
                     for (index, (start, len)) in ksyms.iter().zip(lens.iter()).enumerate() {
                         if *start == 0 || *len == 0 {
                             continue;
@@ -2277,26 +2402,35 @@ fn loaded_bpf_functions() -> Vec<LoadedBpfFunction> {
                         } else {
                             tags.get(index).map_or(&info[INFO_TAG..INFO_TAG + 8], |tag| tag.as_slice())
                         };
-                        let kallsyms_name = if tag_is_known { kallsyms_names.get(start) } else { None };
-                        let (name, name_is_exact) = bpf_snapshot_name(kallsyms_name, tag, &prog_name);
-
-                        functions.push(
-                            LoadedBpfFunction {
+                        program_functions.push(
+                            BpfSnapshotFunction {
                                 time,
                                 start: *start,
                                 len: *len as u64,
-                                name,
-                                name_is_exact,
+                                tag: tag.try_into().unwrap(),
                                 tag_is_known,
+                                prog_name: prog_name.to_string(),
                             });
                     }
+
+                    if !program_functions.is_empty() {
+                        batch.push(PinnedBpfProgram { _fd: fd, functions: program_functions });
+                        if batch.len() == BATCH_SIZE {
+                            finish_batch(&mut batch, &mut kallsyms, &mut functions);
+                        }
+                    }
+                } else {
+                    warn!("Unable to read BPF JIT details for program {} ({}); \
+                        its symbols may be unknown", id, std::io::Error::last_os_error());
                 }
             }
+        } else {
+            warn!("Unable to read BPF program {} for the snapshot ({}); \
+                its symbols may be unknown", id, std::io::Error::last_os_error());
         }
-
-        unsafe { libc::close(fd); }
     }
 
+    finish_batch(&mut batch, &mut kallsyms, &mut functions);
     functions
 }
 
@@ -2612,6 +2746,60 @@ mod tests {
         assert_eq!((subprogram.clone(), true), bpf_snapshot_name(Some(&subprogram), &tag, "main"));
         assert_eq!(("bpf_prog_9efe8873120741b3_main".to_string(), false), bpf_snapshot_name(Some(&stale), &tag, "main"));
         assert_eq!((unnamed.clone(), true), bpf_snapshot_name(Some(&unnamed), &tag, "main"));
+    }
+
+    #[test]
+    fn snapshot_reads_reused_address_while_replacement_is_pinned() {
+        use std::io::{Cursor, ErrorKind, Read};
+        use std::os::unix::net::UnixStream;
+
+        let tag = [0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef];
+        let old = "bpf_prog_1234567890abcdef_old";
+        let new = "bpf_prog_1234567890abcdef_new";
+        let subprogram = "bpf_prog_0123456789abcdef_sub";
+        let mut kallsyms = Cursor::new(format!("{:016x} t {} [bpf]\n", BPF_X, old).into_bytes());
+        let old_names = bpf_kallsyms_names(&mut kallsyms, &HashSet::from([BPF_X])).unwrap();
+        assert_eq!(Some(&old.to_string()), old_names.get(&BPF_X));
+
+        let (pin, mut observer) = UnixStream::pair().unwrap();
+        observer.set_nonblocking(true).unwrap();
+        let programs = vec![PinnedBpfProgram {
+            _fd: pin.into(),
+            functions: vec![
+                BpfSnapshotFunction {
+                    time: 2 * SEC, start: BPF_X, len: 64, tag,
+                    tag_is_known: true, prog_name: "new".to_string(),
+                },
+                BpfSnapshotFunction {
+                    time: 2 * SEC, start: BPF_X + 128, len: 64, tag,
+                    tag_is_known: false, prog_name: "new".to_string(),
+                },
+            ],
+        }];
+        *kallsyms.get_mut() = format!(
+            "{:016x} t {} [bpf]\n{:016x} t {} [bpf]\n",
+            BPF_X, new, BPF_X + 128, subprogram).into_bytes();
+
+        let functions = finish_bpf_snapshot_batch(programs, |addresses| {
+            assert_eq!(ErrorKind::WouldBlock, observer.read(&mut [0]).unwrap_err().kind());
+            bpf_kallsyms_names(&mut kallsyms, addresses).unwrap()
+        });
+        assert_eq!(0, observer.read(&mut [0]).unwrap());
+        assert_eq!(new, functions[0].name);
+        assert!(functions[0].name_is_exact);
+        assert_eq!(subprogram, functions[1].name);
+        assert!(functions[1].name_is_exact);
+
+        let mut machine = kernel_test_machine();
+        let expected = format!("[bpf] {}", new);
+        add_bpf(&mut machine, SEC, BPF_X, 64, false, &expected);
+        add_bpf(&mut machine, 4 * SEC, BPF_X, 64, true, &expected);
+        snapshot_bpf_programs(&mut machine, functions, true);
+        add_kernel_sample(&mut machine, 10, 3 * SEC, &[BPF_X]);
+        add_kernel_sample(&mut machine, 10, 5 * SEC, &[BPF_X]);
+        machine.add_kernel_mappings_with(&mut KallsymsMock::new(vec![]));
+        assert_eq!(Some(expected), resolve_kernel(&machine, 10, BPF_X, 3 * SEC));
+        assert_eq!(None, resolve_kernel(&machine, 10, BPF_X, 5 * SEC));
     }
 
     #[test]
