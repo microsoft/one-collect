@@ -45,6 +45,13 @@
 //!   array-typed properties, and properties whose length or count is given
 //!   by another property.
 //!
+//! Unsupported arrays, including struct arrays, and all following fields
+//! are represented by zero-sized [`LocationType::Static`] slots that expose
+//! no data. Fields preceding the array remain readable, including strings
+//! and flattened struct members. Trailing field names and types are retained,
+//! but their byte locations cannot be resolved. This policy also applies to
+//! arrays with zero or one element.
+//!
 //! ## "Manifest" here means *OS-registered*, not EventSource in-band
 //!
 //! The manifest path resolves schemas exclusively through
@@ -128,6 +135,7 @@ use windows_sys::Win32::System::Diagnostics::Etw::{
     PropertyStruct,
     PropertyParamLength,
     PropertyParamCount,
+    PropertyParamFixedCount,
 };
 
 use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_NOT_FOUND};
@@ -149,6 +157,7 @@ const EVENT_HEADER_FLAG_CLASSIC_HEADER: u16 = 0x0100;
 const PROPERTY_STRUCT: i32       = PropertyStruct;
 const PROPERTY_PARAM_LENGTH: i32 = PropertyParamLength;
 const PROPERTY_PARAM_COUNT: i32  = PropertyParamCount;
+const PROPERTY_PARAM_FIXED_COUNT: i32 = PropertyParamFixedCount;
 
 // EVENT_HEADER_EXT_TYPE_EVENT_SCHEMA_TL is imported from windows-sys
 // (u32 = 11).  Usage sites cast to u16 where the ExtType field requires it.
@@ -690,10 +699,12 @@ fn build_cached_schema(tei_buf: &[u8], is_32bit: bool) -> Result<CachedSchema, T
     // Once we encounter the first variable-length field, all subsequent
     // offsets become 0 (the framework's skip chain resolves them lazily).
     let mut seen_variable = false;
+    let mut seen_array = false;
 
     walk_properties(
         tei_buf, properties, 0..top_level_count,
-        "", &mut format, &mut running_offset, &mut seen_variable, is_32bit, 0,
+        "", &mut format, &mut running_offset, &mut seen_variable, &mut seen_array,
+        is_32bit, 0,
     )?;
 
     Ok(CachedSchema {
@@ -718,6 +729,7 @@ fn walk_properties(
     format: &mut EventFormat,
     running_offset: &mut usize,
     seen_variable: &mut bool,
+    seen_array: &mut bool,
     is_32bit: bool,
     depth: usize,
 ) -> Result<(), TdhDecodeError> {
@@ -737,6 +749,22 @@ fn walk_properties(
 
         let flags = prop.Flags;
 
+        // Parameter counts are property indices, not literal counts.
+        // Check before flattening structs so struct arrays stay unresolvable.
+        if (flags & (PROPERTY_PARAM_COUNT | PROPERTY_PARAM_FIXED_COUNT)) != 0
+            || unsafe { prop.Anonymous2.count } != 1
+        {
+            debug!(field = %qualified_name, flags, "skipping unsupported array property");
+            let offset = if *seen_variable { 0 } else { *running_offset };
+            format.add_field(EventField::new(
+                qualified_name, "unsupported".to_string(),
+                LocationType::Static, offset, 0,
+            ));
+            *seen_variable = true;
+            *seen_array = true;
+            continue;
+        }
+
         // ── Struct property ─────────────────────────────────────────
         if (flags & PROPERTY_STRUCT) != 0 {
             if depth >= MAX_STRUCT_DEPTH {
@@ -747,28 +775,24 @@ fn walk_properties(
             let count = struct_info.NumOfStructMembers as usize;
             walk_properties(
                 tei_buf, properties, start..start + count,
-                &qualified_name, format, running_offset, seen_variable, is_32bit, depth + 1,
+                &qualified_name, format, running_offset, seen_variable, seen_array,
+                is_32bit, depth + 1,
             )?;
             continue;
         }
 
-        // ── Array/param-count properties ─────────────────────────────
-        if (flags & PROPERTY_PARAM_COUNT) != 0 {
-            let count = unsafe { prop.Anonymous2.count } as usize;
-            if count != 1 {
-                debug!(field = %qualified_name, count, "skipping unsupported array property");
-                let offset = if *seen_variable { 0 } else { *running_offset };
-                format.add_field(EventField::new(
-                    qualified_name, "unsupported".to_string(),
-                    LocationType::Static, offset, 0,
-                ));
-                *seen_variable = true;
-                continue;
-            }
-        }
-
         // ── Leaf property ───────────────────────────────────────────
         let in_type = unsafe { prop.Anonymous1.nonStructType.InType } as i32;
+
+        if *seen_array {
+            // Direct field readers do not use the skip chain, so unknown
+            // offsets must also have an unreadable location and size.
+            format.add_field(EventField::new(
+                qualified_name, intype_to_type_name(in_type).to_string(),
+                LocationType::Static, 0, 0,
+            ));
+            continue;
+        }
 
         // Read the raw TDH length before interpretation.
         let raw_len = unsafe { prop.Anonymous3.length } as usize;
@@ -1261,6 +1285,238 @@ mod tests {
         assert_eq!(read_utf16_at(&[0x41, 0x00], 100), "");
     }
 
+    fn test_property(in_type: i32) -> EVENT_PROPERTY_INFO {
+        let mut prop: EVENT_PROPERTY_INFO = unsafe { std::mem::zeroed() };
+        prop.Anonymous1.nonStructType.InType = in_type as u16;
+        prop.Anonymous2.count = 1;
+        prop
+    }
+
+    fn test_struct_property(start: u16, members: u16) -> EVENT_PROPERTY_INFO {
+        let mut prop: EVENT_PROPERTY_INFO = unsafe { std::mem::zeroed() };
+        prop.Flags = PROPERTY_STRUCT;
+        prop.Anonymous1.structType.StructStartIndex = start;
+        prop.Anonymous1.structType.NumOfStructMembers = members;
+        prop.Anonymous2.count = 1;
+        prop
+    }
+
+    fn test_property_schema(
+        properties: &[EVENT_PROPERTY_INFO],
+        top_level_count: usize,
+    ) -> CachedSchema {
+        let props_offset = std::mem::size_of::<TRACE_EVENT_INFO>()
+            - std::mem::size_of::<EVENT_PROPERTY_INFO>();
+        let mut buf = AlignedTeiBuf::new();
+        buf.len = (props_offset + std::mem::size_of_val(properties))
+            .max(std::mem::size_of::<TRACE_EVENT_INFO>());
+        buf.ensure_capacity(buf.len);
+        // SAFETY: The zero-initialized buffer is aligned and sized for the
+        // header and the entire property array, not just its first element.
+        unsafe {
+            let tei = buf.as_mut_ptr();
+            (*tei).PropertyCount = properties.len() as u32;
+            (*tei).TopLevelPropertyCount = top_level_count as u32;
+            std::ptr::copy_nonoverlapping(
+                properties.as_ptr(),
+                std::ptr::addr_of_mut!((*tei).EventPropertyInfoArray)
+                    .cast::<EVENT_PROPERTY_INFO>(),
+                properties.len(),
+            );
+        }
+        build_cached_schema(buf.as_bytes(), false).expect("valid property schema")
+    }
+
+    fn assert_unresolvable_suffix(
+        format: &EventFormat,
+        data: &[u8],
+        prefix: &[&[u8]],
+    ) {
+        assert!(format.fields().len() > prefix.len());
+        for (index, (field, bytes)) in format.fields_with_data(data).enumerate() {
+            let reader = format.try_get_field_data_closure(&field.name);
+            if let Some(expected) = prefix.get(index) {
+                assert_eq!(bytes, *expected, "iterator: {}", field.name);
+                assert_eq!(
+                    reader.expect("readable prefix")(data), *expected,
+                    "closure: {}", field.name,
+                );
+                continue;
+            }
+
+            assert!(bytes.is_empty(), "iterator must not guess {}", field.name);
+            assert_eq!(field.location, LocationType::Static, "{}", field.name);
+            assert_eq!(field.size, 0, "{}", field.name);
+            let field_ref = format.get_field_ref(&field.name).expect("field metadata");
+            assert!(
+                format.get_data(field_ref, data).is_empty(),
+                "direct access must not guess {}", field.name,
+            );
+            assert!(format.try_get_u32(field_ref, data).is_none());
+            assert!(format.get_u32(field_ref, data).is_err());
+            if index == prefix.len() {
+                assert_eq!(field.type_name, "unsupported");
+                assert!(reader.expect("array placeholder")(data).is_empty());
+            } else {
+                assert!(reader.is_none(), "closure must not guess {}", field.name);
+                assert!(format.try_get_field_write_closure(&field.name).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn cached_schema_unsupported_parameter_count_arrays() {
+        for is_struct in [false, true] {
+            for count_index in [0u16, 1, 2] {
+                let mut properties: Vec<_> = (0..5)
+                    .map(|_| test_property(TDH_INTYPE_UINT32)).collect();
+                if is_struct {
+                    properties[3] = test_struct_property(5, 2);
+                    properties.extend([
+                        test_property(TDH_INTYPE_UINT32),
+                        test_property(TDH_INTYPE_UINT32),
+                    ]);
+                }
+                properties[3].Flags |= PROPERTY_PARAM_COUNT;
+                properties[3].Anonymous2.countPropertyIndex = count_index;
+                let schema = test_property_schema(&properties, 5);
+                assert_eq!(schema.format.fields().len(), 5);
+                assert_eq!(schema.format.fields()[4].type_name, "u32");
+
+                for count in [0u32, 1, 3] {
+                    let mut prefix = [0x1122_3344, 0x5566_7788, 0x99AA_BBCC];
+                    prefix[count_index as usize] = count;
+                    let mut data: Vec<u8> = prefix.into_iter()
+                        .flat_map(u32::to_le_bytes).collect();
+                    let words = count * if is_struct { 2 } else { 1 };
+                    data.extend((0..words).flat_map(|i| (0xAABB_CC00 + i).to_le_bytes()));
+                    data.extend_from_slice(&0xDEAD_BEEFu32.to_le_bytes());
+                    assert_unresolvable_suffix(
+                        &schema.format, &data, &[&data[0..4], &data[4..8], &data[8..12]],
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cached_schema_unsupported_fixed_count_arrays() {
+        for is_struct in [false, true] {
+            for (flags, count) in [
+                (0, 0u16),
+                (0, 3),
+                (PROPERTY_PARAM_FIXED_COUNT, 0),
+                (PROPERTY_PARAM_FIXED_COUNT, 1),
+                (PROPERTY_PARAM_FIXED_COUNT, 3),
+            ] {
+                let mut properties: Vec<_> = (0..5)
+                    .map(|_| test_property(TDH_INTYPE_UINT32)).collect();
+                if is_struct {
+                    properties[3] = test_struct_property(5, 2);
+                    properties.extend([
+                        test_property(TDH_INTYPE_UINT32),
+                        test_property(TDH_INTYPE_UINT32),
+                    ]);
+                }
+                properties[3].Flags |= flags;
+                properties[3].Anonymous2.count = count;
+                let schema = test_property_schema(&properties, 5);
+                assert_eq!(schema.format.fields().len(), 5);
+                assert_eq!(schema.format.fields()[4].type_name, "u32");
+
+                let mut data: Vec<u8> = [11u32, 22, 33].into_iter()
+                    .flat_map(u32::to_le_bytes).collect();
+                let words = u32::from(count) * if is_struct { 2 } else { 1 };
+                data.extend((0..words).flat_map(|i| (0xAABB_CC00 + i).to_le_bytes()));
+                data.extend_from_slice(&0xDEAD_BEEFu32.to_le_bytes());
+                assert_unresolvable_suffix(
+                    &schema.format, &data, &[&data[0..4], &data[4..8], &data[8..12]],
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cached_schema_unsupported_nested_array_suffix() {
+        let mut properties = [
+            test_property(TDH_INTYPE_UINT32),
+            test_struct_property(3, 3),
+            test_struct_property(8, 2),
+            test_property(TDH_INTYPE_UINT32),
+            test_struct_property(6, 2),
+            test_property(TDH_INTYPE_UINT32),
+            test_property(TDH_INTYPE_UINT32),
+            test_property(TDH_INTYPE_ANSISTRING),
+            test_property(TDH_INTYPE_UINT32),
+            test_property(TDH_INTYPE_UNICODESTRING),
+        ];
+        properties[6].Anonymous2.count = 3;
+        let schema = test_property_schema(&properties, 3);
+        let names: Vec<_> = schema.format.fields().iter()
+            .map(|field| field.name.as_str()).collect();
+        assert_eq!(names, [
+            "field0", "field1.field3", "field1.field4.field6",
+            "field1.field4.field7", "field1.field5", "field2.field8", "field2.field9",
+        ]);
+        assert_eq!(schema.format.fields()[3].type_name, "string");
+        assert_eq!(schema.format.fields()[6].type_name, "wstring");
+        let mut data: Vec<u8> = [11u32, 22, 0x4141_4141, 0x4242_4242, 0x4343_4343]
+            .into_iter().flat_map(u32::to_le_bytes).collect();
+        data.extend_from_slice(b"actual-text\0");
+        data.extend([33u32, 44].into_iter().flat_map(u32::to_le_bytes));
+        data.extend("actual-wide\0".encode_utf16().flat_map(u16::to_le_bytes));
+        assert_unresolvable_suffix(&schema.format, &data, &[&data[0..4], &data[4..8]]);
+    }
+
+    #[test]
+    fn cached_schema_unsupported_array_after_variable_prefix() {
+        let mut properties = [
+            test_property(TDH_INTYPE_ANSISTRING),
+            test_property(TDH_INTYPE_UINT32),
+            test_property(TDH_INTYPE_ANSISTRING),
+            test_property(TDH_INTYPE_UNICODESTRING),
+        ];
+        properties[1].Anonymous2.count = 3;
+        let schema = test_property_schema(&properties, 4);
+        assert_eq!(schema.format.fields().len(), 4);
+        let mut data = b"prefix\0".to_vec();
+        data.extend([0x4141_4141u32, 0x4242_4242, 0x4343_4343]
+            .into_iter().flat_map(u32::to_le_bytes));
+        data.extend_from_slice(b"actual-text\0");
+        data.extend("actual-wide\0".encode_utf16().flat_map(u16::to_le_bytes));
+        assert_unresolvable_suffix(&schema.format, &data, &[b"prefix"]);
+        let mut output = String::new();
+        schema.format.get_write_closure()(&mut output, &data);
+        assert_eq!(output, "field0=prefix field1=");
+    }
+
+    #[test]
+    fn cached_schema_scalar_struct_count_one() {
+        let properties = [
+            test_property(TDH_INTYPE_UINT32),
+            test_struct_property(3, 2),
+            test_property(TDH_INTYPE_UINT32),
+            test_property(TDH_INTYPE_UINT32),
+            test_property(TDH_INTYPE_UINT32),
+        ];
+        let schema = test_property_schema(&properties, 3);
+        let values = [11u32, 22, 33, 44];
+        let data: Vec<u8> = values.into_iter().flat_map(u32::to_le_bytes).collect();
+        let names: Vec<_> = schema.format.fields().iter()
+            .map(|field| field.name.as_str()).collect();
+        assert_eq!(names, ["field0", "field1.field3", "field1.field4", "field2"]);
+        for (index, (field, bytes)) in schema.format.fields_with_data(&data).enumerate() {
+            assert_eq!(field.offset, index * 4);
+            assert_eq!(field.size, 4);
+            assert_eq!(bytes, values[index].to_le_bytes());
+            let mut reader = schema.format.try_get_field_data_closure(&field.name)
+                .expect("scalar field");
+            assert_eq!(reader(&data), values[index].to_le_bytes());
+            let field_ref = schema.format.get_field_ref(&field.name).unwrap();
+            assert_eq!(schema.format.get_u32(field_ref, &data).unwrap(), values[index]);
+        }
+    }
+
     /// Scenario: TDH returns a provider name in a zero-property schema.
     /// Guarantees: The schema owns the decoded UTF-16 name independently of
     /// the reusable TDH buffer for manifest events, while TraceLogging names
@@ -1544,6 +1800,39 @@ mod tests {
         assert_eq!(fields[2].name, "Count");
         assert_eq!(fields[2].offset, 12);
         assert_eq!(fields[2].size, 8);
+    }
+
+    #[test]
+    fn tdh_decode_array_suffix_unresolvable() {
+        let schema = build_tl_schema("TestProvider", "ArraySuffix", &[
+            ("Prefix", TL_UINT32),
+            ("Values", TL_UINT32 | tracelogging::InType::VariableCountFlag),
+            ("Tail", TL_ANSISTRING),
+            ("WideTail", TL_UNICODESTRING),
+        ]);
+        let (prov, evt) = split_tl_schema(&schema);
+        for counts in [[0u16, 1, 3], [1, 3, 0], [3, 0, 1]] {
+            let mut decoder = TdhDecoder::new();
+            let mut schema_id = None;
+            for count in counts {
+                let prefix = 0x1122_3344u32.to_le_bytes();
+                let mut data = prefix.to_vec();
+                data.extend_from_slice(&count.to_le_bytes());
+                data.extend((0..u32::from(count))
+                    .flat_map(|i| (0x4141_4141 + i).to_le_bytes()));
+                data.extend_from_slice(b"actual-text\0");
+                data.extend("actual-wide\0".encode_utf16().flat_map(u16::to_le_bytes));
+                let mut ext_items = unsafe { std::mem::zeroed() };
+                let record = build_test_record(prov, evt, &mut ext_items, &data);
+                let decoded = decoder.decode(&record).expect("partially decoded event");
+                assert_eq!(decoded.schema_id, *schema_id.get_or_insert(decoded.schema_id));
+                let format = decoded.event_data.format();
+                let names: Vec<_> = format.fields().iter()
+                    .map(|field| field.name.as_str()).collect();
+                assert_eq!(names, ["Prefix", "Values.Count", "Values", "Tail", "WideTail"]);
+                assert_unresolvable_suffix(format, &data, &[&prefix, &data[4..6]]);
+            }
+        }
     }
 
     #[test]
