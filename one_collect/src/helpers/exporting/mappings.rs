@@ -340,20 +340,54 @@ impl ExportMappingLookup {
                     index,
                     true));
 
-            items.push(
-                AddressLookupItem::new(
-                    mapping.end(),
-                    index,
-                    false));
+            /* Mapping ends are inclusive, so stop covering after end */
+            if let Some(end) = mapping.end().checked_add(1) {
+                items.push(
+                    AddressLookupItem::new(
+                        end,
+                        index,
+                        false));
+            }
         }
 
         self.lookup.borrow_mut().update(&mut items);
     }
 
+    /*
+     * Picks between two mappings that both contain an address at a time.
+     * The most recently loaded mapping wins. When both were loaded at the
+     * same time, the narrower one is more specific (e.g. dynamic kernel code
+     * vs. the whole kernel image) and wins; if they are the same size, the
+     * one added last wins.
+     */
+    fn is_better(
+        candidate: &ExportMapping,
+        existing: &ExportMapping) -> bool {
+        if candidate.time() != existing.time() {
+            return candidate.time() > existing.time();
+        }
+
+        let candidate_size = candidate.end() - candidate.start();
+        let existing_size = existing.end() - existing.start();
+
+        if candidate_size != existing_size {
+            return candidate_size < existing_size;
+        }
+
+        candidate.id() > existing.id()
+    }
     pub fn find_index(
         &self,
         address: u64,
         time: Option<u64>) -> Option<usize> {
+        self.find_index_where(address, time, |_| true)
+    }
+
+    pub fn find_index_where(
+        &self,
+        address: u64,
+        time: Option<u64>,
+        mut include: impl FnMut(&ExportMapping) -> bool) -> Option<usize> {
         let time = match time {
             Some(time) => { time },
             None => { u64::MAX },
@@ -372,10 +406,10 @@ impl ExportMappingLookup {
             for index in self.lookup.borrow_mut().find(address) {
                 let map = &self.mappings[*index as usize];
 
-                if map.contains_ip(address) && map.time() <= time {
+                if map.contains_ip(address) && map.time() <= time && include(map) {
                     match best {
                         Some(existing) => {
-                            if map.time() > existing.time() {
+                            if Self::is_better(map, existing) {
                                 best = Some(map);
                                 best_index = *index as usize;
                             }
@@ -390,10 +424,10 @@ impl ExportMappingLookup {
         } else {
             /* Minimal items, no lookup, scan range */
             for (index, map) in self.mappings.iter().enumerate() {
-                if map.contains_ip(address) && map.time() <= time {
+                if map.contains_ip(address) && map.time() <= time && include(map) {
                     match best {
                         Some(existing) => {
-                            if map.time() > existing.time() {
+                            if Self::is_better(map, existing) {
                                 best = Some(map);
                                 best_index = index;
                             }
@@ -651,6 +685,52 @@ mod tests {
         assert!(names.contains(&"shared_func"));
         assert!(names.contains(&"only_in_a"));
         assert!(names.contains(&"only_in_b"));
+    }
+
+    #[test]
+    fn lookup_inclusive_end_inside_wider_mapping() {
+        let mut lookup = ExportMappingLookup::default();
+
+        /* Narrow mapping nested in a wider one, e.g. BPF code in vmlinux */
+        lookup.mappings_mut().push(new_map(0, 0, 4095, 1));
+        lookup.mappings_mut().push(new_map(10, 1024, 2047, 2));
+
+        for min_size in [usize::MAX, 0] {
+            lookup.set_lookup_min_size(min_size);
+            assert_eq!(2, lookup.find(1024, Some(10)).unwrap().id());
+            assert_eq!(2, lookup.find(2047, Some(10)).unwrap().id());
+            assert_eq!(1, lookup.find(2048, Some(10)).unwrap().id());
+            assert_eq!(1, lookup.find(2047, Some(9)).unwrap().id());
+        }
+    }
+
+    #[test]
+    fn lookup_preserves_mapping_at_max_address() {
+        let mut lookup = ExportMappingLookup::default();
+        lookup.mappings_mut().push(new_map(0, 0, u64::MAX, 1));
+        lookup.mappings_mut().push(new_map(0, 1, u64::MAX - 1, 2));
+        for min_size in [usize::MAX, 0] {
+            lookup.set_lookup_min_size(min_size);
+            assert_eq!(2, lookup.find(u64::MAX - 1, None).unwrap().id());
+            assert_eq!(1, lookup.find(u64::MAX, None).unwrap().id());
+        }
+    }
+
+    #[test]
+    fn indexed_lookup_selects_reused_ranges_by_time_and_filter() {
+        let mut lookup = ExportMappingLookup::default();
+        for id in 1..=32 {
+            lookup.mappings_mut().push(new_map(id as u64 * 10, 100, 199, id));
+        }
+        lookup.mappings_mut().push(new_map(0, 200, u64::MAX, 33));
+
+        assert_eq!(None, lookup.find_index(99, Some(100)));
+        assert_eq!(10, lookup.find(100, Some(100)).unwrap().id());
+        assert_eq!(10, lookup.find(199, Some(109)).unwrap().id());
+        let index = lookup.find_index_where(100, Some(100), |map| map.id() != 10).unwrap();
+        assert_eq!(9, lookup.mappings()[index].id());
+        assert_eq!(33, lookup.find(200, Some(100)).unwrap().id());
+        assert_eq!(33, lookup.find(u64::MAX, Some(100)).unwrap().id());
     }
 
     #[test]

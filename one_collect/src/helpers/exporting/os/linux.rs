@@ -8,6 +8,14 @@ use std::path::{Path, PathBuf};
 use std::fs::File;
 use std::fmt::Write;
 use std::io::BufReader;
+#[cfg(target_os = "linux")]
+use std::io::{BufRead, Seek, SeekFrom};
+#[cfg(target_os = "linux")]
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+#[cfg(target_os = "linux")]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "linux")]
+use std::sync::Arc;
 use tracing::{debug, info, trace, warn};
 
 use crate::{ReadOnly, Writable};
@@ -17,7 +25,7 @@ use crate::openat::{OpenAt, DupFd};
 use crate::procfs;
 use crate::perf_event::{AncillaryData, PerfSession};
 use crate::perf_event::{RingBufSessionBuilder, RingBufBuilder};
-use crate::perf_event::rb::{RingBufOptions, cgroup_sample_supported};
+use crate::perf_event::rb::{RingBufOptions, cgroup_sample_supported, ksymbol_records_supported};
 use crate::perf_event::abi::PERF_RECORD_MISC_SWITCH_OUT;
 use crate::helpers::callstack::{CallstackHelp, CallstackReader};
 use crate::helpers::exporting::*;
@@ -819,6 +827,7 @@ pub(crate) struct OSExportMachine {
     dev_nodes: ExportDevNodeLookup,
     va_offsets: HashMap<ExportDevNode, u64>,
     path_buf: Writable<PathBuf>,
+    bpf_lifecycle_unavailable: bool,
 }
 
 impl OSExportMachine {
@@ -828,6 +837,7 @@ impl OSExportMachine {
             dev_nodes: ExportDevNodeLookup::new(),
             va_offsets: HashMap::new(),
             path_buf: Writable::new(PathBuf::new()),
+            bpf_lifecycle_unavailable: false,
         }
     }
 
@@ -1259,6 +1269,43 @@ impl OSExportMachine {
                 time_field.get_u64(full_data)?)
         });
 
+        /* Hook kernel dynamic symbol (BPF JIT, trampoline) records */
+        let time_field = session.time_data_ref();
+        let event = session.ksymbol_event();
+        let event_machine = machine.clone();
+        let fmt = event.format();
+        let addr = fmt.get_field_ref_unchecked("addr");
+        let len = fmt.get_field_ref_unchecked("len");
+        let ksym_type = fmt.get_field_ref_unchecked("ksym_type");
+        let flags = fmt.get_field_ref_unchecked("flags");
+        let name = fmt.get_field_ref_unchecked("name[]");
+
+        event.add_callback(move |data| {
+            let fmt = data.format();
+            let full_data = data.full_data();
+            let data = data.event_data();
+
+            let flags = fmt.get_u16(flags, data)?;
+            let unregister = flags & crate::perf_event::abi::PERF_RECORD_KSYMBOL_FLAGS_UNREGISTER != 0;
+
+            /*
+             * Match the "<module> <name>" format KernelSymbolReader uses
+             * for these symbols in /proc/kallsyms.
+             */
+            let name = format!("[bpf] {}", fmt.get_str(name, data)?);
+
+            event_machine.borrow_mut().queue_kernel_dynamic_symbol(
+                time_field.get_u64(full_data)?,
+                fmt.get_u64(addr, data)?,
+                fmt.get_u32(len, data)? as u64,
+                KernelDynamicSymbolKind::from_ksym_type(
+                    fmt.get_u16(ksym_type, data)?),
+                unregister,
+                &name);
+
+            Ok(())
+        });
+
         /* Hook fork records */
         let event = session.fork_event();
         let event_machine = machine.clone();
@@ -1479,10 +1526,81 @@ impl ModuleAccessor for ExportDevNodeLookup {
 }
 
 #[cfg(target_os = "linux")]
+fn mark_live_kernel_samples(
+    ip_times: &[(u64, u64)],
+    states: &mut [Option<usize>],
+    generation: &KernelDynamicSymbol,
+    gen_index: usize) -> bool {
+    let mut first = ip_times.partition_point(|(addr, _)| *addr < generation.start());
+    let last = ip_times.partition_point(|(addr, _)| *addr <= generation.end());
+    let mut live = false;
+
+    while first < last {
+        let address = ip_times[first].0;
+        let end = first + ip_times[first..last].partition_point(|(addr, _)| *addr == address);
+        let times = &ip_times[first..end];
+        let from = times.partition_point(|(_, time)| *time < generation.load_time());
+        let to = match generation.unload_time() {
+            Some(unload) => times.partition_point(|(_, time)| *time < unload),
+            None => times.len(),
+        };
+        if from < to {
+            states[first + from..first + to].fill(Some(gen_index));
+            live = true;
+        }
+        first = end;
+    }
+
+    live
+}
+
+#[cfg(target_os = "linux")]
+fn count_ambiguous_kernel_addresses(
+    ip_times: &[(u64, u64)],
+    states: &[Option<usize>],
+    generations: &[&KernelDynamicSymbol],
+    emitted: &[usize]) -> u64 {
+    let mut starts: Vec<_> = emitted.iter().map(|index| generations[*index].start()).collect();
+    let mut ends: Vec<_> = emitted.iter().map(|index| generations[*index].end()).collect();
+    starts.sort_unstable();
+    ends.sort_unstable();
+
+    let mut count = 0;
+    let mut index = 0;
+    while index < ip_times.len() {
+        let addr = ip_times[index].0;
+        let state = states[index];
+        let end = index + ip_times[index..].partition_point(|(other, _)| *other == addr);
+        let covering = starts.partition_point(|start| *start <= addr) -
+            ends.partition_point(|end| *end < addr);
+        /* A resolved state already accounts for one emitted covering range. */
+        if states[index..end].iter().any(|other| *other != state) ||
+            covering > usize::from(state.is_some()) {
+            count += 1;
+        }
+        index = end;
+    }
+    count
+}
+
+#[cfg(target_os = "linux")]
+fn bpf_identity_tag(name: &str) -> Option<&str> {
+    let rest = name.strip_prefix("[bpf] bpf_prog_")?;
+    let tag = rest.get(..16)?;
+    if tag.bytes().all(|byte| byte.is_ascii_hexdigit()) &&
+        (rest.len() == 16 || rest.as_bytes()[16] == b'_') {
+        Some(tag)
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
 impl ExportMachineOSHooks for ExportMachine {
     fn os_add_kernel_mappings_with(
         &mut self,
         kernel_symbols: &mut impl ExportSymbolReader) {
+        self.apply_pending_kernel_dynamic_symbols();
 
         // Cached kernel symbol for in-memory matching.
         // name_id is interned once in Phase 2 so Phase 3 does not pay the
@@ -1492,6 +1610,12 @@ impl ExportMachineOSHooks for ExportMachine {
             start: u64,
             end: u64,
             name_id: usize,
+            /*
+             * Whether the symbol lies in an address range used by tracked
+             * kernel dynamic code. Such symbols describe what was loaded at
+             * finalization, so they are only valid after that code unloaded.
+             */
+            in_dynamic_range: bool,
         }
 
         let mut frames = Vec::new();
@@ -1518,6 +1642,42 @@ impl ExportMachineOSHooks for ExportMachine {
         let mut all_addrs: Vec<u64> = all_addrs_set.into_iter().collect();
         all_addrs.sort();
 
+        let strings = &self.strings;
+        self.kernel_dynamic_symbols.apply_snapshots_with(|left, right| {
+            match (strings.from_id(left), strings.from_id(right)) {
+                (Ok(left), Ok(right)) => bpf_identity_tag(left).zip(bpf_identity_tag(right))
+                    .is_some_and(|(left, right)| left == right),
+                _ => false,
+            }
+        });
+
+        let dynamic = &self.kernel_dynamic_symbols;
+        let dynamic_ranges = dynamic.range_index();
+
+        if !dynamic.is_empty() {
+            let stats = dynamic.stats();
+
+            info!("Kernel dynamic symbols: generations={}, registers={}, unregisters={}, \
+                unmatched_unregisters={}, implicit_unloads={}, mismatched_unregisters={}, \
+                duplicates={}, invalid={}, snapshot_symbols={}",
+                dynamic.symbols().len(), stats.registers, stats.unregisters,
+                stats.unmatched_unregisters, stats.implicit_unloads,
+                stats.mismatched_unregisters, stats.duplicates, stats.invalid,
+                stats.snapshot_symbols);
+
+            if stats.implicit_unloads != 0 || stats.mismatched_unregisters != 0 {
+                warn!("Kernel dynamic symbol records were lost or inconsistent, \
+                    some BPF frames may be attributed with approximate lifetimes");
+            }
+
+            let lost = self.lost_events();
+
+            if lost != 0 {
+                warn!("{} events were lost, kernel dynamic symbol records may be missing \
+                    so some BPF frames may be unknown or have approximate lifetimes", lost);
+            }
+        }
+
         // Phase 2: Read kernel symbols once, keeping only those that match
         // a collected IP. This avoids re-reading /proc/kallsyms per-process.
         kernel_symbols.reset();
@@ -1525,12 +1685,44 @@ impl ExportMachineOSHooks for ExportMachine {
 
         while kernel_symbols.next() {
             let start = kernel_symbols.start();
-            let end = kernel_symbols.end();
+            let mut end = kernel_symbols.end();
+            let mut in_dynamic_range = false;
 
-            let has_match = match all_addrs.binary_search(&start) {
-                Ok(_) => true,
-                Err(i) => i < all_addrs.len() && all_addrs[i] < end,
-            };
+            if self.os.bpf_lifecycle_unavailable &&
+                kernel_symbols.name().starts_with("[bpf]") {
+                continue;
+            }
+
+            /* An unbounded or invalid kallsyms extent is represented by
+             * end == start. Do not turn that sentinel into a range. */
+            if end <= start {
+                continue;
+            }
+
+            /* Clipping can only shrink the original extent. */
+            let first = all_addrs.partition_point(|addr| *addr < start);
+            if first == all_addrs.len() || all_addrs[first] > end {
+                continue;
+            }
+
+            if !dynamic.is_empty() {
+                /*
+                 * Code still loaded that we saw register is described by
+                 * its generation, which has an exact extent and lifetime.
+                 */
+                if dynamic_ranges.open_contains(start) {
+                    continue;
+                }
+
+                /*
+                 * Never let an inferred kallsyms extent run into code that
+                 * was loaded or unloaded during tracking.
+                 */
+                end = dynamic_ranges.clip_end(start, end);
+                in_dynamic_range = dynamic_ranges.any_contains(start);
+            }
+
+            let has_match = all_addrs[first] <= end;
 
             if has_match {
                 let name_id = self.strings.to_id(kernel_symbols.name());
@@ -1538,10 +1730,43 @@ impl ExportMachineOSHooks for ExportMachine {
                     start,
                     end,
                     name_id,
+                    in_dynamic_range,
                 });
             }
         }
         // matched_symbols is sorted by start (kallsyms is sorted).
+
+        // Kernel dynamic code generations that any sample touched, ordered
+        // by start so they can be matched against sorted process IPs.
+        let mut generations: Vec<&KernelDynamicSymbol> = dynamic
+            .symbols()
+            .iter()
+            .filter(|symbol| {
+                match all_addrs.binary_search(&symbol.start()) {
+                    Ok(_) => true,
+                    Err(i) => i < all_addrs.len() && all_addrs[i] <= symbol.end(),
+                }
+            })
+            .collect();
+
+        generations.sort_by_key(|symbol| (symbol.load_time(), symbol.start()));
+
+        /* Sampled addresses inside any generation, which need time scoping */
+        let mut dynamic_addrs: HashSet<u64> = HashSet::new();
+
+        for generation in &generations {
+            let first = all_addrs.partition_point(|addr| *addr < generation.start());
+            let last = all_addrs.partition_point(|addr| *addr <= generation.end());
+
+            dynamic_addrs.extend(all_addrs[first..last].iter().copied());
+        }
+
+        let vmlinux_id = self.strings.to_id("vmlinux");
+        let bpf_id = self.strings.to_id("[bpf]");
+        let mut ip_times: Vec<(u64, u64)> = Vec::new();
+        let mut states: Vec<Option<usize>> = Vec::new();
+        let mut emitted: Vec<usize> = Vec::new();
+        let mut time_ambiguous = 0u64;
 
         // Phase 3: For each process, assign symbols from the matched set.
         let mut seen = vec![false; matched_symbols.len()];
@@ -1558,7 +1783,7 @@ impl ExportMachineOSHooks for ExportMachine {
 
             let mut kernel = ExportMapping::new(
                 0,
-                self.strings.to_id("vmlinux"),
+                vmlinux_id,
                 KERNEL_START,
                 KERNEL_END,
                 0,
@@ -1580,7 +1805,8 @@ impl ExportMachineOSHooks for ExportMachine {
                 };
 
                 let sym = &matched_symbols[idx];
-                if *addr >= sym.start && *addr < sym.end && !seen[idx] {
+                if *addr >= sym.start && *addr <= sym.end && !seen[idx] &&
+                   !sym.in_dynamic_range {
                     seen[idx] = true;
                     added += 1;
 
@@ -1600,9 +1826,90 @@ impl ExportMachineOSHooks for ExportMachine {
             }
 
             proc.add_mapping(kernel);
-        }
-    }
 
+            if generations.is_empty() {
+                continue;
+            }
+
+            proc.get_kernel_ip_times(
+                |addr| dynamic_addrs.contains(&addr),
+                &mut ip_times,
+                &mut frames,
+                &self.callstacks);
+
+            if ip_times.is_empty() {
+                continue;
+            }
+
+            states.clear();
+            states.resize(ip_times.len(), None);
+            emitted.clear();
+
+            /*
+             * Each generation becomes a mapping scoped to its load time.
+             * Its unload event ends that mapping's lifetime without
+             * synthesizing a replacement mapping over the address range.
+             *
+             * Only generations this process sampled while they were live
+             * are added, so readers that resolve by address without time
+             * do not see code the process never ran.
+             */
+            for (gen_index, generation) in generations.iter().enumerate() {
+                let unload_time = generation.unload_time();
+                if mark_live_kernel_samples(&ip_times, &mut states, generation, gen_index) {
+                    let mapping_id = self.map_index;
+                    let mut mapping = ExportMapping::new(
+                        generation.load_time(),
+                        bpf_id,
+                        generation.start(),
+                        generation.end(),
+                        0,
+                        false,
+                        self.map_index,
+                        UnwindType::DWARF);
+
+                    self.map_index += 1;
+
+                    mapping.add_symbol(
+                        ExportSymbol::new(
+                            generation.name_id(),
+                            generation.start(),
+                            generation.end()));
+
+                    proc.add_mapping(mapping);
+                    emitted.push(gen_index);
+
+                    if let Some(unload_time) = unload_time {
+                        proc.add_mapping_unload(
+                            ExportMappingUnload::new(
+                                unload_time,
+                                mapping_id,
+                                generation.start(),
+                                generation.end()));
+                    }
+                }
+            }
+
+            /*
+             * Count addresses that only resolve correctly with time: their
+             * samples span generations or gaps, or another emitted
+             * generation's symbol also covers them.
+             */
+            time_ambiguous += count_ambiguous_kernel_addresses(
+                &ip_times, &states, &generations, &emitted);
+        }
+
+        if time_ambiguous != 0 {
+            warn!("{} sampled kernel dynamic code addresses need time to resolve: \
+                within the same process they ran under more than one code generation \
+                (or while nothing was loaded there), or overlap another generation's \
+                symbol. Exported symbols are time scoped, but readers that resolve \
+                symbols by address alone (e.g. TraceEvent universal symbols) may \
+                attribute these frames to the wrong generation", time_ambiguous);
+        }
+
+        self.kernel_dynamic_symbols.stats_mut().time_ambiguous_addresses = time_ambiguous;
+    }
     fn os_add_dynamic_symbol(
         &mut self,
         symbol: &DynamicSymbol) -> anyhow::Result<()> {
@@ -1745,6 +2052,10 @@ impl ExportBuilderHelp for RingBufSessionBuilder {
             .with_comm_records()
             .with_task_records();
 
+        if ksymbol_records_supported() {
+            kernel = kernel.with_ksymbol_records();
+        }
+
         if settings.cpu_profiling {
             let profiling = RingBufBuilder::for_profiling(settings.cpu_freq);
 
@@ -1801,6 +2112,445 @@ impl ExportSessionHelp for PerfSession {
     }
 }
 
+/* Loaded BPF program function as seen by snapshot_bpf_programs */
+struct LoadedBpfFunction {
+    time: u64,
+    start: u64,
+    len: u64,
+    name: String,
+    name_is_exact: bool,
+    tag_is_known: bool,
+}
+
+#[cfg(target_os = "linux")]
+struct BpfSnapshotFunction {
+    time: u64,
+    start: u64,
+    len: u64,
+    tag: [u8; 8],
+    tag_is_known: bool,
+    prog_name: String,
+}
+
+#[cfg(target_os = "linux")]
+struct PinnedBpfProgram {
+    _fd: OwnedFd,
+    functions: Vec<BpfSnapshotFunction>,
+}
+
+#[cfg(target_os = "linux")]
+struct BpfSnapshotCancellation(Arc<AtomicBool>);
+
+#[cfg(target_os = "linux")]
+impl Drop for BpfSnapshotCancellation {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn bpf_snapshot_name(
+    kallsyms_name: Option<&String>,
+    tag: &[u8],
+    prog_name: &str) -> (String, bool) {
+    let mut tag_string = String::new();
+    for byte in tag {
+        let _ = write!(tag_string, "{:02x}", byte);
+    }
+
+    let prefix = format!("bpf_prog_{}", tag_string);
+    match kallsyms_name {
+        Some(name) if name == &prefix || name.starts_with(&format!("{}_", prefix)) => (name.clone(), true),
+        _ => (format!("{}_{}", prefix, prog_name), false),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn bpf_kallsyms_names(
+    reader: &mut (impl BufRead + Seek),
+    addresses: &HashSet<u64>,
+    cancelled: &AtomicBool) -> std::io::Result<Option<HashMap<u64, String>>> {
+    if cancelled.load(Ordering::Relaxed) {
+        return Ok(None);
+    }
+    reader.seek(SeekFrom::Start(0))?;
+    let mut names = HashMap::new();
+    let mut line = String::new();
+
+    while names.len() < addresses.len() {
+        if cancelled.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            break;
+        }
+        if !line.trim_end().ends_with("[bpf]") {
+            continue;
+        }
+
+        let mut parts = line.split_whitespace();
+        if let (Some(addr), Some(_), Some(name)) = (parts.next(), parts.next(), parts.next()) {
+            if let Ok(addr) = u64::from_str_radix(addr, 16) {
+                if addresses.contains(&addr) {
+                    names.insert(addr, name.to_string());
+                }
+            }
+        }
+    }
+
+    if cancelled.load(Ordering::Relaxed) {
+        return Ok(None);
+    }
+    Ok(Some(names))
+}
+
+#[cfg(target_os = "linux")]
+fn finish_bpf_snapshot_batch(
+    programs: Vec<PinnedBpfProgram>,
+    cancelled: &AtomicBool,
+    read_names: impl FnOnce(&HashSet<u64>) -> Option<HashMap<u64, String>>) -> Option<Vec<LoadedBpfFunction>> {
+    if cancelled.load(Ordering::Relaxed) {
+        return None;
+    }
+    let mut addresses = HashSet::new();
+    for program in &programs {
+        for function in &program.functions {
+            if cancelled.load(Ordering::Relaxed) {
+                return None;
+            }
+            addresses.insert(function.start);
+        }
+    }
+
+    /* Each program remains pinned until all of these names have been read. */
+    let names = read_names(&addresses)?;
+    let mut functions = Vec::new();
+
+    for program in programs {
+        for function in program.functions {
+            if cancelled.load(Ordering::Relaxed) {
+                return None;
+            }
+            let kallsyms_name = names.get(&function.start);
+            let (name, name_is_exact) = match kallsyms_name {
+                Some(name) if !function.tag_is_known && name.starts_with("bpf_prog_") => {
+                    (name.clone(), true)
+                },
+                _ => bpf_snapshot_name(kallsyms_name, &function.tag, &function.prog_name),
+            };
+            functions.push(LoadedBpfFunction {
+                time: function.time,
+                start: function.start,
+                len: function.len,
+                name,
+                name_is_exact,
+                tag_is_known: function.tag_is_known,
+            });
+        }
+    }
+
+    if cancelled.load(Ordering::Relaxed) {
+        return None;
+    }
+    Some(functions)
+}
+
+/*
+ * Enumerates loaded BPF programs and returns the extent and name of each JIT
+ * compiled function. This requires CAP_SYS_ADMIN; on failure what was found
+ * so far is returned. Cancellation discards all results.
+ */
+#[cfg(target_os = "linux")]
+fn loaded_bpf_functions(cancelled: &AtomicBool) -> Option<Vec<LoadedBpfFunction>> {
+    if cancelled.load(Ordering::Relaxed) {
+        return None;
+    }
+    let kallsyms = match File::open("/proc/kallsyms") {
+        Ok(file) => Some(BufReader::new(file)),
+        Err(err) => {
+            warn!("Unable to open kallsyms for the BPF snapshot ({}); \
+                using program names where possible", err);
+            None
+        },
+    };
+    loaded_bpf_functions_with(cancelled, |cmd, attr, size| unsafe {
+        libc::syscall(libc::SYS_bpf, cmd, attr, size as libc::c_uint)
+    }, kallsyms)
+}
+
+#[cfg(target_os = "linux")]
+fn loaded_bpf_functions_with(
+    cancelled: &AtomicBool,
+    mut syscall: impl FnMut(libc::c_long, *mut libc::c_void, usize) -> libc::c_long,
+    mut kallsyms: Option<BufReader<File>>) -> Option<Vec<LoadedBpfFunction>> {
+    const BPF_PROG_GET_NEXT_ID: libc::c_long = 11;
+    const BPF_PROG_GET_FD_BY_ID: libc::c_long = 13;
+    const BPF_OBJ_GET_INFO_BY_FD: libc::c_long = 15;
+    const BATCH_SIZE: usize = 32;
+
+    /* Offsets within struct bpf_prog_info (linux/bpf.h) */
+    const INFO_TAG: usize = 8;
+    const INFO_NAME: usize = 64;
+    const INFO_NR_JITED_KSYMS: usize = 104;
+    const INFO_NR_JITED_FUNC_LENS: usize = 108;
+    const INFO_JITED_KSYMS: usize = 112;
+    const INFO_JITED_FUNC_LENS: usize = 120;
+    const INFO_NR_PROG_TAGS: usize = 180;
+    const INFO_PROG_TAGS: usize = 184;
+    const INFO_LEN: usize = 192;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct NextIdAttr { start_id: u32, next_id: u32, open_flags: u32 }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct FdByIdAttr { prog_id: u32, next_id: u32, open_flags: u32 }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct InfoAttr { bpf_fd: u32, info_len: u32, info: u64 }
+
+    fn bpf<T>(
+        syscall: &mut impl FnMut(libc::c_long, *mut libc::c_void, usize) -> libc::c_long,
+        cmd: libc::c_long,
+        attr: &mut T) -> libc::c_long {
+        syscall(cmd, (attr as *mut T).cast(), std::mem::size_of::<T>())
+    }
+
+    fn get_info(
+        syscall: &mut impl FnMut(libc::c_long, *mut libc::c_void, usize) -> libc::c_long,
+        fd: i32,
+        info: &mut [u8; INFO_LEN]) -> bool {
+        let mut attr = InfoAttr {
+            bpf_fd: fd as u32,
+            info_len: INFO_LEN as u32,
+            info: info.as_mut_ptr() as u64,
+        };
+
+        bpf(syscall, BPF_OBJ_GET_INFO_BY_FD, &mut attr) == 0
+    }
+
+    fn u32_at(info: &[u8], offset: usize) -> u32 {
+        u32::from_ne_bytes(info[offset..offset + 4].try_into().unwrap())
+    }
+
+    fn finish_batch(
+        batch: &mut Vec<PinnedBpfProgram>,
+        kallsyms: &mut Option<BufReader<File>>,
+        functions: &mut Vec<LoadedBpfFunction>,
+        cancelled: &AtomicBool) -> Option<()> {
+        if batch.is_empty() {
+            return if cancelled.load(Ordering::Relaxed) { None } else { Some(()) };
+        }
+
+        functions.extend(finish_bpf_snapshot_batch(
+            std::mem::take(batch),
+            cancelled,
+            |addresses| {
+                match kallsyms.as_mut() {
+                    Some(reader) => match bpf_kallsyms_names(reader, addresses, cancelled) {
+                        Ok(names) => names,
+                        Err(err) => {
+                            warn!("Unable to read BPF names from kallsyms ({}); \
+                                using program names where possible", err);
+                            *kallsyms = None;
+                            Some(HashMap::new())
+                        },
+                    },
+                    None => Some(HashMap::new()),
+                }
+            })?);
+        Some(())
+    }
+
+    if cancelled.load(Ordering::Relaxed) {
+        return None;
+    }
+    let mut functions = Vec::new();
+    let mut batch = Vec::new();
+    let mut id = 0u32;
+
+    loop {
+        if cancelled.load(Ordering::Relaxed) {
+            return None;
+        }
+        let mut next = NextIdAttr { start_id: id, ..Default::default() };
+
+        if bpf(&mut syscall, BPF_PROG_GET_NEXT_ID, &mut next) != 0 {
+            let err = std::io::Error::last_os_error();
+
+            if err.raw_os_error() != Some(libc::ENOENT) {
+                warn!("Unable to enumerate loaded BPF programs ({}); samples in BPF \
+                    programs loaded before tracing began whose unload is not recorded \
+                    (they unload after recording stops but before trace finalization, \
+                    or their unload record is lost) will be unknown", err);
+            }
+
+            break;
+        }
+
+        if cancelled.load(Ordering::Relaxed) {
+            return None;
+        }
+        id = next.next_id;
+
+        let mut by_id = FdByIdAttr { prog_id: id, ..Default::default() };
+        let mut fd = bpf(&mut syscall, BPF_PROG_GET_FD_BY_ID, &mut by_id);
+        if fd < 0 &&
+            matches!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EMFILE | libc::ENFILE)) &&
+            !batch.is_empty() {
+            finish_batch(&mut batch, &mut kallsyms, &mut functions, cancelled)?;
+            fd = bpf(&mut syscall, BPF_PROG_GET_FD_BY_ID, &mut by_id);
+        }
+        if fd < 0 &&
+            matches!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EMFILE | libc::ENFILE)) &&
+            kallsyms.is_some() {
+            warn!("Unable to open a BPF program while kallsyms is open; \
+                using program names where possible");
+            kallsyms = None;
+            fd = bpf(&mut syscall, BPF_PROG_GET_FD_BY_ID, &mut by_id);
+        }
+        if fd < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::ENOENT) {
+                /* Unloaded since it was enumerated. */
+                continue;
+            }
+            warn!("Unable to open BPF program {} for the snapshot ({}); \
+                its symbols may be unknown", id, err);
+            if matches!(err.raw_os_error(), Some(libc::EMFILE | libc::ENFILE)) {
+                break;
+            }
+            continue;
+        }
+
+        let fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+        if cancelled.load(Ordering::Relaxed) {
+            return None;
+        }
+        let mut info = [0u8; INFO_LEN];
+
+        if get_info(&mut syscall, fd.as_raw_fd(), &mut info) {
+            if cancelled.load(Ordering::Relaxed) {
+                return None;
+            }
+            let count = u32_at(&info, INFO_NR_JITED_KSYMS)
+                .min(u32_at(&info, INFO_NR_JITED_FUNC_LENS)) as usize;
+
+            if count != 0 {
+                let mut ksyms = vec![0u64; count];
+                let mut lens = vec![0u32; count];
+                let tag_count = (u32_at(&info, INFO_NR_PROG_TAGS) as usize).min(count);
+                let mut tags = vec![[0u8; 8]; tag_count];
+
+                info = [0u8; INFO_LEN];
+                info[INFO_NR_JITED_KSYMS..INFO_NR_JITED_KSYMS + 4]
+                    .copy_from_slice(&(count as u32).to_ne_bytes());
+                info[INFO_NR_JITED_FUNC_LENS..INFO_NR_JITED_FUNC_LENS + 4]
+                    .copy_from_slice(&(count as u32).to_ne_bytes());
+                info[INFO_JITED_KSYMS..INFO_JITED_KSYMS + 8]
+                    .copy_from_slice(&(ksyms.as_mut_ptr() as u64).to_ne_bytes());
+                info[INFO_JITED_FUNC_LENS..INFO_JITED_FUNC_LENS + 8]
+                    .copy_from_slice(&(lens.as_mut_ptr() as u64).to_ne_bytes());
+                info[INFO_NR_PROG_TAGS..INFO_NR_PROG_TAGS + 4]
+                    .copy_from_slice(&(tag_count as u32).to_ne_bytes());
+                info[INFO_PROG_TAGS..INFO_PROG_TAGS + 8]
+                    .copy_from_slice(&(tags.as_mut_ptr() as u64).to_ne_bytes());
+
+                if get_info(&mut syscall, fd.as_raw_fd(), &mut info) {
+                    /* The open fd pins this program at the observation time. */
+                    let time = ExportMachine::qpc_time();
+
+                    let prog_name = &info[INFO_NAME..INFO_NAME + 16];
+                    let prog_name_len = prog_name.iter().position(|b| *b == 0).unwrap_or(16);
+                    let prog_name = String::from_utf8_lossy(&prog_name[..prog_name_len]);
+
+                    let mut program_functions = Vec::new();
+                    for (index, (start, len)) in ksyms.iter().zip(lens.iter()).enumerate() {
+                        if cancelled.load(Ordering::Relaxed) {
+                            return None;
+                        }
+                        if *start == 0 || *len == 0 {
+                            continue;
+                        }
+
+                        let tag_is_known = index == 0 ||
+                            index < tag_count.min(u32_at(&info, INFO_NR_PROG_TAGS) as usize);
+                        let tag = if index == 0 {
+                            &info[INFO_TAG..INFO_TAG + 8]
+                        } else {
+                            tags.get(index).map_or(&info[INFO_TAG..INFO_TAG + 8], |tag| tag.as_slice())
+                        };
+                        program_functions.push(
+                            BpfSnapshotFunction {
+                                time,
+                                start: *start,
+                                len: *len as u64,
+                                tag: tag.try_into().unwrap(),
+                                tag_is_known,
+                                prog_name: prog_name.to_string(),
+                            });
+                    }
+
+                    if !program_functions.is_empty() {
+                        batch.push(PinnedBpfProgram { _fd: fd, functions: program_functions });
+                        if batch.len() == BATCH_SIZE {
+                            finish_batch(&mut batch, &mut kallsyms, &mut functions, cancelled)?;
+                        }
+                    }
+                } else {
+                    warn!("Unable to read BPF JIT details for program {} ({}); \
+                        its symbols may be unknown", id, std::io::Error::last_os_error());
+                }
+            }
+        } else {
+            warn!("Unable to read BPF program {} for the snapshot ({}); \
+                its symbols may be unknown", id, std::io::Error::last_os_error());
+        }
+    }
+
+    finish_batch(&mut batch, &mut kallsyms, &mut functions, cancelled)?;
+    Some(functions)
+}
+
+/*
+ * Records BPF programs that are already loaded so that samples in them can
+ * be resolved even if they unload before the trace is finalized, when no
+ * register record was seen for them.
+ */
+#[cfg(target_os = "linux")]
+fn snapshot_bpf_programs(
+    machine: &mut ExportMachine,
+    functions: Vec<LoadedBpfFunction>,
+    completed_before_stop: bool,
+    system_wide_ksymbols: bool) {
+    if !system_wide_ksymbols {
+        warn!("BPF snapshot discarded because system-wide kernel symbol lifecycle \
+            collection was unavailable");
+        return;
+    }
+    if !completed_before_stop {
+        warn!("BPF snapshot did not complete before recording stopped; discarding it \
+            to avoid attributing programs observed after the recording");
+        return;
+    }
+
+    debug!("Snapshot of loaded BPF programs: functions={}", functions.len());
+
+    for function in functions {
+        machine.add_kernel_dynamic_snapshot_with_name_certainty(
+            function.time,
+            function.start,
+            function.len,
+            KernelDynamicSymbolKind::Bpf,
+            &format!("[bpf] {}", function.name),
+            function.name_is_exact,
+            function.tag_is_known);
+    }
+}
+
 #[cfg(target_os = "linux")]
 impl UniversalExporterOSHooks for UniversalExporter {
     fn os_parse_until(
@@ -1842,29 +2592,51 @@ impl UniversalExporterOSHooks for UniversalExporter {
             exporter.borrow_mut().mark_start();
             session.enable()?;
 
-            /* Spawn capture_environment in a background thread so that
-             * the ring buffers are already enabled when .NET diagnostic
-             * commands trigger runtime events (see issue #243). */
-            let env_handle = session.spawn_capture_environment();
+            std::thread::scope(|scope| -> anyhow::Result<()> {
+                let cancellation = BpfSnapshotCancellation(Arc::new(AtomicBool::new(false)));
+                let system_wide_ksymbols = session.has_system_wide_ksymbols();
+                exporter.borrow_mut().os.bpf_lifecycle_unavailable =
+                    ksymbol_records_supported() && !system_wide_ksymbols;
+                let snapshot = if system_wide_ksymbols {
+                    let cancelled = Arc::clone(&cancellation.0);
+                    Some(scope.spawn(move || loaded_bpf_functions(&cancelled)))
+                } else {
+                    if ksymbol_records_supported() {
+                        warn!("Skipping BPF snapshot because system-wide kernel symbol \
+                            lifecycle collection was unavailable");
+                    }
+                    None
+                };
 
-            session.parse_until(until)?;
-            session.disable()?;
-            exporter.borrow_mut().mark_end();
+                /* Capture environment while perf rings are being consumed. */
+                let env_handle = session.spawn_capture_environment();
+                let result = session.parse_until(until);
+                let snapshot_completed = snapshot.as_ref().is_some_and(|handle| handle.is_finished());
+                cancellation.0.store(true, Ordering::Relaxed);
+                result?;
+                session.disable()?;
+                exporter.borrow_mut().mark_end();
 
-            /* When the session is disabled very early (for example, because
-             * the memory limit is reached immediately), the environment-capture
-             * thread may spend several minutes waiting for ring-buffer space on
-             * systems with many processes or modules. Continue parsing
-             * concurrently so the writer can finish promptly. */
-            while !env_handle.is_finished() {
+                while !env_handle.is_finished() ||
+                    snapshot.as_ref().is_some_and(|handle| !handle.is_finished()) {
+                    session.parse_all()?;
+                }
+
+                let _ = env_handle.join();
+                if let Some(handle) = snapshot {
+                    let functions = handle.join().map_err(|_| {
+                        anyhow::anyhow!("BPF snapshot thread panicked")
+                    })?;
+                    if let Some(functions) = functions {
+                        snapshot_bpf_programs(
+                            &mut exporter.borrow_mut(), functions, snapshot_completed, system_wide_ksymbols);
+                    } else {
+                        warn!("BPF snapshot did not complete before recording stopped; discarding it");
+                    }
+                }
                 session.parse_all()?;
-            }
-
-            /* Wait for the background capture to finish */
-            let _ = env_handle.join();
-
-            /* Parse any remaining data including in-process events. */
-            session.parse_all()?;
+                Ok(())
+            })?;
 
             self.run_parsed_hooks(&exporter)?;
 
@@ -1886,6 +2658,7 @@ impl UniversalExporterOSHooks for UniversalExporter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::helpers::exporting::graph::ExportGraph;
     use std::io::{Error, ErrorKind};
     use std::path::Path;
     use std::os::linux::fs::MetadataExt;
@@ -2007,6 +2780,768 @@ mod tests {
         session.parse_all().unwrap();
 
         assert_eq!(8, exporter.borrow().lost_events());
+    }
+
+    struct KallsymsMock {
+        symbols: Vec<(u64, u64, &'static str)>,
+        index: usize,
+    }
+
+    impl KallsymsMock {
+        fn new(symbols: Vec<(u64, u64, &'static str)>) -> Self {
+            Self {
+                symbols,
+                index: 0,
+            }
+        }
+    }
+
+    impl ExportSymbolReader for KallsymsMock {
+        fn reset(&mut self) { self.index = 0; }
+
+        fn next(&mut self) -> bool {
+            if self.index < self.symbols.len() {
+                self.index += 1;
+                true
+            } else {
+                false
+            }
+        }
+
+        fn start(&self) -> u64 { self.symbols[self.index - 1].0 }
+
+        fn end(&self) -> u64 { self.symbols[self.index - 1].1 }
+
+        fn name(&self) -> &str { self.symbols[self.index - 1].2 }
+
+        fn demangle(&mut self) -> Option<String> { None }
+    }
+
+    const SEC: u64 = 1_000_000_000;
+    const BPF_X: u64 = 0xffffffffc0001000;
+
+    fn kernel_test_machine() -> ExportMachine {
+        let settings = ExportSettings::new(CallstackHelper::new())
+            .without_process_fs();
+
+        ExportMachine::new(settings)
+    }
+
+    #[test]
+    fn incomplete_snapshot_is_discarded_after_shutdown() {
+        let mut machine = kernel_test_machine();
+        let functions = vec![LoadedBpfFunction {
+            time: 3 * SEC, start: BPF_X, len: 64, name: "replacement".to_string(),
+            name_is_exact: true,
+            tag_is_known: true,
+        }];
+        snapshot_bpf_programs(&mut machine, functions, false, true);
+        machine.kernel_dynamic_symbols.apply_snapshots();
+        assert!(machine.kernel_dynamic_symbols().is_empty());
+    }
+
+    #[test]
+    fn cancellation_during_bpf_enumeration_releases_pins() {
+        use std::io::{ErrorKind, Read};
+        use std::os::fd::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+
+        #[repr(C)]
+        struct InfoAttr { fd: u32, len: u32, info: u64 }
+
+        let cancelled = AtomicBool::new(false);
+        let mut pins = std::collections::VecDeque::new();
+        let mut observers = Vec::new();
+        for _ in 0..33 {
+            let (pin, observer) = UnixStream::pair().unwrap();
+            observer.set_nonblocking(true).unwrap();
+            pins.push_back(pin);
+            observers.push(observer);
+        }
+        let mut next_count = 0;
+        let mut info_count = 0;
+        let result = loaded_bpf_functions_with(&cancelled, |cmd, attr, _| {
+            match cmd {
+                11 => {
+                    next_count += 1;
+                    if next_count == 34 {
+                        assert_eq!(0, observers[0].read(&mut [0]).unwrap());
+                        assert_eq!(ErrorKind::WouldBlock, observers[32].read(&mut [0]).unwrap_err().kind());
+                        cancelled.store(true, Ordering::Relaxed);
+                    }
+                    unsafe { *(attr.cast::<u32>().add(1)) = next_count; }
+                },
+                13 => return pins.pop_front().unwrap().into_raw_fd() as libc::c_long,
+                15 => unsafe {
+                    info_count += 1;
+                    let info = &mut *((*attr.cast::<InfoAttr>()).info as *mut [u8; 192]);
+                    if info_count % 2 == 1 {
+                        info[104..108].copy_from_slice(&1u32.to_ne_bytes());
+                        info[108..112].copy_from_slice(&1u32.to_ne_bytes());
+                    } else {
+                        let ksyms = u64::from_ne_bytes(info[112..120].try_into().unwrap());
+                        let lens = u64::from_ne_bytes(info[120..128].try_into().unwrap());
+                        *(ksyms as *mut u64) = BPF_X + u64::from(next_count - 1) * 128;
+                        *(lens as *mut u32) = 64;
+                    }
+                },
+                _ => panic!("unexpected BPF command {cmd}"),
+            }
+            0
+        }, None);
+        assert!(result.is_none());
+        assert_eq!(34, next_count);
+        assert_eq!(66, info_count);
+        assert_eq!(0, observers[32].read(&mut [0]).unwrap());
+    }
+
+    #[test]
+    fn cancellation_during_kallsyms_scan_discards_batch_and_releases_pins() {
+        use std::io::{Cursor, ErrorKind, Read};
+        use std::os::unix::net::UnixStream;
+
+        struct CancellingReader<'a> {
+            input: Cursor<Vec<u8>>,
+            cancelled: &'a AtomicBool,
+            lines: usize,
+        }
+        impl Read for CancellingReader<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                self.input.read(buf)
+            }
+        }
+        impl Seek for CancellingReader<'_> {
+            fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+                self.input.seek(pos)
+            }
+        }
+        impl BufRead for CancellingReader<'_> {
+            fn fill_buf(&mut self) -> std::io::Result<&[u8]> { self.input.fill_buf() }
+            fn consume(&mut self, amount: usize) { self.input.consume(amount); }
+            fn read_line(&mut self, line: &mut String) -> std::io::Result<usize> {
+                self.lines += 1;
+                let result = self.input.read_line(line);
+                self.cancelled.store(true, Ordering::Relaxed);
+                result
+            }
+        }
+
+        let cancelled = AtomicBool::new(false);
+        let mut reader = CancellingReader {
+            input: Cursor::new(format!(
+                "{:016x} t bpf_prog_0000000000000000_first [bpf]\n{:016x} t bpf_prog_0000000000000000_second [bpf]\n",
+                BPF_X, BPF_X + 128).into_bytes()),
+            cancelled: &cancelled,
+            lines: 0,
+        };
+        let (pin, mut observer) = UnixStream::pair().unwrap();
+        observer.set_nonblocking(true).unwrap();
+        let program = PinnedBpfProgram {
+            _fd: pin.into(),
+            functions: [BPF_X, BPF_X + 128].into_iter().map(|start| BpfSnapshotFunction {
+                time: SEC, start, len: 64, tag: [0; 8],
+                tag_is_known: true, prog_name: "test".to_string(),
+            }).collect(),
+        };
+        let result = finish_bpf_snapshot_batch(vec![program], &cancelled, |addresses| {
+            assert_eq!(ErrorKind::WouldBlock, observer.read(&mut [0]).unwrap_err().kind());
+            bpf_kallsyms_names(&mut reader, addresses, &cancelled).unwrap()
+        });
+        assert!(result.is_none());
+        assert_eq!(1, reader.lines);
+        assert_eq!(0, observer.read(&mut [0]).unwrap());
+    }
+
+    #[test]
+    fn snapshot_cancellation_guard_signals_on_error() {
+        fn run(flag: &Arc<AtomicBool>, done: std::sync::mpsc::Sender<bool>) -> Result<(), ()> {
+            std::thread::scope(|scope| {
+                let _guard = BpfSnapshotCancellation(Arc::clone(flag));
+                let (started, ready) = std::sync::mpsc::channel();
+                scope.spawn(move || {
+                    started.send(()).unwrap();
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                    while !flag.load(Ordering::Relaxed) && std::time::Instant::now() < deadline {
+                        std::thread::yield_now();
+                    }
+                    done.send(flag.load(Ordering::Relaxed)).unwrap();
+                });
+                ready.recv().unwrap();
+                Err(())
+            })
+        }
+
+        let flag = Arc::new(AtomicBool::new(false));
+        let (done, completed) = std::sync::mpsc::channel();
+        assert!(run(&flag, done).is_err());
+        assert!(completed.recv().unwrap());
+    }
+
+    #[test]
+    fn missing_system_wide_lifecycle_does_not_backdate_reused_bpf_address() {
+        let mut machine = kernel_test_machine();
+        machine.os.bpf_lifecycle_unavailable = true;
+        snapshot_bpf_programs(&mut machine, vec![LoadedBpfFunction {
+            time: 3 * SEC, start: BPF_X, len: 64,
+            name: "bpf_prog_replacement".to_string(),
+            name_is_exact: true, tag_is_known: true,
+        }], true, false);
+        add_kernel_sample(&mut machine, 10, SEC, &[BPF_X]);
+        add_kernel_sample(&mut machine, 10, 4 * SEC, &[BPF_X]);
+        machine.add_kernel_mappings_with(&mut KallsymsMock::new(vec![
+            (BPF_X, BPF_X + 63, "[bpf] bpf_prog_replacement"),
+        ]));
+        assert_eq!(None, resolve_kernel(&machine, 10, BPF_X, SEC));
+        assert_eq!(None, resolve_kernel(&machine, 10, BPF_X, 4 * SEC));
+    }
+
+    #[test]
+    fn snapshot_symbol_uses_matching_function_tag() {
+        let tag = [0x9e, 0xfe, 0x88, 0x73, 0x12, 0x07, 0x41, 0xb3];
+        let subprogram = "bpf_prog_9efe8873120741b3_F".to_string();
+        let stale = "bpf_prog_9683c4e123f7f629_old".to_string();
+        let unnamed = "bpf_prog_9efe8873120741b3".to_string();
+        assert_eq!((subprogram.clone(), true), bpf_snapshot_name(Some(&subprogram), &tag, "main"));
+        assert_eq!(("bpf_prog_9efe8873120741b3_main".to_string(), false), bpf_snapshot_name(Some(&stale), &tag, "main"));
+        assert_eq!((unnamed.clone(), true), bpf_snapshot_name(Some(&unnamed), &tag, "main"));
+    }
+
+    #[test]
+    fn snapshot_reads_reused_address_while_replacement_is_pinned() {
+        use std::io::{Cursor, ErrorKind, Read};
+        use std::os::unix::net::UnixStream;
+
+        let tag = [0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef];
+        let old = "bpf_prog_1234567890abcdef_old";
+        let new = "bpf_prog_1234567890abcdef_new";
+        let subprogram = "bpf_prog_0123456789abcdef_sub";
+        let mut kallsyms = Cursor::new(format!("{:016x} t {} [bpf]\n", BPF_X, old).into_bytes());
+        let cancelled = AtomicBool::new(false);
+        let old_names = bpf_kallsyms_names(&mut kallsyms, &HashSet::from([BPF_X]), &cancelled).unwrap().unwrap();
+        assert_eq!(Some(&old.to_string()), old_names.get(&BPF_X));
+
+        let (pin, mut observer) = UnixStream::pair().unwrap();
+        observer.set_nonblocking(true).unwrap();
+        let programs = vec![PinnedBpfProgram {
+            _fd: pin.into(),
+            functions: vec![
+                BpfSnapshotFunction {
+                    time: 2 * SEC, start: BPF_X, len: 64, tag,
+                    tag_is_known: true, prog_name: "new".to_string(),
+                },
+                BpfSnapshotFunction {
+                    time: 2 * SEC, start: BPF_X + 128, len: 64, tag,
+                    tag_is_known: false, prog_name: "new".to_string(),
+                },
+            ],
+        }];
+        *kallsyms.get_mut() = format!(
+            "{:016x} t {} [bpf]\n{:016x} t {} [bpf]\n",
+            BPF_X, new, BPF_X + 128, subprogram).into_bytes();
+
+        let functions = finish_bpf_snapshot_batch(programs, &cancelled, |addresses| {
+            assert_eq!(ErrorKind::WouldBlock, observer.read(&mut [0]).unwrap_err().kind());
+            bpf_kallsyms_names(&mut kallsyms, addresses, &cancelled).unwrap()
+        }).unwrap();
+        assert_eq!(0, observer.read(&mut [0]).unwrap());
+        assert_eq!(new, functions[0].name);
+        assert!(functions[0].name_is_exact);
+        assert_eq!(subprogram, functions[1].name);
+        assert!(functions[1].name_is_exact);
+
+        let mut machine = kernel_test_machine();
+        let expected = format!("[bpf] {}", new);
+        add_bpf(&mut machine, SEC, BPF_X, 64, false, &expected);
+        add_bpf(&mut machine, 4 * SEC, BPF_X, 64, true, &expected);
+        snapshot_bpf_programs(&mut machine, functions, true, true);
+        add_kernel_sample(&mut machine, 10, 3 * SEC, &[BPF_X]);
+        add_kernel_sample(&mut machine, 10, 5 * SEC, &[BPF_X]);
+        machine.add_kernel_mappings_with(&mut KallsymsMock::new(vec![]));
+        assert_eq!(Some(expected), resolve_kernel(&machine, 10, BPF_X, 3 * SEC));
+        assert_eq!(None, resolve_kernel(&machine, 10, BPF_X, 5 * SEC));
+    }
+
+    #[test]
+    fn completed_snapshot_uses_each_function_observation_time() {
+        let mut machine = kernel_test_machine();
+        machine.add_kernel_dynamic_symbol(2 * SEC, BPF_X, 64,
+            KernelDynamicSymbolKind::Bpf, false, "[bpf] replacement");
+        snapshot_bpf_programs(&mut machine, vec![LoadedBpfFunction {
+            time: 3 * SEC, start: BPF_X, len: 64, name: "replacement".to_string(),
+            name_is_exact: true,
+            tag_is_known: true,
+        }], true, true);
+        machine.kernel_dynamic_symbols.apply_snapshots();
+        assert_eq!(None, machine.kernel_dynamic_symbols().find(BPF_X, SEC));
+        assert_eq!(2 * SEC, machine.kernel_dynamic_symbols().find(BPF_X, 3 * SEC).unwrap().load_time());
+        assert_eq!(0, machine.kernel_dynamic_symbols().stats().snapshot_symbols);
+    }
+
+    #[test]
+    fn synthesized_snapshot_preserves_observed_bpf_name_and_unload() {
+        let mut machine = kernel_test_machine();
+        let exact = "[bpf] bpf_prog_1234567890abcdef_btf_function";
+        add_bpf(&mut machine, SEC, BPF_X, 64, false, exact);
+        add_bpf(&mut machine, 4 * SEC, BPF_X, 64, true, exact);
+        snapshot_bpf_programs(&mut machine, vec![LoadedBpfFunction {
+            time: 2 * SEC, start: BPF_X, len: 64,
+            name: "bpf_prog_1234567890abcdef_program".to_string(),
+            name_is_exact: false,
+            tag_is_known: true,
+        }], true, true);
+        add_kernel_sample(&mut machine, 10, 3 * SEC, &[BPF_X]);
+        add_kernel_sample(&mut machine, 10, 5 * SEC, &[BPF_X]);
+        machine.add_kernel_mappings_with(&mut KallsymsMock::new(vec![]));
+        assert_eq!(Some(exact.to_string()), resolve_kernel(&machine, 10, BPF_X, 3 * SEC));
+        assert_eq!(None, resolve_kernel(&machine, 10, BPF_X, 5 * SEC));
+        assert_eq!(0, machine.kernel_dynamic_symbols().stats().snapshot_symbols);
+    }
+
+    #[test]
+    fn synthesized_snapshot_with_different_tag_still_replaces_conflict() {
+        let mut machine = kernel_test_machine();
+        add_bpf(&mut machine, SEC, BPF_X, 64, false, "[bpf] bpf_prog_1234567890abcdef_old");
+        snapshot_bpf_programs(&mut machine, vec![LoadedBpfFunction {
+            time: 2 * SEC, start: BPF_X, len: 64,
+            name: "bpf_prog_fedcba0987654321_new".to_string(),
+            name_is_exact: false,
+            tag_is_known: true,
+        }], true, true);
+        add_kernel_sample(&mut machine, 10, 3 * SEC, &[BPF_X]);
+        machine.add_kernel_mappings_with(&mut KallsymsMock::new(vec![]));
+        assert_eq!(
+            Some("[bpf] bpf_prog_fedcba0987654321_new".to_string()),
+            resolve_kernel(&machine, 10, BPF_X, 3 * SEC));
+    }
+
+    #[test]
+    fn synthesized_subprogram_without_tag_preserves_observed_lifetime() {
+        let mut machine = kernel_test_machine();
+        let exact = "[bpf] bpf_prog_1234567890abcdef_subprogram";
+        add_bpf(&mut machine, SEC, BPF_X, 64, false, exact);
+        add_bpf(&mut machine, 4 * SEC, BPF_X, 64, true, exact);
+        snapshot_bpf_programs(&mut machine, vec![LoadedBpfFunction {
+            time: 2 * SEC, start: BPF_X, len: 64,
+            name: "bpf_prog_fedcba0987654321_program".to_string(),
+            name_is_exact: false,
+            tag_is_known: false,
+        }], true, true);
+        add_kernel_sample(&mut machine, 10, 3 * SEC, &[BPF_X]);
+        add_kernel_sample(&mut machine, 10, 5 * SEC, &[BPF_X]);
+        machine.add_kernel_mappings_with(&mut KallsymsMock::new(vec![]));
+        assert_eq!(Some(exact.to_string()), resolve_kernel(&machine, 10, BPF_X, 3 * SEC));
+        assert_eq!(None, resolve_kernel(&machine, 10, BPF_X, 5 * SEC));
+    }
+
+    fn add_kernel_sample(
+        machine: &mut ExportMachine,
+        pid: u32,
+        time: u64,
+        frames: &[u64]) {
+        let cpu = machine.sample_kind("cpu");
+
+        machine.add_sample(
+            time,
+            MetricValue::Count(1),
+            pid,
+            pid,
+            0,
+            cpu,
+            frames).unwrap();
+    }
+
+    fn resolve_kernel(
+        machine: &ExportMachine,
+        pid: u32,
+        ip: u64,
+        time: u64) -> Option<String> {
+        let mapping = machine.find_process(pid)?.find_mapping(ip, Some(time))?;
+
+        for symbol in mapping.symbols() {
+            if ip >= symbol.start() && ip <= symbol.end() {
+                return Some(
+                    machine.strings().from_id(symbol.name_id()).unwrap().to_string());
+            }
+        }
+
+        None
+    }
+
+    fn add_bpf(
+        machine: &mut ExportMachine,
+        time: u64,
+        addr: u64,
+        len: u64,
+        unregister: bool,
+        name: &str) {
+        machine.add_kernel_dynamic_symbol(
+            time,
+            addr,
+            len,
+            KernelDynamicSymbolKind::Bpf,
+            unregister,
+            name);
+    }
+
+    #[test]
+    fn kernel_mappings_order_records_from_independently_drained_cpus() {
+        let mut machine = kernel_test_machine();
+        machine.queue_kernel_dynamic_symbol(2 * SEC, BPF_X, 64,
+            KernelDynamicSymbolKind::Bpf, true, "[bpf] a");
+        machine.queue_kernel_dynamic_symbol(SEC, BPF_X, 64,
+            KernelDynamicSymbolKind::Bpf, false, "[bpf] a");
+        add_kernel_sample(&mut machine, 10, SEC + 1, &[BPF_X]);
+        add_kernel_sample(&mut machine, 10, 2 * SEC + 1, &[BPF_X]);
+        let mut kallsyms = KallsymsMock::new(vec![]);
+        machine.add_kernel_mappings_with(&mut kallsyms);
+        assert_eq!(Some("[bpf] a".to_string()), resolve_kernel(&machine, 10, BPF_X, SEC + 1));
+        assert_eq!(None, resolve_kernel(&machine, 10, BPF_X, 2 * SEC + 1));
+    }
+
+    #[test]
+    fn reused_address_matches_only_samples_in_each_lifetime() {
+        let bpf = KernelDynamicSymbolKind::Bpf;
+        let mut symbols = KernelDynamicSymbols::new();
+        for generation in 0..1000u64 {
+            symbols.register(generation * 100, BPF_X, 64, bpf, generation as usize);
+            symbols.unregister(generation * 100 + 50, BPF_X, 64, bpf, generation as usize);
+        }
+        let ip_times: Vec<_> = (0..100_000).map(|time| (BPF_X, time)).collect();
+        let mut states = vec![None; ip_times.len()];
+        for (index, generation) in symbols.symbols().iter().enumerate() {
+            assert!(mark_live_kernel_samples(&ip_times, &mut states, generation, index));
+        }
+        for (time, state) in states.iter().enumerate() {
+            let expected = if time % 100 < 50 { Some(time / 100) } else { None };
+            assert_eq!(expected, *state, "time {time}");
+        }
+    }
+
+    #[test]
+    fn ambiguous_address_count_handles_disjoint_and_overlapping_ranges() {
+        let bpf = KernelDynamicSymbolKind::Bpf;
+        let mut symbols = KernelDynamicSymbols::new();
+        symbols.register(SEC, BPF_X, 64, bpf, 0);
+        symbols.unregister(2 * SEC, BPF_X, 64, bpf, 0);
+        symbols.register(3 * SEC, BPF_X + 32, 64, bpf, 1);
+        symbols.register(SEC, BPF_X + 128, 64, bpf, 2);
+        let generations: Vec<_> = symbols.symbols().iter().collect();
+        let ips = vec![
+            (BPF_X, SEC),
+            (BPF_X + 32, SEC),
+            (BPF_X + 64, SEC),
+            (BPF_X + 128, SEC),
+            (BPF_X + 129, SEC),
+            (BPF_X + 129, 2 * SEC),
+        ];
+        let states = vec![Some(0), Some(0), None, Some(2), Some(2), None];
+        assert_eq!(3, count_ambiguous_kernel_addresses(&ips, &states, &generations, &[0, 1, 2]));
+    }
+
+    #[test]
+    fn graph_resolves_reused_bpf_caller_at_each_sample_time() {
+        let mut machine = kernel_test_machine();
+        add_bpf(&mut machine, SEC, BPF_X, 64, false, "[bpf] a");
+        add_bpf(&mut machine, 2 * SEC, BPF_X, 64, true, "[bpf] a");
+        add_bpf(&mut machine, 3 * SEC, BPF_X, 64, false, "[bpf] b");
+        for time in [SEC + 1, 2 * SEC + 1, 3 * SEC + 1] {
+            add_kernel_sample(&mut machine, 10, time, &[0xffffffff81000000, BPF_X]);
+        }
+        let mut kallsyms = KallsymsMock::new(vec![]);
+        machine.add_kernel_mappings_with(&mut kallsyms);
+
+        let mut graph = ExportGraph::new();
+        let cpu = machine.sample_kind("cpu");
+        graph.add_samples(&machine, machine.find_process(10).unwrap(), cpu, None);
+        let children = graph.nodes()[graph.root_node()].children();
+        assert_eq!(3, children.len());
+        let methods: Vec<&str> = children.iter().map(|id| {
+            graph.strings().from_id(graph.nodes()[*id].target().method()).unwrap()
+        }).collect();
+        assert!(methods.contains(&"[bpf] a"));
+        assert!(methods.contains(&"[bpf] b"));
+        assert!(methods.contains(&""));
+    }
+
+    #[test]
+    fn kernel_mappings_scope_bpf_symbols_by_time() {
+        let mut machine = kernel_test_machine();
+
+        let static_fn = 0xffffffff81000000;
+        let tail_fn = BPF_X - 0x100;
+        let live = BPF_X + 0x4000;
+
+        /*
+         * Program A [X, X+256) lives [1s, 2s), program B [X, X+128) lives
+         * [3s, 4s). Both are gone by finalization.
+         */
+        add_bpf(&mut machine, SEC, BPF_X, 256, false, "[bpf] bpf_prog_a");
+        add_bpf(&mut machine, 2 * SEC, BPF_X, 256, true, "[bpf] bpf_prog_a");
+        add_bpf(&mut machine, 3 * SEC, BPF_X, 128, false, "[bpf] bpf_prog_b");
+        add_bpf(&mut machine, 4 * SEC, BPF_X, 128, true, "[bpf] bpf_prog_b");
+
+        let at = BPF_X + 64;
+        let times = [SEC / 2, SEC + SEC / 2, 2 * SEC, 2 * SEC + SEC / 2, 3 * SEC + SEC / 2, 4 * SEC];
+
+        for time in times {
+            add_kernel_sample(&mut machine, 10, time, &[at]);
+        }
+
+        /* Other processes run the programs and static code */
+        add_kernel_sample(&mut machine, 20, SEC + SEC / 2, &[static_fn + 0x10, BPF_X + 0x80]);
+        add_kernel_sample(&mut machine, 20, 3 * SEC + SEC / 2, &[BPF_X + 128]);
+        add_kernel_sample(&mut machine, 20, 2 * SEC + SEC / 2, &[live + 8]);
+        add_kernel_sample(&mut machine, 20, SEC + SEC / 2, &[tail_fn + 0x10]);
+        add_kernel_sample(&mut machine, 30, SEC + SEC / 2, &[BPF_X - 1]);
+
+        /*
+         * Finalization view of kallsyms: neither program is present, so the
+         * preceding symbol's inferred extent runs over their addresses. A
+         * program loaded before recording is still live.
+         */
+        let mut kallsyms = KallsymsMock::new(vec![
+            (static_fn, static_fn + 0xff, "do_work"),
+            (tail_fn, live - 1, "tail_fn"),
+            (live, live + 0x7f, "[bpf] bpf_prog_live"),
+        ]);
+
+        machine.add_kernel_mappings_with(&mut kallsyms);
+
+        let expected = [
+            None,
+            Some("[bpf] bpf_prog_a"),
+            None,
+            None,
+            Some("[bpf] bpf_prog_b"),
+            None,
+        ];
+
+        for (time, expected) in times.iter().zip(expected) {
+            assert_eq!(
+                expected.map(String::from),
+                resolve_kernel(&machine, 10, at, *time),
+                "time {}", time);
+        }
+
+        let mapping = machine.find_process(10).unwrap()
+            .find_mapping(at, Some(SEC + SEC / 2)).unwrap();
+        assert_eq!("[bpf]", machine.strings().from_id(mapping.filename_id()).unwrap());
+        let process = machine.find_process(10).unwrap();
+        assert_eq!(2, process.mapping_unloads().len());
+        for unload in process.mapping_unloads() {
+            assert!(process.mappings().iter().any(|mapping| {
+                mapping.id() == unload.id() &&
+                    mapping.start() == unload.start() &&
+                    mapping.end() == unload.end()
+            }));
+        }
+
+        /* Callstack frame in another process */
+        assert_eq!(
+            Some("[bpf] bpf_prog_a".to_string()),
+            resolve_kernel(&machine, 20, BPF_X + 0x80, SEC + SEC / 2));
+
+        /* Exclusive end of B, still inside A's old extent */
+        assert_eq!(None, resolve_kernel(&machine, 20, BPF_X + 128, 3 * SEC + SEC / 2));
+
+        /* Static and still-live symbols keep resolving from kallsyms */
+        assert_eq!(
+            Some("do_work".to_string()),
+            resolve_kernel(&machine, 20, static_fn + 0x10, SEC + SEC / 2));
+        assert_eq!(
+            Some("[bpf] bpf_prog_live".to_string()),
+            resolve_kernel(&machine, 20, live + 8, 2 * SEC + SEC / 2));
+        assert_eq!(
+            Some("tail_fn".to_string()),
+            resolve_kernel(&machine, 20, tail_fn + 0x10, SEC + SEC / 2));
+        assert_eq!(
+            Some("tail_fn".to_string()),
+            resolve_kernel(&machine, 30, BPF_X - 1, SEC + SEC / 2));
+    }
+
+    #[test]
+    fn kernel_mappings_bpf_emitted_only_when_sampled_live() {
+        let mut machine = kernel_test_machine();
+
+        add_bpf(&mut machine, SEC, BPF_X, 256, false, "[bpf] bpf_prog_a");
+        add_bpf(&mut machine, 2 * SEC, BPF_X, 256, true, "[bpf] bpf_prog_a");
+        add_bpf(&mut machine, 3 * SEC, BPF_X, 128, false, "[bpf] bpf_prog_b");
+        add_bpf(&mut machine, 4 * SEC, BPF_X, 128, true, "[bpf] bpf_prog_b");
+
+        let at = BPF_X + 64;
+
+        /* Runs A, then the gap, then B at the same address */
+        for time in [SEC + SEC / 2, 2 * SEC + SEC / 2, 3 * SEC + SEC / 2] {
+            add_kernel_sample(&mut machine, 10, time, &[at]);
+        }
+
+        /* Only runs B */
+        add_kernel_sample(&mut machine, 30, 3 * SEC + SEC / 2, &[at]);
+
+        /* Only runs in the gap after A */
+        add_kernel_sample(&mut machine, 40, 2 * SEC + SEC / 2, &[at]);
+
+        /* Only runs A, twice */
+        add_kernel_sample(&mut machine, 50, SEC + SEC / 4, &[at]);
+        add_kernel_sample(&mut machine, 50, SEC + SEC / 2, &[at]);
+
+        /* Runs A's tail, then B at an address A's extent also covers */
+        add_kernel_sample(&mut machine, 60, SEC + SEC / 2, &[BPF_X + 200]);
+        add_kernel_sample(&mut machine, 60, 3 * SEC + SEC / 2, &[BPF_X + 100]);
+
+        machine.add_kernel_mappings_with(&mut KallsymsMock::new(Vec::new()));
+
+        let names = |pid: u32| -> Vec<String> {
+            let mut names: Vec<String> = machine.find_process(pid).unwrap()
+                .mappings()
+                .iter()
+                .flat_map(|mapping| mapping.symbols())
+                .map(|symbol| machine.strings().from_id(symbol.name_id()).unwrap().to_string())
+                .collect();
+
+            names.sort();
+            names
+        };
+
+        assert_eq!(vec!["[bpf] bpf_prog_a", "[bpf] bpf_prog_b"], names(10));
+        assert_eq!(vec!["[bpf] bpf_prog_b"], names(30));
+        assert!(names(40).is_empty());
+        assert_eq!(vec!["[bpf] bpf_prog_a"], names(50));
+
+        assert_eq!(
+            Some("[bpf] bpf_prog_b".to_string()),
+            resolve_kernel(&machine, 30, at, 3 * SEC + SEC / 2));
+        assert_eq!(None, resolve_kernel(&machine, 40, at, 2 * SEC + SEC / 2));
+        assert_eq!(
+            Some("[bpf] bpf_prog_a".to_string()),
+            resolve_kernel(&machine, 50, at, SEC + SEC / 4));
+
+        /*
+         * Process 10 ran the same address under different generations and
+         * process 60 ran B's code inside A's extent; only time can resolve
+         * those. A's tail in process 60 is unambiguous.
+         */
+        assert_eq!(
+            Some("[bpf] bpf_prog_a".to_string()),
+            resolve_kernel(&machine, 60, BPF_X + 200, SEC + SEC / 2));
+        assert_eq!(
+            Some("[bpf] bpf_prog_b".to_string()),
+            resolve_kernel(&machine, 60, BPF_X + 100, 3 * SEC + SEC / 2));
+        assert_eq!(2, machine.kernel_dynamic_symbols().stats().time_ambiguous_addresses);
+    }
+
+    #[test]
+    fn kernel_mappings_bpf_loaded_before_recording() {
+        let mut machine = kernel_test_machine();
+
+        /* Loaded before recording (no register seen), unloaded at 2s */
+        add_bpf(&mut machine, 2 * SEC, BPF_X, 256, true, "[bpf] bpf_prog_a");
+
+        add_kernel_sample(&mut machine, 10, SEC, &[BPF_X + 8]);
+        add_kernel_sample(&mut machine, 10, 3 * SEC, &[BPF_X + 8]);
+        add_kernel_sample(&mut machine, 10, 3 * SEC, &[BPF_X + 0x80]);
+
+        /* Program C reused the address after A, but its load was not seen */
+        let mut kallsyms = KallsymsMock::new(vec![
+            (BPF_X, BPF_X + 0x3f, "[bpf] bpf_prog_c"),
+        ]);
+
+        machine.add_kernel_mappings_with(&mut kallsyms);
+
+        assert_eq!(
+            Some("[bpf] bpf_prog_a".to_string()),
+            resolve_kernel(&machine, 10, BPF_X + 8, SEC));
+        /* C's load was not observed, so it remains unknown after A unloads. */
+        assert_eq!(None, resolve_kernel(&machine, 10, BPF_X + 8, 3 * SEC));
+        assert_eq!(None, resolve_kernel(&machine, 10, BPF_X + 0x80, 3 * SEC));
+    }
+
+    #[test]
+    fn kernel_mappings_bpf_replaced_at_same_time() {
+        let mut machine = kernel_test_machine();
+
+        add_bpf(&mut machine, SEC, BPF_X, 128, false, "[bpf] bpf_prog_a");
+        add_bpf(&mut machine, 2 * SEC, BPF_X, 128, true, "[bpf] bpf_prog_a");
+        add_bpf(&mut machine, 2 * SEC, BPF_X, 128, false, "[bpf] bpf_prog_b");
+
+        add_kernel_sample(&mut machine, 10, 2 * SEC - 1, &[BPF_X + 8]);
+        add_kernel_sample(&mut machine, 10, 2 * SEC, &[BPF_X + 8]);
+
+        /* B is still loaded at finalization and in kallsyms */
+        let mut kallsyms = KallsymsMock::new(vec![
+            (BPF_X, BPF_X + 0x7f, "[bpf] bpf_prog_b"),
+        ]);
+
+        machine.add_kernel_mappings_with(&mut kallsyms);
+
+        assert_eq!(
+            Some("[bpf] bpf_prog_a".to_string()),
+            resolve_kernel(&machine, 10, BPF_X + 8, 2 * SEC - 1));
+        assert_eq!(
+            Some("[bpf] bpf_prog_b".to_string()),
+            resolve_kernel(&machine, 10, BPF_X + 8, 2 * SEC));
+
+        /* B's live kallsyms entry is superseded by its generation */
+        let proc = machine.find_process(10).unwrap();
+        let vmlinux = proc.find_mapping(0xffffffff81000000, Some(0)).unwrap();
+        assert!(vmlinux.symbols().is_empty());
+    }
+
+    #[test]
+    fn kernel_mappings_bpf_snapshot_unloaded_after_recording() {
+        let mut machine = kernel_test_machine();
+
+        let tail_fn = BPF_X - 0x100;
+        let other = BPF_X + 0x1000;
+
+        /*
+         * Program A was loaded before recording and found by the snapshot.
+         * It unloaded after recording stopped, so no record was seen, and
+         * program Q reused its address before finalization.
+         */
+        machine.add_kernel_dynamic_snapshot(
+            SEC, BPF_X, 256, KernelDynamicSymbolKind::Bpf, "[bpf] bpf_prog_a");
+
+        /*
+         * Program B was also found by the snapshot, then unloaded during
+         * recording. Its unregister record arrived before the snapshot was
+         * added, and must not be duplicated or extended by it.
+         */
+        add_bpf(&mut machine, 3 * SEC, other, 64, true, "[bpf] bpf_prog_b");
+        machine.add_kernel_dynamic_snapshot(
+            SEC, other, 64, KernelDynamicSymbolKind::Bpf, "[bpf] bpf_prog_b");
+
+        add_kernel_sample(&mut machine, 10, 2 * SEC, &[BPF_X + 8]);
+        add_kernel_sample(&mut machine, 10, 2 * SEC, &[BPF_X + 0x80]);
+        add_kernel_sample(&mut machine, 10, 2 * SEC, &[other + 8]);
+        add_kernel_sample(&mut machine, 10, 4 * SEC, &[other + 8]);
+
+        /*
+         * Finalization view: Q occupies part of A's old extent and the
+         * preceding symbol's inferred extent covers the rest.
+         */
+        let mut kallsyms = KallsymsMock::new(vec![
+            (tail_fn, BPF_X - 1, "tail_fn"),
+            (BPF_X, BPF_X + 0x3f, "[bpf] bpf_prog_q"),
+            (BPF_X + 0x40, other + 0x7ff, "after_q"),
+        ]);
+
+        machine.add_kernel_mappings_with(&mut kallsyms);
+
+        assert_eq!(
+            Some("[bpf] bpf_prog_a".to_string()),
+            resolve_kernel(&machine, 10, BPF_X + 8, 2 * SEC));
+        assert_eq!(
+            Some("[bpf] bpf_prog_a".to_string()),
+            resolve_kernel(&machine, 10, BPF_X + 0x80, 2 * SEC));
+        assert_eq!(
+            Some("[bpf] bpf_prog_b".to_string()),
+            resolve_kernel(&machine, 10, other + 8, 2 * SEC));
+        assert_eq!(None, resolve_kernel(&machine, 10, other + 8, 4 * SEC));
+
+        let stats = machine.kernel_dynamic_symbols().stats();
+        assert_eq!(1, stats.snapshot_symbols);
+        assert_eq!(2, machine.kernel_dynamic_symbols().symbols().len());
     }
 
     #[test]

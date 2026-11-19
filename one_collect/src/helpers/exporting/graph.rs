@@ -2,7 +2,6 @@
 // Licensed under the MIT license.
 
 use std::collections::HashMap;
-use std::collections::hash_map::Entry::{Vacant, Occupied};
 
 use tracing::{debug, info, enabled, Level};
 
@@ -315,6 +314,7 @@ impl ExportGraph {
         }
         
         let mut callstack_id_to_node: HashMap<usize, usize> = HashMap::new();
+        let dynamic_ranges = exporter.kernel_dynamic_symbols().range_index();
 
         let default_converter = DefaultExportGraphMetricValueConverter::default();
         let converter = match value_converter {
@@ -332,22 +332,22 @@ impl ExportGraph {
             let time = sample.time();
 
             /* Import common frames, if not already */
-            let id = match callstack_id_to_node.entry(callstack_id) {
-                Occupied(entry) => {
-                    /* Already imported */
-                    let id = *entry.get();
-
+            let id = match callstack_id_to_node.get(&callstack_id) {
+                Some(&id) => {
                     /* Add value to node children */
                     self.charge(id, value);
 
                     id
                 },
-                Vacant(entry) => {
+                None => {
                     /* Need to import and merge */
                     let _ = exporter.callstacks().from_id(
                         callstack_id,
                         &mut self.frames);
 
+                    let time_scoped = self.frames.iter().any(|ip| {
+                        dynamic_ranges.any_contains(*ip)
+                    });
                     let mut id = 0;
 
                     /* Import and merge each frame */
@@ -372,8 +372,10 @@ impl ExportGraph {
                             value);
                     }
 
-                    /* Save final merged id */
-                    *entry.insert(id)
+                    if !time_scoped {
+                        callstack_id_to_node.insert(callstack_id, id);
+                    }
+                    id
                 }
             };
 
