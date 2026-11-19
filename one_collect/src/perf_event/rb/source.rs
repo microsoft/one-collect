@@ -520,6 +520,7 @@ pub struct RingBufDataSource {
     temp: Vec<u8>,
     leader_ids: HashMap<u32, u64>,
     ring_bufs: HashMap<u64, CpuRingBuf>,
+    ksymbol_buf_ids: HashSet<u64>,
     pages: usize,
     enabled: bool,
     target_pids: Option<Vec<i32>>,
@@ -555,6 +556,7 @@ impl RingBufDataSource {
             temp: Vec::new(),
             leader_ids: HashMap::new(),
             ring_bufs: HashMap::new(),
+            ksymbol_buf_ids: HashSet::new(),
             pages,
             target_pids,
             target_cpus,
@@ -656,6 +658,42 @@ impl RingBufDataSource {
         ring_bufs: &mut HashMap<u64, CpuRingBuf>,
         before: &HashSet<u64>) {
         ring_bufs.retain(|id, _| before.contains(id));
+    }
+
+    fn add_required_bufs(
+        ring_bufs: &mut HashMap<u64, CpuRingBuf>,
+        ksymbol_buf_ids: &mut HashSet<u64>,
+        allow_reclaim: bool,
+        mut add: impl FnMut(&mut HashMap<u64, CpuRingBuf>) -> IOResult<()>) -> IOResult<HashSet<u64>> {
+        let before: HashSet<u64> = ring_bufs.keys().copied().collect();
+        match add(ring_bufs) {
+            Ok(()) => return Ok(before),
+            Err(err) => {
+                Self::remove_new_bufs(ring_bufs, &before);
+                if !matches!(err.raw_os_error(), Some(libc::EMFILE | libc::ENFILE))
+                    || ksymbol_buf_ids.is_empty() || !allow_reclaim {
+                    return Err(err);
+                }
+            },
+        }
+
+        warn!("Closing optional kernel dynamic symbol descriptors to make room for a tracepoint; \
+            BPF symbols may be unknown");
+        for id in ksymbol_buf_ids.drain() {
+            if let Some(buf) = ring_bufs.get_mut(&id) {
+                if let Some(fd) = buf.fd.take() {
+                    unsafe { libc::close(fd); }
+                }
+            }
+        }
+
+        // Keep the closed buffers' metadata so already queued records remain decodable.
+        let before: HashSet<u64> = ring_bufs.keys().copied().collect();
+        if let Err(err) = add(ring_bufs) {
+            Self::remove_new_bufs(ring_bufs, &before);
+            return Err(err);
+        }
+        Ok(before)
     }
 
     fn tasks_for_pids(pids: &mut Vec<i32>) {
@@ -868,7 +906,9 @@ impl RingBufDataSource {
         }
 
         /*
-         * Allocate the optional sideband only after all required descriptors.
+         * Allocate the optional sideband after the fixed required descriptors.
+         * Before recording starts, later tracepoints can reclaim it if
+         * they run out of fds. Never stop lifecycle capture mid-recording.
          * Use one scope at a time: duplicate task and CPU subscriptions can
          * corrupt ksymbol record trailers on some kernels.
          */
@@ -895,6 +935,8 @@ impl RingBufDataSource {
                         }
                     }
                 }
+                self.ksymbol_buf_ids.extend(
+                    self.ring_bufs.keys().filter(|id| !before.contains(id)).copied());
             }
         }
 
@@ -1202,38 +1244,44 @@ impl PerfDataSource for RingBufDataSource {
                 .transpose()
                 .map_err(|_| io_error("Invalid perf filter string"))?;
 
-            /* Snapshot existing ring buf keys so we can find newly created ones */
-            let before: std::collections::HashSet<u64> = self.ring_bufs.keys().copied().collect();
-
             let result = (|| -> IOResult<()> {
-                match &self.target_pids {
-                    None => {
-                        Self::add_cpu_bufs(
-                            None,
-                            target_cpus,
-                            &self.leader_ids,
-                            &mut self.ring_bufs,
-                            &common,
-                            None)?;
-                    },
-                    Some(pids) => {
-                        for pid in pids {
+                let before = Self::add_required_bufs(
+                    &mut self.ring_bufs,
+                    &mut self.ksymbol_buf_ids,
+                    !self.enabled,
+                    |ring_bufs| match &self.target_pids {
+                        None => {
                             Self::add_cpu_bufs(
-                                Some(*pid),
+                                None,
                                 target_cpus,
                                 &self.leader_ids,
-                                &mut self.ring_bufs,
+                                ring_bufs,
                                 &common,
-                                None)?;
-                        }
-                    },
-                }
+                                None)
+                        },
+                        Some(pids) => {
+                            for pid in pids {
+                                Self::add_cpu_bufs(
+                                    Some(*pid),
+                                    target_cpus,
+                                    &self.leader_ids,
+                                    ring_bufs,
+                                    &common,
+                                    None)?;
+                            }
+                            Ok(())
+                        },
+                    })?;
 
                 if let Some(filter_cstr) = &filter_cstr {
-                    Self::set_new_bufs_filter(
+                    if let Err(err) = Self::set_new_bufs_filter(
                         &self.ring_bufs,
                         &before,
-                        |buf| buf.set_filter(filter_cstr))?;
+                        |buf| buf.set_filter(filter_cstr)) {
+                        // Do not leave partially configured, unfiltered tracepoint fds open.
+                        Self::remove_new_bufs(&mut self.ring_bufs, &before);
+                        return Err(err);
+                    }
 
                     debug!(
                         "add_event: perf filter applied, event_name={}, filter={:?}",
@@ -1245,11 +1293,7 @@ impl PerfDataSource for RingBufDataSource {
                 Ok(())
             })();
 
-            /* Close partially configured fds on failure. They are already connected
-             * to the tracepoint and would otherwise keep producing unfiltered samples. */
             if let Err(err) = result {
-                Self::remove_new_bufs(&mut self.ring_bufs, &before);
-
                 warn!(
                     "add_event: failed, new fds closed, event_name={}, event_id={}: {}",
                     event.name(),
@@ -1579,6 +1623,142 @@ mod tests {
 
         let remaining: HashSet<u64> = ring_bufs.keys().copied().collect();
         assert_eq!(before, remaining);
+    }
+
+    #[test]
+    fn tracepoint_fd_exhaustion_reclaims_optional_ksymbols_and_retries() {
+        use std::io::Read;
+        use std::os::fd::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let attrs = Rc::new(RingBufBuilder::common_attributes());
+        let mut ring_bufs = HashMap::new();
+        ring_bufs.insert(1, CpuRingBuf::new(0, attrs.clone()));
+        let mut optional = CpuRingBuf::new(0, attrs.clone());
+        let (descriptor, mut peer) = UnixStream::pair().unwrap();
+        peer.set_nonblocking(true).unwrap();
+        optional.fd = Some(descriptor.into_raw_fd());
+        ring_bufs.insert(2, optional);
+        let mut ksymbol_buf_ids = HashSet::from([2]);
+        let mut attempts = 0;
+
+        let before = RingBufDataSource::add_required_bufs(
+            &mut ring_bufs,
+            &mut ksymbol_buf_ids,
+            true,
+            |bufs| {
+                attempts += 1;
+                if attempts == 1 {
+                    bufs.insert(3, CpuRingBuf::new(0, attrs.clone()));
+                    return Err(IOError::from_raw_os_error(libc::EMFILE));
+                }
+                assert!(!bufs.contains_key(&3));
+                assert_eq!(0, peer.read(&mut [0u8; 1]).unwrap());
+                assert!(!bufs[&2].is_open());
+                bufs.insert(4, CpuRingBuf::new(0, attrs.clone()));
+                Ok(())
+            }).unwrap();
+
+        assert_eq!(2, attempts);
+        assert_eq!(HashSet::from([1, 2]), before);
+        assert_eq!(HashSet::from([1, 2, 4]), ring_bufs.keys().copied().collect());
+        assert!(ksymbol_buf_ids.is_empty());
+    }
+
+    #[test]
+    fn tracepoint_success_keeps_optional_ksymbols() {
+        let attrs = Rc::new(RingBufBuilder::common_attributes());
+        let mut ring_bufs = HashMap::new();
+        ring_bufs.insert(1, CpuRingBuf::new(0, attrs.clone()));
+        let mut ksymbol_buf_ids = HashSet::from([1]);
+        let before = RingBufDataSource::add_required_bufs(
+            &mut ring_bufs,
+            &mut ksymbol_buf_ids,
+            true,
+            |bufs| {
+                bufs.insert(2, CpuRingBuf::new(0, attrs.clone()));
+                Ok(())
+            }).unwrap();
+        assert_eq!(HashSet::from([1]), before);
+        assert_eq!(HashSet::from([1]), ksymbol_buf_ids);
+        assert_eq!(HashSet::from([1, 2]), ring_bufs.keys().copied().collect());
+    }
+
+    #[test]
+    fn tracepoint_failure_keeps_optional_ksymbols_unless_fd_exhausted() {
+        let attrs = Rc::new(RingBufBuilder::common_attributes());
+        for error in [libc::EINVAL, libc::EMFILE] {
+            let mut ring_bufs = HashMap::new();
+            ring_bufs.insert(1, CpuRingBuf::new(0, attrs.clone()));
+            let mut ksymbol_buf_ids = if error == libc::EINVAL {
+                HashSet::from([1])
+            } else {
+                HashSet::new()
+            };
+            let original_ids = ksymbol_buf_ids.clone();
+            let mut attempts = 0;
+            let result = RingBufDataSource::add_required_bufs(
+                &mut ring_bufs,
+                &mut ksymbol_buf_ids,
+                true,
+                |bufs| {
+                    attempts += 1;
+                    bufs.insert(2, CpuRingBuf::new(0, attrs.clone()));
+                    Err(IOError::from_raw_os_error(error))
+                });
+            assert_eq!(Some(error), result.unwrap_err().raw_os_error());
+            assert_eq!(1, attempts);
+            assert_eq!(original_ids, ksymbol_buf_ids);
+            assert_eq!(HashSet::from([1]), ring_bufs.keys().copied().collect());
+        }
+    }
+
+    #[test]
+    fn tracepoint_retry_failure_closes_partial_buffers() {
+        let attrs = Rc::new(RingBufBuilder::common_attributes());
+        let mut ring_bufs = HashMap::new();
+        ring_bufs.insert(1, CpuRingBuf::new(0, attrs.clone()));
+        let mut ksymbol_buf_ids = HashSet::from([1]);
+        let mut attempts = 0;
+        let result = RingBufDataSource::add_required_bufs(
+            &mut ring_bufs,
+            &mut ksymbol_buf_ids,
+            true,
+            |bufs| {
+                attempts += 1;
+                bufs.insert(2, CpuRingBuf::new(0, attrs.clone()));
+                Err(IOError::from_raw_os_error(if attempts == 1 {
+                    libc::ENFILE
+                } else {
+                    libc::EINVAL
+                }))
+            });
+        assert_eq!(Some(libc::EINVAL), result.unwrap_err().raw_os_error());
+        assert_eq!(2, attempts);
+        assert_eq!(HashSet::from([1]), ring_bufs.keys().copied().collect());
+        assert!(ksymbol_buf_ids.is_empty());
+    }
+
+    #[test]
+    fn tracepoint_fd_exhaustion_does_not_stop_active_lifecycle_capture() {
+        let attrs = Rc::new(RingBufBuilder::common_attributes());
+        let mut ring_bufs = HashMap::new();
+        ring_bufs.insert(1, CpuRingBuf::new(0, attrs.clone()));
+        let mut ksymbol_buf_ids = HashSet::from([1]);
+        let mut attempts = 0;
+        let result = RingBufDataSource::add_required_bufs(
+            &mut ring_bufs,
+            &mut ksymbol_buf_ids,
+            false,
+            |bufs| {
+                attempts += 1;
+                bufs.insert(2, CpuRingBuf::new(0, attrs.clone()));
+                Err(IOError::from_raw_os_error(libc::EMFILE))
+            });
+        assert_eq!(Some(libc::EMFILE), result.unwrap_err().raw_os_error());
+        assert_eq!(1, attempts);
+        assert_eq!(HashSet::from([1]), ksymbol_buf_ids);
+        assert_eq!(HashSet::from([1]), ring_bufs.keys().copied().collect());
     }
 
     #[test]
