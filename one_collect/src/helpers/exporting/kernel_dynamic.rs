@@ -311,14 +311,18 @@ impl KernelDynamicSymbols {
 
         if let Some(index) = self.open.remove(&address) {
             let existing = &self.symbols[index];
+            let matches = existing.len == len && existing.name_id == name_id &&
+                existing.kind == kind;
 
-            if existing.len != len || existing.name_id != name_id {
+            if !matches {
                 self.stats.mismatched_unregisters += 1;
             }
 
             self.close(index, time);
-            self.stats.unregisters += 1;
-            return;
+            if matches {
+                self.stats.unregisters += 1;
+                return;
+            }
         }
 
         let end_exclusive = address + len;
@@ -403,16 +407,38 @@ impl KernelDynamicSymbols {
     /// Reconciles snapshot symbols with the recorded generations. Must be
     /// called after all records have been supplied and before lookups.
     ///
-    /// A snapshot symbol already described by a generation live at the
-    /// snapshot time is ignored. Otherwise a generation is added that is
-    /// valid from the latest unload of overlapping code before the snapshot
-    /// until the earliest load of overlapping code after it, or until the
-    /// end of tracking when nothing replaced it.
+    /// A snapshot symbol already described by an identical live generation
+    /// is ignored. Conflicting live generations end at the observation time,
+    /// since the snapshot proves they cannot still occupy that range.
     pub fn apply_snapshots(&mut self) {
-        let snapshots = std::mem::take(&mut self.snapshots);
+        let mut snapshots = std::mem::take(&mut self.snapshots);
+        snapshots.sort_by_key(|snapshot| snapshot.time);
 
         for snapshot in snapshots {
             let end_exclusive = snapshot.start + snapshot.len;
+            let matches_snapshot = |symbol: &KernelDynamicSymbol| {
+                symbol.start == snapshot.start &&
+                    symbol.len == snapshot.len &&
+                    symbol.kind == snapshot.kind &&
+                    symbol.name_id == snapshot.name_id
+            };
+            let conflicts: Vec<usize> = self.symbols.iter().enumerate()
+                .filter(|(_, symbol)| {
+                    symbol.overlaps(snapshot.start, end_exclusive) &&
+                        symbol.is_live_at(snapshot.time) &&
+                        !matches_snapshot(symbol)
+                })
+                .map(|(index, _)| index)
+                .collect();
+            for index in conflicts {
+                let start = self.symbols[index].start;
+                if self.open.get(&start) == Some(&index) {
+                    self.open.remove(&start);
+                    self.stats.implicit_unloads += 1;
+                }
+                self.close(index, snapshot.time);
+            }
+
             let mut load_time = 0;
             let mut unload_time: Option<u64> = None;
             let mut described = false;
@@ -422,7 +448,7 @@ impl KernelDynamicSymbols {
                     continue;
                 }
 
-                if symbol.is_live_at(snapshot.time) {
+                if symbol.is_live_at(snapshot.time) && matches_snapshot(symbol) {
                     described = true;
                     break;
                 }
@@ -716,5 +742,48 @@ mod tests {
         assert_eq!(2, symbols.symbols().len());
         assert_eq!(0, symbols.stats().snapshot_symbols);
         assert_eq!(None, names(&symbols, X, 4 * SEC));
+    }
+
+    #[test]
+    fn snapshot_reconciles_conflicting_generation_and_lost_register() {
+        let bpf = KernelDynamicSymbolKind::Bpf;
+        let mut symbols = KernelDynamicSymbols::new();
+        symbols.register(SEC, X, 256, bpf, 1);
+        symbols.unregister(4 * SEC, X + 128, 64, bpf, 2);
+        symbols.add_snapshot(2 * SEC, X + 128, 64, bpf, 2);
+        symbols.apply_snapshots();
+
+        assert_eq!(Some(1), names(&symbols, X + 130, 2 * SEC - 1));
+        assert_eq!(Some(2), names(&symbols, X + 130, 2 * SEC));
+        assert_eq!(Some(2), names(&symbols, X + 130, 3 * SEC));
+        assert_eq!(None, names(&symbols, X + 130, 4 * SEC));
+        assert_eq!(None, names(&symbols, X, 2 * SEC));
+    }
+
+    #[test]
+    fn snapshot_closes_conflicting_open_generation() {
+        let bpf = KernelDynamicSymbolKind::Bpf;
+        let mut symbols = KernelDynamicSymbols::new();
+        symbols.register(SEC, X, 64, bpf, 1);
+        symbols.add_snapshot(2 * SEC, X, 64, bpf, 2);
+        symbols.apply_snapshots();
+        assert_eq!(Some(1), names(&symbols, X, 2 * SEC - 1));
+        assert_eq!(Some(2), names(&symbols, X, 2 * SEC));
+        assert_eq!(Some(2), names(&symbols, X, 3 * SEC));
+        assert_eq!(1, symbols.stats().implicit_unloads);
+    }
+
+    #[test]
+    fn snapshot_preserves_mismatched_unregister_at_same_address() {
+        let bpf = KernelDynamicSymbolKind::Bpf;
+        let mut symbols = KernelDynamicSymbols::new();
+        symbols.register(SEC, X, 256, bpf, 1);
+        symbols.unregister(4 * SEC, X, 64, bpf, 2);
+        symbols.add_snapshot(2 * SEC, X, 64, bpf, 2);
+        symbols.apply_snapshots();
+        assert_eq!(Some(1), names(&symbols, X, 2 * SEC - 1));
+        assert_eq!(Some(2), names(&symbols, X, 2 * SEC));
+        assert_eq!(None, names(&symbols, X, 4 * SEC));
+        assert_eq!(1, symbols.stats().mismatched_unregisters);
     }
 }
