@@ -1284,7 +1284,7 @@ impl OSExportMachine {
              */
             let name = format!("[bpf] {}", fmt.get_str(name, data)?);
 
-            event_machine.borrow_mut().add_kernel_dynamic_symbol(
+            event_machine.borrow_mut().queue_kernel_dynamic_symbol(
                 time_field.get_u64(full_data)?,
                 fmt.get_u64(addr, data)?,
                 fmt.get_u32(len, data)? as u64,
@@ -1520,6 +1520,7 @@ impl ExportMachineOSHooks for ExportMachine {
     fn os_add_kernel_mappings_with(
         &mut self,
         kernel_symbols: &mut impl ExportSymbolReader) {
+        self.apply_pending_kernel_dynamic_symbols();
 
         // Cached kernel symbol for in-memory matching.
         // name_id is interned once in Phase 2 so Phase 3 does not pay the
@@ -1564,6 +1565,7 @@ impl ExportMachineOSHooks for ExportMachine {
         self.kernel_dynamic_symbols.apply_snapshots();
 
         let dynamic = &self.kernel_dynamic_symbols;
+        let dynamic_ranges = dynamic.range_index();
 
         if !dynamic.is_empty() {
             let stats = dynamic.stats();
@@ -1599,12 +1601,24 @@ impl ExportMachineOSHooks for ExportMachine {
             let mut end = kernel_symbols.end();
             let mut in_dynamic_range = false;
 
+            /* An unbounded or invalid kallsyms extent is represented by
+             * end == start. Do not turn that sentinel into a range. */
+            if end <= start {
+                continue;
+            }
+
+            /* Clipping can only shrink the original extent. */
+            let first = all_addrs.partition_point(|addr| *addr < start);
+            if first == all_addrs.len() || all_addrs[first] > end {
+                continue;
+            }
+
             if !dynamic.is_empty() {
                 /*
                  * Code still loaded that we saw register is described by
                  * its generation, which has an exact extent and lifetime.
                  */
-                if dynamic.open_contains(start) {
+                if dynamic_ranges.open_contains(start) {
                     continue;
                 }
 
@@ -1612,14 +1626,11 @@ impl ExportMachineOSHooks for ExportMachine {
                  * Never let an inferred kallsyms extent run into code that
                  * was loaded or unloaded during tracking.
                  */
-                end = dynamic.clip_end(start, end);
-                in_dynamic_range = dynamic.any_contains(start);
+                end = dynamic_ranges.clip_end(start, end);
+                in_dynamic_range = dynamic_ranges.any_contains(start);
             }
 
-            let has_match = match all_addrs.binary_search(&start) {
-                Ok(_) => true,
-                Err(i) => i < all_addrs.len() && all_addrs[i] < end,
-            };
+            let has_match = all_addrs[first] <= end;
 
             if has_match {
                 let name_id = self.strings.to_id(kernel_symbols.name());
@@ -1702,7 +1713,7 @@ impl ExportMachineOSHooks for ExportMachine {
                 };
 
                 let sym = &matched_symbols[idx];
-                if *addr >= sym.start && *addr < sym.end && !seen[idx] &&
+                if *addr >= sym.start && *addr <= sym.end && !seen[idx] &&
                    !sym.in_dynamic_range {
                     seen[idx] = true;
                     added += 1;
@@ -2056,6 +2067,7 @@ struct LoadedBpfFunction {
  * compiled function. This requires CAP_SYS_ADMIN; on failure what was found
  * so far is returned.
  */
+#[cfg(target_os = "linux")]
 fn loaded_bpf_functions() -> Vec<LoadedBpfFunction> {
     const BPF_PROG_GET_NEXT_ID: libc::c_long = 11;
     const BPF_PROG_GET_FD_BY_ID: libc::c_long = 13;
@@ -2218,10 +2230,8 @@ fn loaded_bpf_functions() -> Vec<LoadedBpfFunction> {
  * be resolved even if they unload before the trace is finalized, when no
  * register record was seen for them.
  */
-fn snapshot_bpf_programs(machine: &mut ExportMachine) {
-    let time = ExportMachine::qpc_time();
-    let functions = loaded_bpf_functions();
-
+#[cfg(target_os = "linux")]
+fn snapshot_bpf_programs(machine: &mut ExportMachine, time: u64, functions: Vec<LoadedBpfFunction>) {
     debug!("Snapshot of loaded BPF programs: functions={}", functions.len());
 
     for function in functions {
@@ -2275,37 +2285,35 @@ impl UniversalExporterOSHooks for UniversalExporter {
             exporter.borrow_mut().mark_start();
             session.enable()?;
 
-            /*
-             * Snapshot already loaded BPF programs after enabling so that
-             * anything unloaded later is covered by a ksymbol record.
-             */
-            if ksymbol_records_supported() {
-                snapshot_bpf_programs(&mut exporter.borrow_mut());
-            }
+            std::thread::scope(|scope| -> anyhow::Result<()> {
+                let snapshot = if ksymbol_records_supported() {
+                    let time = ExportMachine::qpc_time();
+                    Some((time, scope.spawn(loaded_bpf_functions)))
+                } else {
+                    None
+                };
 
-            /* Spawn capture_environment in a background thread so that
-             * the ring buffers are already enabled when .NET diagnostic
-             * commands trigger runtime events (see issue #243). */
-            let env_handle = session.spawn_capture_environment();
+                /* Capture environment while perf rings are being consumed. */
+                let env_handle = session.spawn_capture_environment();
+                session.parse_until(until)?;
+                session.disable()?;
+                exporter.borrow_mut().mark_end();
 
-            session.parse_until(until)?;
-            session.disable()?;
-            exporter.borrow_mut().mark_end();
+                while !env_handle.is_finished() ||
+                    snapshot.as_ref().is_some_and(|(_, handle)| !handle.is_finished()) {
+                    session.parse_all()?;
+                }
 
-            /* When the session is disabled very early (for example, because
-             * the memory limit is reached immediately), the environment-capture
-             * thread may spend several minutes waiting for ring-buffer space on
-             * systems with many processes or modules. Continue parsing
-             * concurrently so the writer can finish promptly. */
-            while !env_handle.is_finished() {
+                let _ = env_handle.join();
+                if let Some((time, handle)) = snapshot {
+                    let functions = handle.join().map_err(|_| {
+                        anyhow::anyhow!("BPF snapshot thread panicked")
+                    })?;
+                    snapshot_bpf_programs(&mut exporter.borrow_mut(), time, functions);
+                }
                 session.parse_all()?;
-            }
-
-            /* Wait for the background capture to finish */
-            let _ = env_handle.join();
-
-            /* Parse any remaining data including in-process events. */
-            session.parse_all()?;
+                Ok(())
+            })?;
 
             self.run_parsed_hooks(&exporter)?;
 
@@ -2327,6 +2335,7 @@ impl UniversalExporterOSHooks for UniversalExporter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::helpers::exporting::graph::ExportGraph;
     use std::io::{Error, ErrorKind};
     use std::path::Path;
     use std::os::linux::fs::MetadataExt;
@@ -2546,6 +2555,46 @@ mod tests {
     }
 
     #[test]
+    fn kernel_mappings_order_records_from_independently_drained_cpus() {
+        let mut machine = kernel_test_machine();
+        machine.queue_kernel_dynamic_symbol(2 * SEC, BPF_X, 64,
+            KernelDynamicSymbolKind::Bpf, true, "[bpf] a");
+        machine.queue_kernel_dynamic_symbol(SEC, BPF_X, 64,
+            KernelDynamicSymbolKind::Bpf, false, "[bpf] a");
+        add_kernel_sample(&mut machine, 10, SEC + 1, &[BPF_X]);
+        add_kernel_sample(&mut machine, 10, 2 * SEC + 1, &[BPF_X]);
+        let mut kallsyms = KallsymsMock::new(vec![]);
+        machine.add_kernel_mappings_with(&mut kallsyms);
+        assert_eq!(Some("[bpf] a".to_string()), resolve_kernel(&machine, 10, BPF_X, SEC + 1));
+        assert_eq!(None, resolve_kernel(&machine, 10, BPF_X, 2 * SEC + 1));
+    }
+
+    #[test]
+    fn graph_resolves_reused_bpf_caller_at_each_sample_time() {
+        let mut machine = kernel_test_machine();
+        add_bpf(&mut machine, SEC, BPF_X, 64, false, "[bpf] a");
+        add_bpf(&mut machine, 2 * SEC, BPF_X, 64, true, "[bpf] a");
+        add_bpf(&mut machine, 3 * SEC, BPF_X, 64, false, "[bpf] b");
+        for time in [SEC + 1, 2 * SEC + 1, 3 * SEC + 1] {
+            add_kernel_sample(&mut machine, 10, time, &[0xffffffff81000000, BPF_X]);
+        }
+        let mut kallsyms = KallsymsMock::new(vec![]);
+        machine.add_kernel_mappings_with(&mut kallsyms);
+
+        let mut graph = ExportGraph::new();
+        let cpu = machine.sample_kind("cpu");
+        graph.add_samples(&machine, machine.find_process(10).unwrap(), cpu, None);
+        let children = graph.nodes()[graph.root_node()].children();
+        assert_eq!(3, children.len());
+        let methods: Vec<&str> = children.iter().map(|id| {
+            graph.strings().from_id(graph.nodes()[*id].target().method()).unwrap()
+        }).collect();
+        assert!(methods.contains(&"[bpf] a"));
+        assert!(methods.contains(&"[bpf] b"));
+        assert!(methods.contains(&""));
+    }
+
+    #[test]
     fn kernel_mappings_scope_bpf_symbols_by_time() {
         let mut machine = kernel_test_machine();
 
@@ -2574,6 +2623,7 @@ mod tests {
         add_kernel_sample(&mut machine, 20, 3 * SEC + SEC / 2, &[BPF_X + 128]);
         add_kernel_sample(&mut machine, 20, 2 * SEC + SEC / 2, &[live + 8]);
         add_kernel_sample(&mut machine, 20, SEC + SEC / 2, &[tail_fn + 0x10]);
+        add_kernel_sample(&mut machine, 30, SEC + SEC / 2, &[BPF_X - 1]);
 
         /*
          * Finalization view of kallsyms: neither program is present, so the
@@ -2635,6 +2685,9 @@ mod tests {
         assert_eq!(
             Some("tail_fn".to_string()),
             resolve_kernel(&machine, 20, tail_fn + 0x10, SEC + SEC / 2));
+        assert_eq!(
+            Some("tail_fn".to_string()),
+            resolve_kernel(&machine, 30, BPF_X - 1, SEC + SEC / 2));
     }
 
     #[test]

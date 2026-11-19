@@ -645,6 +645,7 @@ pub struct ExportProcess {
     samples: Vec<ExportProcessSample>,
     mappings: ExportMappingLookup,
     mapping_unloads: Vec<ExportMappingUnload>,
+    mapping_unloads_by_id: HashMap<usize, Vec<ExportMappingUnload>>,
     anon_maps: bool,
     create_time_qpc: Option<u64>,
     exit_time_qpc: Option<u64>,
@@ -680,6 +681,7 @@ impl ExportProcess {
             samples: Vec::new(),
             mappings: ExportMappingLookup::default(),
             mapping_unloads: Vec::new(),
+            mapping_unloads_by_id: HashMap::new(),
             anon_maps: false,
             create_time_qpc: None,
             exit_time_qpc: None,
@@ -721,11 +723,12 @@ impl ExportProcess {
         time: Option<u64>) -> Option<&ExportMapping> {
         let time = time.unwrap_or(u64::MAX);
         let index = self.mappings.find_index_where(ip, Some(time), |mapping| {
-            !self.mapping_unloads.iter().any(|unload| {
-                unload.id() == mapping.id() &&
+            !self.mapping_unloads_by_id.get(&mapping.id()).is_some_and(|unloads| {
+                unloads.iter().any(|unload| {
                     unload.start() <= ip &&
                     ip <= unload.end() &&
                     unload.time() <= time
+                })
             })
         })?;
 
@@ -745,6 +748,7 @@ impl ExportProcess {
     pub fn add_mapping_unload(
         &mut self,
         unload: ExportMappingUnload) {
+        self.mapping_unloads_by_id.entry(unload.id()).or_default().push(unload);
         self.mapping_unloads.push(unload);
     }
 
@@ -1100,6 +1104,7 @@ impl ExportProcess {
         fork.comm_id = self.comm_id;
         fork.mappings = self.mappings.clone();
         fork.mapping_unloads = self.mapping_unloads.clone();
+        fork.mapping_unloads_by_id = self.mapping_unloads_by_id.clone();
         fork.os = self.os.clone();
 
         fork
@@ -1273,6 +1278,9 @@ mod tests {
         assert_eq!(1, proc.find_mapping(50, Some(20)).unwrap().id());
         assert_eq!(2, proc.find_mapping(60, Some(20)).unwrap().id());
         assert_eq!(2, proc.find_mapping(50, Some(19)).unwrap().id());
+        let fork = proc.fork(2);
+        assert_eq!(1, fork.find_mapping(50, Some(20)).unwrap().id());
+        assert_eq!(2, fork.find_mapping(50, Some(19)).unwrap().id());
     }
 
     #[test]

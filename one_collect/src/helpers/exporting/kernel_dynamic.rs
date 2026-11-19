@@ -152,6 +152,54 @@ pub struct KernelDynamicSymbols {
     stats: KernelDynamicSymbolStats,
 }
 
+pub(crate) struct KernelDynamicRangeIndex {
+    /* Each tuple is (start, end, maximum end through this entry). */
+    ranges: Vec<(u64, u64, u64)>,
+    open: Vec<(u64, u64, u64)>,
+}
+
+impl KernelDynamicRangeIndex {
+    fn make_ranges<'a>(symbols: impl Iterator<Item = &'a KernelDynamicSymbol>) -> Vec<(u64, u64, u64)> {
+        let mut ranges: Vec<_> = symbols.map(|symbol| (symbol.start(), symbol.end(), 0)).collect();
+        ranges.sort_unstable_by_key(|range| range.0);
+        let mut max_end = 0;
+        for range in &mut ranges {
+            max_end = max_end.max(range.1);
+            range.2 = max_end;
+        }
+        ranges
+    }
+
+    fn contains(ranges: &[(u64, u64, u64)], address: u64) -> bool {
+        let end = ranges.partition_point(|range| range.0 <= address);
+        end != 0 && ranges[end - 1].2 >= address
+    }
+
+    pub(crate) fn any_contains(&self, address: u64) -> bool {
+        Self::contains(&self.ranges, address)
+    }
+
+    pub(crate) fn open_contains(&self, address: u64) -> bool {
+        Self::contains(&self.open, address)
+    }
+
+    pub(crate) fn clip_end(&self, start: u64, end: u64) -> u64 {
+        let split = self.ranges.partition_point(|range| range.0 <= start);
+        let mut end = match self.ranges.get(split) {
+            Some(range) if range.0 <= end => range.0 - 1,
+            _ => end,
+        };
+        let mut i = split;
+        while i != 0 && self.ranges[i - 1].2 >= start {
+            i -= 1;
+            if self.ranges[i].1 >= start {
+                end = end.min(self.ranges[i].1);
+            }
+        }
+        end
+    }
+}
+
 impl KernelDynamicSymbols {
     pub fn new() -> Self { Self::default() }
 
@@ -161,6 +209,13 @@ impl KernelDynamicSymbols {
     pub fn symbols(&self) -> &[KernelDynamicSymbol] { &self.symbols }
 
     pub fn stats(&self) -> &KernelDynamicSymbolStats { &self.stats }
+
+    pub(crate) fn range_index(&self) -> KernelDynamicRangeIndex {
+        KernelDynamicRangeIndex {
+            ranges: KernelDynamicRangeIndex::make_ranges(self.symbols.iter()),
+            open: KernelDynamicRangeIndex::make_ranges(self.open.values().map(|index| &self.symbols[*index])),
+        }
+    }
 
     pub(crate) fn stats_mut(&mut self) -> &mut KernelDynamicSymbolStats { &mut self.stats }
 
@@ -291,6 +346,18 @@ impl KernelDynamicSymbols {
                     load_time = load_time.max(unload);
                 }
             }
+        }
+
+        let stale: Vec<(u64, usize)> = self.open.iter()
+            .filter(|(_, index)| self.symbols[**index].overlaps(address, end_exclusive))
+            .map(|(start, index)| (*start, *index))
+            .collect();
+
+        for (start, index) in stale {
+            self.open.remove(&start);
+            self.close(index, time);
+            self.stats.implicit_unloads += 1;
+            load_time = time;
         }
 
         self.symbols.push(
@@ -517,6 +584,20 @@ mod tests {
     }
 
     #[test]
+    fn unmatched_unregister_closes_overlapping_open_generation() {
+        let bpf = KernelDynamicSymbolKind::Bpf;
+        let mut symbols = KernelDynamicSymbols::new();
+        symbols.register(SEC, X, 256, bpf, 1);
+        symbols.unregister(4 * SEC, X + 128, 64, bpf, 2);
+
+        assert_eq!(Some(1), names(&symbols, X + 130, 3 * SEC));
+        assert_eq!(None, names(&symbols, X + 130, 4 * SEC));
+        assert_eq!(None, names(&symbols, X, 4 * SEC));
+        assert_eq!(1, symbols.stats().implicit_unloads);
+        assert!(!symbols.open_contains(X));
+    }
+
+    #[test]
     fn register_over_open_generation_closes_it() {
         let bpf = KernelDynamicSymbolKind::Bpf;
         let mut symbols = KernelDynamicSymbols::new();
@@ -566,6 +647,23 @@ mod tests {
         assert_eq!(X + 63, symbols.clip_end(X + 8, X + 0x1000));
         /* Unrelated symbols are untouched */
         assert_eq!(X + 0x2000, symbols.clip_end(X + 0x1000, X + 0x2000));
+    }
+
+    #[test]
+    fn range_index_matches_linear_queries_with_overlaps() {
+        let bpf = KernelDynamicSymbolKind::Bpf;
+        let mut symbols = KernelDynamicSymbols::new();
+        symbols.register(SEC, X, 256, bpf, 1);
+        symbols.unregister(2 * SEC, X, 256, bpf, 1);
+        symbols.register(3 * SEC, X + 128, 64, bpf, 2);
+        symbols.register(4 * SEC, X + 512, 16, bpf, 3);
+        let index = symbols.range_index();
+        for offset in 0..600 {
+            let address = X - 1 + offset;
+            assert_eq!(symbols.any_contains(address), index.any_contains(address));
+            assert_eq!(symbols.open_contains(address), index.open_contains(address));
+            assert_eq!(symbols.clip_end(address, X + 600), index.clip_end(address, X + 600));
+        }
     }
 
     #[test]

@@ -578,6 +578,12 @@ impl RingBufBuilder<Kernel> {
         CommonRingBuf::new(self.attributes)
     }
 
+    pub(crate) fn build_without_ksymbol_records(&self) -> CommonRingBuf {
+        let mut attributes = self.attributes;
+        attributes.flags &= !FLAG_KSYMBOL;
+        CommonRingBuf::new(attributes)
+    }
+
     /*
      * Returns a ring buffer producing only kernel dynamic symbol records with
      * the same record layout, or None if those records were not requested.
@@ -595,6 +601,12 @@ impl RingBufBuilder<Kernel> {
             FLAG_NAMESPACES | FLAG_CGROUP | FLAG_BPF_EVENT | FLAG_TEXT_POKE |
             FLAG_INHERIT);
 
+        Some(CommonRingBuf::new(attributes))
+    }
+
+    pub(crate) fn task_ksymbol_only(&self) -> Option<CommonRingBuf> {
+        let mut attributes = *self.ksymbol_only()?.attributes;
+        attributes.flags |= self.attributes.flags & FLAG_INHERIT;
         Some(CommonRingBuf::new(attributes))
     }
 }
@@ -1470,12 +1482,18 @@ mod tests {
         let kernel = kernel.with_ksymbol_records();
         let full = kernel.build();
         let ksymbols = kernel.ksymbol_only().unwrap();
+        let task = kernel.task_ksymbol_only().unwrap();
+        let without = kernel.build_without_ksymbol_records();
 
         let records = FLAG_MMAP | FLAG_MMAP2 | FLAG_MMAP_DATA |
             FLAG_COMM | FLAG_COMM_EXEC | FLAG_TASK;
 
         assert_eq!(0, ksymbols.attributes.flags & records);
         assert_ne!(0, ksymbols.attributes.flags & FLAG_KSYMBOL);
+        assert_eq!(0, without.attributes.flags & FLAG_KSYMBOL);
+        assert_eq!(0, ksymbols.attributes.flags & FLAG_INHERIT);
+        assert_eq!(full.attributes.flags & FLAG_INHERIT, task.attributes.flags & FLAG_INHERIT);
+        assert_ne!(0, task.attributes.flags & FLAG_KSYMBOL);
         assert_eq!(full.attributes.sample_type, ksymbols.attributes.sample_type);
         assert_eq!(full.attributes.clockid, ksymbols.attributes.clockid);
         assert_eq!(

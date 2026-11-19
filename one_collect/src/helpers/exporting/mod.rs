@@ -1330,6 +1330,15 @@ pub enum ExportFilterAction {
     Drop,
 }
 
+struct PendingKernelDynamicSymbol {
+    time: u64,
+    address: u64,
+    len: u64,
+    kind: KernelDynamicSymbolKind,
+    unregister: bool,
+    name_id: usize,
+}
+
 pub struct ExportMachine {
     settings: ExportSettings,
     strings: InternedStrings,
@@ -1345,6 +1354,7 @@ pub struct ExportMachine {
     record_types: Vec<ExportRecordType>,
     map_index: usize,
     kernel_dynamic_symbols: KernelDynamicSymbols,
+    pending_kernel_dynamic_symbols: Vec<PendingKernelDynamicSymbol>,
     drop_closures: Vec<Box<dyn FnMut()>>,
     start_date: Option<DateTime<Utc>>,
     start_qpc: Option<u64>,
@@ -1434,6 +1444,7 @@ impl ExportMachine {
             record_types,
             map_index: 0,
             kernel_dynamic_symbols: KernelDynamicSymbols::new(),
+            pending_kernel_dynamic_symbols: Vec::new(),
             drop_closures: Vec::new(),
             start_date: None,
             start_qpc: None,
@@ -1870,6 +1881,33 @@ impl ExportMachine {
 
     pub fn kernel_dynamic_symbols(&self) -> &KernelDynamicSymbols {
         &self.kernel_dynamic_symbols
+    }
+
+    fn queue_kernel_dynamic_symbol(
+        &mut self,
+        time: u64,
+        address: u64,
+        len: u64,
+        kind: KernelDynamicSymbolKind,
+        unregister: bool,
+        name: &str) {
+        let name_id = self.strings.to_id(name);
+        self.pending_kernel_dynamic_symbols.push(PendingKernelDynamicSymbol {
+            time, address, len, kind, unregister, name_id,
+        });
+    }
+
+    fn apply_pending_kernel_dynamic_symbols(&mut self) {
+        self.pending_kernel_dynamic_symbols.sort_by_key(|event| (event.time, !event.unregister));
+        for event in self.pending_kernel_dynamic_symbols.drain(..) {
+            if event.unregister {
+                self.kernel_dynamic_symbols.unregister(
+                    event.time, event.address, event.len, event.kind, event.name_id);
+            } else {
+                self.kernel_dynamic_symbols.register(
+                    event.time, event.address, event.len, event.kind, event.name_id);
+            }
+        }
     }
 
     /// Records that `name` was observed loaded at `[address, address + len)`

@@ -682,11 +682,6 @@ impl RingBufDataSource {
             self.pages, self.target_pids
         );
 
-        /* Always required */
-        let common = self.kernel_builder
-            .get_or_insert_with(RingBufBuilder::for_kernel)
-            .build();
-
         let empty_pids = Vec::new();
 
         let target_pids = &mut self.target_pids.as_mut();
@@ -702,6 +697,14 @@ impl RingBufDataSource {
                 pids
             },
             None => { &empty_pids },
+        };
+
+        let kernel_builder = self.kernel_builder
+            .get_or_insert_with(RingBufBuilder::for_kernel);
+        let common = if pids.is_empty() {
+            kernel_builder.build()
+        } else {
+            kernel_builder.build_without_ksymbol_records()
         };
 
         self.cpu_to_reader_index.resize(cpu_count() as usize, None);
@@ -758,33 +761,6 @@ impl RingBufDataSource {
                     &mut self.ring_bufs,
                     &common,
                     None)?;
-            }
-
-            /*
-             * Task bound events only receive kernel dynamic symbol records
-             * for code the task itself loads or unloads. Target processes
-             * can run BPF programs loaded by others, so also observe those
-             * system wide when permitted.
-             */
-            if let Some(ksymbols) = self.kernel_builder
-                .as_ref()
-                .and_then(|builder| builder.ksymbol_only()) {
-                let before: HashSet<u64> = self.ring_bufs.keys().copied().collect();
-
-                if let Err(err) = Self::add_cpu_bufs(
-                    None,
-                    &None,
-                    &self.leader_ids,
-                    &mut self.ring_bufs,
-                    &ksymbols,
-                    None) {
-                    Self::remove_new_bufs(&mut self.ring_bufs, &before);
-
-                    warn!("Unable to observe kernel dynamic symbols system wide ({}); \
-                        symbols of BPF programs loaded or unloaded by processes other \
-                        than the targets may be unknown if they unload before trace \
-                        finalization", err);
-                }
             }
         }
 
@@ -887,6 +863,37 @@ impl RingBufDataSource {
                         &mut self.ring_bufs,
                         &common,
                         None)?;
+                }
+            }
+        }
+
+        /*
+         * Allocate the optional sideband only after all required descriptors.
+         * Use one scope at a time: duplicate task and CPU subscriptions can
+         * corrupt ksymbol record trailers on some kernels.
+         */
+        if !pids.is_empty() {
+            if let Some(ksymbols) = self.kernel_builder.as_ref()
+                .and_then(|builder| builder.ksymbol_only()) {
+                let before: HashSet<u64> = self.ring_bufs.keys().copied().collect();
+                if let Err(err) = Self::add_cpu_bufs(
+                    None, &None, &self.leader_ids, &mut self.ring_bufs, &ksymbols, None) {
+                    Self::remove_new_bufs(&mut self.ring_bufs, &before);
+                    warn!("Unable to observe kernel dynamic symbols system wide ({}); \
+                        attempting task-scoped collection", err);
+
+                    let task_symbols = self.kernel_builder.as_ref()
+                        .and_then(|builder| builder.task_ksymbol_only()).unwrap();
+                    for pid in pids {
+                        if let Err(err) = Self::add_cpu_bufs(
+                            Some(*pid), &None, &self.leader_ids, &mut self.ring_bufs,
+                            &task_symbols, None) {
+                            Self::remove_new_bufs(&mut self.ring_bufs, &before);
+                            warn!("Unable to observe task-scoped kernel dynamic symbols ({}); \
+                                BPF symbols may be unknown", err);
+                            break;
+                        }
+                    }
                 }
             }
         }

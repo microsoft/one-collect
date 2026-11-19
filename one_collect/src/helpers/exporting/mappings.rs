@@ -341,11 +341,13 @@ impl ExportMappingLookup {
                     true));
 
             /* Mapping ends are inclusive, so stop covering after end */
-            items.push(
-                AddressLookupItem::new(
-                    mapping.end().saturating_add(1),
-                    index,
-                    false));
+            if let Some(end) = mapping.end().checked_add(1) {
+                items.push(
+                    AddressLookupItem::new(
+                        end,
+                        index,
+                        false));
+            }
         }
 
         self.lookup.borrow_mut().update(&mut items);
@@ -699,6 +701,18 @@ mod tests {
             assert_eq!(2, lookup.find(2047, Some(10)).unwrap().id());
             assert_eq!(1, lookup.find(2048, Some(10)).unwrap().id());
             assert_eq!(1, lookup.find(2047, Some(9)).unwrap().id());
+        }
+    }
+
+    #[test]
+    fn lookup_preserves_mapping_at_max_address() {
+        let mut lookup = ExportMappingLookup::default();
+        lookup.mappings_mut().push(new_map(0, 0, u64::MAX, 1));
+        lookup.mappings_mut().push(new_map(0, 1, u64::MAX - 1, 2));
+        for min_size in [usize::MAX, 0] {
+            lookup.set_lookup_min_size(min_size);
+            assert_eq!(2, lookup.find(u64::MAX - 1, None).unwrap().id());
+            assert_eq!(1, lookup.find(u64::MAX, None).unwrap().id());
         }
     }
 
