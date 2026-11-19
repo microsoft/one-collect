@@ -1922,9 +1922,22 @@ impl ExportMachine {
         len: u64,
         kind: KernelDynamicSymbolKind,
         name: &str) {
+        self.add_kernel_dynamic_snapshot_with_name_certainty(time, address, len, kind, name, true, true);
+    }
+
+    fn add_kernel_dynamic_snapshot_with_name_certainty(
+        &mut self,
+        time: u64,
+        address: u64,
+        len: u64,
+        kind: KernelDynamicSymbolKind,
+        name: &str,
+        name_is_exact: bool,
+        tag_is_known: bool) {
         let name_id = self.strings.to_id(name);
 
-        self.kernel_dynamic_symbols.add_snapshot(time, address, len, kind, name_id);
+        self.kernel_dynamic_symbols.add_snapshot_with_name_certainty(
+            time, address, len, kind, name_id, name_is_exact, tag_is_known);
     }
 
     pub fn capture_file_symbol_metadata(&mut self) {

@@ -141,6 +141,8 @@ struct SnapshotSymbol {
     len: u64,
     kind: KernelDynamicSymbolKind,
     name_id: usize,
+    name_is_exact: bool,
+    tag_is_known: bool,
 }
 
 /// Time-scoped store of kernel dynamic symbols.
@@ -389,6 +391,18 @@ impl KernelDynamicSymbols {
         len: u64,
         kind: KernelDynamicSymbolKind,
         name_id: usize) {
+        self.add_snapshot_with_name_certainty(time, address, len, kind, name_id, true, true);
+    }
+
+    pub(crate) fn add_snapshot_with_name_certainty(
+        &mut self,
+        time: u64,
+        address: u64,
+        len: u64,
+        kind: KernelDynamicSymbolKind,
+        name_id: usize,
+        name_is_exact: bool,
+        tag_is_known: bool) {
         if !Self::valid_extent(address, len) {
             self.stats.invalid += 1;
             return;
@@ -401,6 +415,8 @@ impl KernelDynamicSymbols {
                 len,
                 kind,
                 name_id,
+                name_is_exact,
+                tag_is_known,
             });
     }
 
@@ -409,8 +425,13 @@ impl KernelDynamicSymbols {
     ///
     /// A snapshot symbol already described by an identical live generation
     /// is ignored. Conflicting live generations end at the observation time,
-    /// since the snapshot proves they cannot still occupy that range.
+    /// since the snapshot proves they cannot still occupy that range. A
+    /// synthesized BPF name cannot disprove a matching extent and tag.
     pub fn apply_snapshots(&mut self) {
+        self.apply_snapshots_with(|_, _| false);
+    }
+
+    pub(crate) fn apply_snapshots_with(&mut self, same_bpf_tag: impl Fn(usize, usize) -> bool) {
         let mut snapshots = std::mem::take(&mut self.snapshots);
         snapshots.sort_by_key(|snapshot| snapshot.time);
 
@@ -420,7 +441,9 @@ impl KernelDynamicSymbols {
                 symbol.start == snapshot.start &&
                     symbol.len == snapshot.len &&
                     symbol.kind == snapshot.kind &&
-                    symbol.name_id == snapshot.name_id
+                    (symbol.name_id == snapshot.name_id ||
+                     (!snapshot.name_is_exact && snapshot.kind == KernelDynamicSymbolKind::Bpf &&
+                      (!snapshot.tag_is_known || same_bpf_tag(symbol.name_id, snapshot.name_id))))
             };
             let conflicts: Vec<usize> = self.symbols.iter().enumerate()
                 .filter(|(_, symbol)| {

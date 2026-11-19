@@ -1545,6 +1545,47 @@ fn mark_live_kernel_samples(
 }
 
 #[cfg(target_os = "linux")]
+fn count_ambiguous_kernel_addresses(
+    ip_times: &[(u64, u64)],
+    states: &[Option<usize>],
+    generations: &[&KernelDynamicSymbol],
+    emitted: &[usize]) -> u64 {
+    let mut starts: Vec<_> = emitted.iter().map(|index| generations[*index].start()).collect();
+    let mut ends: Vec<_> = emitted.iter().map(|index| generations[*index].end()).collect();
+    starts.sort_unstable();
+    ends.sort_unstable();
+
+    let mut count = 0;
+    let mut index = 0;
+    while index < ip_times.len() {
+        let addr = ip_times[index].0;
+        let state = states[index];
+        let end = index + ip_times[index..].partition_point(|(other, _)| *other == addr);
+        let covering = starts.partition_point(|start| *start <= addr) -
+            ends.partition_point(|end| *end < addr);
+        /* A resolved state already accounts for one emitted covering range. */
+        if states[index..end].iter().any(|other| *other != state) ||
+            covering > usize::from(state.is_some()) {
+            count += 1;
+        }
+        index = end;
+    }
+    count
+}
+
+#[cfg(target_os = "linux")]
+fn bpf_identity_tag(name: &str) -> Option<&str> {
+    let rest = name.strip_prefix("[bpf] bpf_prog_")?;
+    let tag = rest.get(..16)?;
+    if tag.bytes().all(|byte| byte.is_ascii_hexdigit()) &&
+        (rest.len() == 16 || rest.as_bytes()[16] == b'_') {
+        Some(tag)
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
 impl ExportMachineOSHooks for ExportMachine {
     fn os_add_kernel_mappings_with(
         &mut self,
@@ -1591,7 +1632,14 @@ impl ExportMachineOSHooks for ExportMachine {
         let mut all_addrs: Vec<u64> = all_addrs_set.into_iter().collect();
         all_addrs.sort();
 
-        self.kernel_dynamic_symbols.apply_snapshots();
+        let strings = &self.strings;
+        self.kernel_dynamic_symbols.apply_snapshots_with(|left, right| {
+            match (strings.from_id(left), strings.from_id(right)) {
+                (Ok(left), Ok(right)) => bpf_identity_tag(left).zip(bpf_identity_tag(right))
+                    .is_some_and(|(left, right)| left == right),
+                _ => false,
+            }
+        });
 
         let dynamic = &self.kernel_dynamic_symbols;
         let dynamic_ranges = dynamic.range_index();
@@ -1832,27 +1880,8 @@ impl ExportMachineOSHooks for ExportMachine {
              * samples span generations or gaps, or another emitted
              * generation's symbol also covers them.
              */
-            let mut index = 0;
-
-            while index < ip_times.len() {
-                let addr = ip_times[index].0;
-                let state = states[index];
-                let mut end = index + 1;
-
-                while end < ip_times.len() && ip_times[end].0 == addr {
-                    end += 1;
-                }
-
-                if states[index..end].iter().any(|other| *other != state) ||
-                   emitted.iter().any(|gen_index| {
-                       Some(*gen_index) != state &&
-                       generations[*gen_index].contains(addr)
-                   }) {
-                    time_ambiguous += 1;
-                }
-
-                index = end;
-            }
+            time_ambiguous += count_ambiguous_kernel_addresses(
+                &ip_times, &states, &generations, &emitted);
         }
 
         if time_ambiguous != 0 {
@@ -2074,13 +2103,15 @@ struct LoadedBpfFunction {
     start: u64,
     len: u64,
     name: String,
+    name_is_exact: bool,
+    tag_is_known: bool,
 }
 
 #[cfg(target_os = "linux")]
 fn bpf_snapshot_name(
     kallsyms_name: Option<&String>,
     tag: &[u8],
-    prog_name: &str) -> String {
+    prog_name: &str) -> (String, bool) {
     let mut tag_string = String::new();
     for byte in tag {
         let _ = write!(tag_string, "{:02x}", byte);
@@ -2088,8 +2119,8 @@ fn bpf_snapshot_name(
 
     let prefix = format!("bpf_prog_{}", tag_string);
     match kallsyms_name {
-        Some(name) if name == &prefix || name.starts_with(&format!("{}_", prefix)) => name.clone(),
-        _ => format!("{}_{}", prefix, prog_name),
+        Some(name) if name == &prefix || name.starts_with(&format!("{}_", prefix)) => (name.clone(), true),
+        _ => (format!("{}_{}", prefix, prog_name), false),
     }
 }
 
@@ -2239,12 +2270,15 @@ fn loaded_bpf_functions() -> Vec<LoadedBpfFunction> {
                             continue;
                         }
 
+                        let tag_is_known = index == 0 ||
+                            index < tag_count.min(u32_at(&info, INFO_NR_PROG_TAGS) as usize);
                         let tag = if index == 0 {
                             &info[INFO_TAG..INFO_TAG + 8]
                         } else {
                             tags.get(index).map_or(&info[INFO_TAG..INFO_TAG + 8], |tag| tag.as_slice())
                         };
-                        let name = bpf_snapshot_name(kallsyms_names.get(start), tag, &prog_name);
+                        let kallsyms_name = if tag_is_known { kallsyms_names.get(start) } else { None };
+                        let (name, name_is_exact) = bpf_snapshot_name(kallsyms_name, tag, &prog_name);
 
                         functions.push(
                             LoadedBpfFunction {
@@ -2252,6 +2286,8 @@ fn loaded_bpf_functions() -> Vec<LoadedBpfFunction> {
                                 start: *start,
                                 len: *len as u64,
                                 name,
+                                name_is_exact,
+                                tag_is_known,
                             });
                     }
                 }
@@ -2283,12 +2319,14 @@ fn snapshot_bpf_programs(
     debug!("Snapshot of loaded BPF programs: functions={}", functions.len());
 
     for function in functions {
-        machine.add_kernel_dynamic_snapshot(
+        machine.add_kernel_dynamic_snapshot_with_name_certainty(
             function.time,
             function.start,
             function.len,
             KernelDynamicSymbolKind::Bpf,
-            &format!("[bpf] {}", function.name));
+            &format!("[bpf] {}", function.name),
+            function.name_is_exact,
+            function.tag_is_known);
     }
 }
 
@@ -2557,6 +2595,8 @@ mod tests {
         let mut machine = kernel_test_machine();
         let functions = vec![LoadedBpfFunction {
             time: 3 * SEC, start: BPF_X, len: 64, name: "replacement".to_string(),
+            name_is_exact: true,
+            tag_is_known: true,
         }];
         snapshot_bpf_programs(&mut machine, functions, false);
         machine.kernel_dynamic_symbols.apply_snapshots();
@@ -2569,9 +2609,9 @@ mod tests {
         let subprogram = "bpf_prog_9efe8873120741b3_F".to_string();
         let stale = "bpf_prog_9683c4e123f7f629_old".to_string();
         let unnamed = "bpf_prog_9efe8873120741b3".to_string();
-        assert_eq!(subprogram, bpf_snapshot_name(Some(&subprogram), &tag, "main"));
-        assert_eq!("bpf_prog_9efe8873120741b3_main", bpf_snapshot_name(Some(&stale), &tag, "main"));
-        assert_eq!(unnamed, bpf_snapshot_name(Some(&unnamed), &tag, "main"));
+        assert_eq!((subprogram.clone(), true), bpf_snapshot_name(Some(&subprogram), &tag, "main"));
+        assert_eq!(("bpf_prog_9efe8873120741b3_main".to_string(), false), bpf_snapshot_name(Some(&stale), &tag, "main"));
+        assert_eq!((unnamed.clone(), true), bpf_snapshot_name(Some(&unnamed), &tag, "main"));
     }
 
     #[test]
@@ -2581,11 +2621,69 @@ mod tests {
             KernelDynamicSymbolKind::Bpf, false, "[bpf] replacement");
         snapshot_bpf_programs(&mut machine, vec![LoadedBpfFunction {
             time: 3 * SEC, start: BPF_X, len: 64, name: "replacement".to_string(),
+            name_is_exact: true,
+            tag_is_known: true,
         }], true);
         machine.kernel_dynamic_symbols.apply_snapshots();
         assert_eq!(None, machine.kernel_dynamic_symbols().find(BPF_X, SEC));
         assert_eq!(2 * SEC, machine.kernel_dynamic_symbols().find(BPF_X, 3 * SEC).unwrap().load_time());
         assert_eq!(0, machine.kernel_dynamic_symbols().stats().snapshot_symbols);
+    }
+
+    #[test]
+    fn synthesized_snapshot_preserves_observed_bpf_name_and_unload() {
+        let mut machine = kernel_test_machine();
+        let exact = "[bpf] bpf_prog_1234567890abcdef_btf_function";
+        add_bpf(&mut machine, SEC, BPF_X, 64, false, exact);
+        add_bpf(&mut machine, 4 * SEC, BPF_X, 64, true, exact);
+        snapshot_bpf_programs(&mut machine, vec![LoadedBpfFunction {
+            time: 2 * SEC, start: BPF_X, len: 64,
+            name: "bpf_prog_1234567890abcdef_program".to_string(),
+            name_is_exact: false,
+            tag_is_known: true,
+        }], true);
+        add_kernel_sample(&mut machine, 10, 3 * SEC, &[BPF_X]);
+        add_kernel_sample(&mut machine, 10, 5 * SEC, &[BPF_X]);
+        machine.add_kernel_mappings_with(&mut KallsymsMock::new(vec![]));
+        assert_eq!(Some(exact.to_string()), resolve_kernel(&machine, 10, BPF_X, 3 * SEC));
+        assert_eq!(None, resolve_kernel(&machine, 10, BPF_X, 5 * SEC));
+        assert_eq!(0, machine.kernel_dynamic_symbols().stats().snapshot_symbols);
+    }
+
+    #[test]
+    fn synthesized_snapshot_with_different_tag_still_replaces_conflict() {
+        let mut machine = kernel_test_machine();
+        add_bpf(&mut machine, SEC, BPF_X, 64, false, "[bpf] bpf_prog_1234567890abcdef_old");
+        snapshot_bpf_programs(&mut machine, vec![LoadedBpfFunction {
+            time: 2 * SEC, start: BPF_X, len: 64,
+            name: "bpf_prog_fedcba0987654321_new".to_string(),
+            name_is_exact: false,
+            tag_is_known: true,
+        }], true);
+        add_kernel_sample(&mut machine, 10, 3 * SEC, &[BPF_X]);
+        machine.add_kernel_mappings_with(&mut KallsymsMock::new(vec![]));
+        assert_eq!(
+            Some("[bpf] bpf_prog_fedcba0987654321_new".to_string()),
+            resolve_kernel(&machine, 10, BPF_X, 3 * SEC));
+    }
+
+    #[test]
+    fn synthesized_subprogram_without_tag_preserves_observed_lifetime() {
+        let mut machine = kernel_test_machine();
+        let exact = "[bpf] bpf_prog_1234567890abcdef_subprogram";
+        add_bpf(&mut machine, SEC, BPF_X, 64, false, exact);
+        add_bpf(&mut machine, 4 * SEC, BPF_X, 64, true, exact);
+        snapshot_bpf_programs(&mut machine, vec![LoadedBpfFunction {
+            time: 2 * SEC, start: BPF_X, len: 64,
+            name: "bpf_prog_fedcba0987654321_program".to_string(),
+            name_is_exact: false,
+            tag_is_known: false,
+        }], true);
+        add_kernel_sample(&mut machine, 10, 3 * SEC, &[BPF_X]);
+        add_kernel_sample(&mut machine, 10, 5 * SEC, &[BPF_X]);
+        machine.add_kernel_mappings_with(&mut KallsymsMock::new(vec![]));
+        assert_eq!(Some(exact.to_string()), resolve_kernel(&machine, 10, BPF_X, 3 * SEC));
+        assert_eq!(None, resolve_kernel(&machine, 10, BPF_X, 5 * SEC));
     }
 
     fn add_kernel_sample(
@@ -2670,6 +2768,27 @@ mod tests {
             let expected = if time % 100 < 50 { Some(time / 100) } else { None };
             assert_eq!(expected, *state, "time {time}");
         }
+    }
+
+    #[test]
+    fn ambiguous_address_count_handles_disjoint_and_overlapping_ranges() {
+        let bpf = KernelDynamicSymbolKind::Bpf;
+        let mut symbols = KernelDynamicSymbols::new();
+        symbols.register(SEC, BPF_X, 64, bpf, 0);
+        symbols.unregister(2 * SEC, BPF_X, 64, bpf, 0);
+        symbols.register(3 * SEC, BPF_X + 32, 64, bpf, 1);
+        symbols.register(SEC, BPF_X + 128, 64, bpf, 2);
+        let generations: Vec<_> = symbols.symbols().iter().collect();
+        let ips = vec![
+            (BPF_X, SEC),
+            (BPF_X + 32, SEC),
+            (BPF_X + 64, SEC),
+            (BPF_X + 128, SEC),
+            (BPF_X + 129, SEC),
+            (BPF_X + 129, 2 * SEC),
+        ];
+        let states = vec![Some(0), Some(0), None, Some(2), Some(2), None];
+        assert_eq!(3, count_ambiguous_kernel_addresses(&ips, &states, &generations, &[0, 1, 2]));
     }
 
     #[test]
