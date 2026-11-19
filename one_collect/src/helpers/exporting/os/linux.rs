@@ -12,6 +12,10 @@ use std::io::BufReader;
 use std::io::{BufRead, Seek, SeekFrom};
 #[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+#[cfg(target_os = "linux")]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "linux")]
+use std::sync::Arc;
 use tracing::{debug, info, trace, warn};
 
 use crate::{ReadOnly, Writable};
@@ -2135,6 +2139,16 @@ struct PinnedBpfProgram {
 }
 
 #[cfg(target_os = "linux")]
+struct BpfSnapshotCancellation(Arc<AtomicBool>);
+
+#[cfg(target_os = "linux")]
+impl Drop for BpfSnapshotCancellation {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn bpf_snapshot_name(
     kallsyms_name: Option<&String>,
     tag: &[u8],
@@ -2154,12 +2168,19 @@ fn bpf_snapshot_name(
 #[cfg(target_os = "linux")]
 fn bpf_kallsyms_names(
     reader: &mut (impl BufRead + Seek),
-    addresses: &HashSet<u64>) -> std::io::Result<HashMap<u64, String>> {
+    addresses: &HashSet<u64>,
+    cancelled: &AtomicBool) -> std::io::Result<Option<HashMap<u64, String>>> {
+    if cancelled.load(Ordering::Relaxed) {
+        return Ok(None);
+    }
     reader.seek(SeekFrom::Start(0))?;
     let mut names = HashMap::new();
     let mut line = String::new();
 
     while names.len() < addresses.len() {
+        if cancelled.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
         line.clear();
         if reader.read_line(&mut line)? == 0 {
             break;
@@ -2178,23 +2199,39 @@ fn bpf_kallsyms_names(
         }
     }
 
-    Ok(names)
+    if cancelled.load(Ordering::Relaxed) {
+        return Ok(None);
+    }
+    Ok(Some(names))
 }
 
 #[cfg(target_os = "linux")]
 fn finish_bpf_snapshot_batch(
     programs: Vec<PinnedBpfProgram>,
-    read_names: impl FnOnce(&HashSet<u64>) -> HashMap<u64, String>) -> Vec<LoadedBpfFunction> {
-    let addresses: HashSet<_> = programs.iter()
-        .flat_map(|program| program.functions.iter().map(|function| function.start))
-        .collect();
+    cancelled: &AtomicBool,
+    read_names: impl FnOnce(&HashSet<u64>) -> Option<HashMap<u64, String>>) -> Option<Vec<LoadedBpfFunction>> {
+    if cancelled.load(Ordering::Relaxed) {
+        return None;
+    }
+    let mut addresses = HashSet::new();
+    for program in &programs {
+        for function in &program.functions {
+            if cancelled.load(Ordering::Relaxed) {
+                return None;
+            }
+            addresses.insert(function.start);
+        }
+    }
 
     /* Each program remains pinned until all of these names have been read. */
-    let names = read_names(&addresses);
+    let names = read_names(&addresses)?;
     let mut functions = Vec::new();
 
     for program in programs {
         for function in program.functions {
+            if cancelled.load(Ordering::Relaxed) {
+                return None;
+            }
             let kallsyms_name = names.get(&function.start);
             let (name, name_is_exact) = match kallsyms_name {
                 Some(name) if !function.tag_is_known && name.starts_with("bpf_prog_") => {
@@ -2213,16 +2250,40 @@ fn finish_bpf_snapshot_batch(
         }
     }
 
-    functions
+    if cancelled.load(Ordering::Relaxed) {
+        return None;
+    }
+    Some(functions)
 }
 
 /*
  * Enumerates loaded BPF programs and returns the extent and name of each JIT
  * compiled function. This requires CAP_SYS_ADMIN; on failure what was found
- * so far is returned.
+ * so far is returned. Cancellation discards all results.
  */
 #[cfg(target_os = "linux")]
-fn loaded_bpf_functions() -> Vec<LoadedBpfFunction> {
+fn loaded_bpf_functions(cancelled: &AtomicBool) -> Option<Vec<LoadedBpfFunction>> {
+    if cancelled.load(Ordering::Relaxed) {
+        return None;
+    }
+    let kallsyms = match File::open("/proc/kallsyms") {
+        Ok(file) => Some(BufReader::new(file)),
+        Err(err) => {
+            warn!("Unable to open kallsyms for the BPF snapshot ({}); \
+                using program names where possible", err);
+            None
+        },
+    };
+    loaded_bpf_functions_with(cancelled, |cmd, attr, size| unsafe {
+        libc::syscall(libc::SYS_bpf, cmd, attr, size as libc::c_uint)
+    }, kallsyms)
+}
+
+#[cfg(target_os = "linux")]
+fn loaded_bpf_functions_with(
+    cancelled: &AtomicBool,
+    mut syscall: impl FnMut(libc::c_long, *mut libc::c_void, usize) -> libc::c_long,
+    mut kallsyms: Option<BufReader<File>>) -> Option<Vec<LoadedBpfFunction>> {
     const BPF_PROG_GET_NEXT_ID: libc::c_long = 11;
     const BPF_PROG_GET_FD_BY_ID: libc::c_long = 13;
     const BPF_OBJ_GET_INFO_BY_FD: libc::c_long = 15;
@@ -2251,24 +2312,24 @@ fn loaded_bpf_functions() -> Vec<LoadedBpfFunction> {
     #[derive(Default)]
     struct InfoAttr { bpf_fd: u32, info_len: u32, info: u64 }
 
-    fn bpf<T>(cmd: libc::c_long, attr: &mut T) -> libc::c_long {
-        unsafe {
-            libc::syscall(
-                libc::SYS_bpf,
-                cmd,
-                attr as *mut T,
-                std::mem::size_of::<T>() as libc::c_uint)
-        }
+    fn bpf<T>(
+        syscall: &mut impl FnMut(libc::c_long, *mut libc::c_void, usize) -> libc::c_long,
+        cmd: libc::c_long,
+        attr: &mut T) -> libc::c_long {
+        syscall(cmd, (attr as *mut T).cast(), std::mem::size_of::<T>())
     }
 
-    fn get_info(fd: i32, info: &mut [u8; INFO_LEN]) -> bool {
+    fn get_info(
+        syscall: &mut impl FnMut(libc::c_long, *mut libc::c_void, usize) -> libc::c_long,
+        fd: i32,
+        info: &mut [u8; INFO_LEN]) -> bool {
         let mut attr = InfoAttr {
             bpf_fd: fd as u32,
             info_len: INFO_LEN as u32,
             info: info.as_mut_ptr() as u64,
         };
 
-        bpf(BPF_OBJ_GET_INFO_BY_FD, &mut attr) == 0
+        bpf(syscall, BPF_OBJ_GET_INFO_BY_FD, &mut attr) == 0
     }
 
     fn u32_at(info: &[u8], offset: usize) -> u32 {
@@ -2278,45 +2339,46 @@ fn loaded_bpf_functions() -> Vec<LoadedBpfFunction> {
     fn finish_batch(
         batch: &mut Vec<PinnedBpfProgram>,
         kallsyms: &mut Option<BufReader<File>>,
-        functions: &mut Vec<LoadedBpfFunction>) {
+        functions: &mut Vec<LoadedBpfFunction>,
+        cancelled: &AtomicBool) -> Option<()> {
         if batch.is_empty() {
-            return;
+            return if cancelled.load(Ordering::Relaxed) { None } else { Some(()) };
         }
 
         functions.extend(finish_bpf_snapshot_batch(
             std::mem::take(batch),
+            cancelled,
             |addresses| {
                 match kallsyms.as_mut() {
-                    Some(reader) => match bpf_kallsyms_names(reader, addresses) {
+                    Some(reader) => match bpf_kallsyms_names(reader, addresses, cancelled) {
                         Ok(names) => names,
                         Err(err) => {
                             warn!("Unable to read BPF names from kallsyms ({}); \
                                 using program names where possible", err);
                             *kallsyms = None;
-                            HashMap::new()
+                            Some(HashMap::new())
                         },
                     },
-                    None => HashMap::new(),
+                    None => Some(HashMap::new()),
                 }
-            }));
+            })?);
+        Some(())
     }
 
-    let mut kallsyms = match File::open("/proc/kallsyms") {
-        Ok(file) => Some(BufReader::new(file)),
-        Err(err) => {
-            warn!("Unable to open kallsyms for the BPF snapshot ({}); \
-                using program names where possible", err);
-            None
-        },
-    };
+    if cancelled.load(Ordering::Relaxed) {
+        return None;
+    }
     let mut functions = Vec::new();
     let mut batch = Vec::new();
     let mut id = 0u32;
 
     loop {
+        if cancelled.load(Ordering::Relaxed) {
+            return None;
+        }
         let mut next = NextIdAttr { start_id: id, ..Default::default() };
 
-        if bpf(BPF_PROG_GET_NEXT_ID, &mut next) != 0 {
+        if bpf(&mut syscall, BPF_PROG_GET_NEXT_ID, &mut next) != 0 {
             let err = std::io::Error::last_os_error();
 
             if err.raw_os_error() != Some(libc::ENOENT) {
@@ -2329,15 +2391,18 @@ fn loaded_bpf_functions() -> Vec<LoadedBpfFunction> {
             break;
         }
 
+        if cancelled.load(Ordering::Relaxed) {
+            return None;
+        }
         id = next.next_id;
 
         let mut by_id = FdByIdAttr { prog_id: id, ..Default::default() };
-        let mut fd = bpf(BPF_PROG_GET_FD_BY_ID, &mut by_id);
+        let mut fd = bpf(&mut syscall, BPF_PROG_GET_FD_BY_ID, &mut by_id);
         if fd < 0 &&
             matches!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EMFILE | libc::ENFILE)) &&
             !batch.is_empty() {
-            finish_batch(&mut batch, &mut kallsyms, &mut functions);
-            fd = bpf(BPF_PROG_GET_FD_BY_ID, &mut by_id);
+            finish_batch(&mut batch, &mut kallsyms, &mut functions, cancelled)?;
+            fd = bpf(&mut syscall, BPF_PROG_GET_FD_BY_ID, &mut by_id);
         }
         if fd < 0 &&
             matches!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EMFILE | libc::ENFILE)) &&
@@ -2345,7 +2410,7 @@ fn loaded_bpf_functions() -> Vec<LoadedBpfFunction> {
             warn!("Unable to open a BPF program while kallsyms is open; \
                 using program names where possible");
             kallsyms = None;
-            fd = bpf(BPF_PROG_GET_FD_BY_ID, &mut by_id);
+            fd = bpf(&mut syscall, BPF_PROG_GET_FD_BY_ID, &mut by_id);
         }
         if fd < 0 {
             let err = std::io::Error::last_os_error();
@@ -2362,9 +2427,15 @@ fn loaded_bpf_functions() -> Vec<LoadedBpfFunction> {
         }
 
         let fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+        if cancelled.load(Ordering::Relaxed) {
+            return None;
+        }
         let mut info = [0u8; INFO_LEN];
 
-        if get_info(fd.as_raw_fd(), &mut info) {
+        if get_info(&mut syscall, fd.as_raw_fd(), &mut info) {
+            if cancelled.load(Ordering::Relaxed) {
+                return None;
+            }
             let count = u32_at(&info, INFO_NR_JITED_KSYMS)
                 .min(u32_at(&info, INFO_NR_JITED_FUNC_LENS)) as usize;
 
@@ -2388,7 +2459,7 @@ fn loaded_bpf_functions() -> Vec<LoadedBpfFunction> {
                 info[INFO_PROG_TAGS..INFO_PROG_TAGS + 8]
                     .copy_from_slice(&(tags.as_mut_ptr() as u64).to_ne_bytes());
 
-                if get_info(fd.as_raw_fd(), &mut info) {
+                if get_info(&mut syscall, fd.as_raw_fd(), &mut info) {
                     /* The open fd pins this program at the observation time. */
                     let time = ExportMachine::qpc_time();
 
@@ -2398,6 +2469,9 @@ fn loaded_bpf_functions() -> Vec<LoadedBpfFunction> {
 
                     let mut program_functions = Vec::new();
                     for (index, (start, len)) in ksyms.iter().zip(lens.iter()).enumerate() {
+                        if cancelled.load(Ordering::Relaxed) {
+                            return None;
+                        }
                         if *start == 0 || *len == 0 {
                             continue;
                         }
@@ -2423,7 +2497,7 @@ fn loaded_bpf_functions() -> Vec<LoadedBpfFunction> {
                     if !program_functions.is_empty() {
                         batch.push(PinnedBpfProgram { _fd: fd, functions: program_functions });
                         if batch.len() == BATCH_SIZE {
-                            finish_batch(&mut batch, &mut kallsyms, &mut functions);
+                            finish_batch(&mut batch, &mut kallsyms, &mut functions, cancelled)?;
                         }
                     }
                 } else {
@@ -2437,8 +2511,8 @@ fn loaded_bpf_functions() -> Vec<LoadedBpfFunction> {
         }
     }
 
-    finish_batch(&mut batch, &mut kallsyms, &mut functions);
-    functions
+    finish_batch(&mut batch, &mut kallsyms, &mut functions, cancelled)?;
+    Some(functions)
 }
 
 /*
@@ -2519,11 +2593,13 @@ impl UniversalExporterOSHooks for UniversalExporter {
             session.enable()?;
 
             std::thread::scope(|scope| -> anyhow::Result<()> {
+                let cancellation = BpfSnapshotCancellation(Arc::new(AtomicBool::new(false)));
                 let system_wide_ksymbols = session.has_system_wide_ksymbols();
                 exporter.borrow_mut().os.bpf_lifecycle_unavailable =
                     ksymbol_records_supported() && !system_wide_ksymbols;
                 let snapshot = if system_wide_ksymbols {
-                    Some(scope.spawn(loaded_bpf_functions))
+                    let cancelled = Arc::clone(&cancellation.0);
+                    Some(scope.spawn(move || loaded_bpf_functions(&cancelled)))
                 } else {
                     if ksymbol_records_supported() {
                         warn!("Skipping BPF snapshot because system-wide kernel symbol \
@@ -2534,8 +2610,10 @@ impl UniversalExporterOSHooks for UniversalExporter {
 
                 /* Capture environment while perf rings are being consumed. */
                 let env_handle = session.spawn_capture_environment();
-                session.parse_until(until)?;
+                let result = session.parse_until(until);
                 let snapshot_completed = snapshot.as_ref().is_some_and(|handle| handle.is_finished());
+                cancellation.0.store(true, Ordering::Relaxed);
+                result?;
                 session.disable()?;
                 exporter.borrow_mut().mark_end();
 
@@ -2549,8 +2627,12 @@ impl UniversalExporterOSHooks for UniversalExporter {
                     let functions = handle.join().map_err(|_| {
                         anyhow::anyhow!("BPF snapshot thread panicked")
                     })?;
-                    snapshot_bpf_programs(
-                        &mut exporter.borrow_mut(), functions, snapshot_completed, system_wide_ksymbols);
+                    if let Some(functions) = functions {
+                        snapshot_bpf_programs(
+                            &mut exporter.borrow_mut(), functions, snapshot_completed, system_wide_ksymbols);
+                    } else {
+                        warn!("BPF snapshot did not complete before recording stopped; discarding it");
+                    }
                 }
                 session.parse_all()?;
                 Ok(())
@@ -2759,6 +2841,143 @@ mod tests {
     }
 
     #[test]
+    fn cancellation_during_bpf_enumeration_releases_pins() {
+        use std::io::{ErrorKind, Read};
+        use std::os::fd::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+
+        #[repr(C)]
+        struct InfoAttr { fd: u32, len: u32, info: u64 }
+
+        let cancelled = AtomicBool::new(false);
+        let mut pins = std::collections::VecDeque::new();
+        let mut observers = Vec::new();
+        for _ in 0..33 {
+            let (pin, observer) = UnixStream::pair().unwrap();
+            observer.set_nonblocking(true).unwrap();
+            pins.push_back(pin);
+            observers.push(observer);
+        }
+        let mut next_count = 0;
+        let mut info_count = 0;
+        let result = loaded_bpf_functions_with(&cancelled, |cmd, attr, _| {
+            match cmd {
+                11 => {
+                    next_count += 1;
+                    if next_count == 34 {
+                        assert_eq!(0, observers[0].read(&mut [0]).unwrap());
+                        assert_eq!(ErrorKind::WouldBlock, observers[32].read(&mut [0]).unwrap_err().kind());
+                        cancelled.store(true, Ordering::Relaxed);
+                    }
+                    unsafe { *(attr.cast::<u32>().add(1)) = next_count; }
+                },
+                13 => return pins.pop_front().unwrap().into_raw_fd() as libc::c_long,
+                15 => unsafe {
+                    info_count += 1;
+                    let info = &mut *((*attr.cast::<InfoAttr>()).info as *mut [u8; 192]);
+                    if info_count % 2 == 1 {
+                        info[104..108].copy_from_slice(&1u32.to_ne_bytes());
+                        info[108..112].copy_from_slice(&1u32.to_ne_bytes());
+                    } else {
+                        let ksyms = u64::from_ne_bytes(info[112..120].try_into().unwrap());
+                        let lens = u64::from_ne_bytes(info[120..128].try_into().unwrap());
+                        *(ksyms as *mut u64) = BPF_X + u64::from(next_count - 1) * 128;
+                        *(lens as *mut u32) = 64;
+                    }
+                },
+                _ => panic!("unexpected BPF command {cmd}"),
+            }
+            0
+        }, None);
+        assert!(result.is_none());
+        assert_eq!(34, next_count);
+        assert_eq!(66, info_count);
+        assert_eq!(0, observers[32].read(&mut [0]).unwrap());
+    }
+
+    #[test]
+    fn cancellation_during_kallsyms_scan_discards_batch_and_releases_pins() {
+        use std::io::{Cursor, ErrorKind, Read};
+        use std::os::unix::net::UnixStream;
+
+        struct CancellingReader<'a> {
+            input: Cursor<Vec<u8>>,
+            cancelled: &'a AtomicBool,
+            lines: usize,
+        }
+        impl Read for CancellingReader<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                self.input.read(buf)
+            }
+        }
+        impl Seek for CancellingReader<'_> {
+            fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+                self.input.seek(pos)
+            }
+        }
+        impl BufRead for CancellingReader<'_> {
+            fn fill_buf(&mut self) -> std::io::Result<&[u8]> { self.input.fill_buf() }
+            fn consume(&mut self, amount: usize) { self.input.consume(amount); }
+            fn read_line(&mut self, line: &mut String) -> std::io::Result<usize> {
+                self.lines += 1;
+                let result = self.input.read_line(line);
+                self.cancelled.store(true, Ordering::Relaxed);
+                result
+            }
+        }
+
+        let cancelled = AtomicBool::new(false);
+        let mut reader = CancellingReader {
+            input: Cursor::new(format!(
+                "{:016x} t bpf_prog_0000000000000000_first [bpf]\n{:016x} t bpf_prog_0000000000000000_second [bpf]\n",
+                BPF_X, BPF_X + 128).into_bytes()),
+            cancelled: &cancelled,
+            lines: 0,
+        };
+        let (pin, mut observer) = UnixStream::pair().unwrap();
+        observer.set_nonblocking(true).unwrap();
+        let program = PinnedBpfProgram {
+            _fd: pin.into(),
+            functions: [BPF_X, BPF_X + 128].into_iter().map(|start| BpfSnapshotFunction {
+                time: SEC, start, len: 64, tag: [0; 8],
+                tag_is_known: true, prog_name: "test".to_string(),
+            }).collect(),
+        };
+        let result = finish_bpf_snapshot_batch(vec![program], &cancelled, |addresses| {
+            assert_eq!(ErrorKind::WouldBlock, observer.read(&mut [0]).unwrap_err().kind());
+            bpf_kallsyms_names(&mut reader, addresses, &cancelled).unwrap()
+        });
+        assert!(result.is_none());
+        assert_eq!(1, reader.lines);
+        assert_eq!(0, observer.read(&mut [0]).unwrap());
+    }
+
+    #[test]
+    fn snapshot_cancellation_guard_signals_on_error() {
+        fn run(flag: &Arc<AtomicBool>, done: std::sync::mpsc::Sender<bool>) -> Result<(), ()> {
+            std::thread::scope(|scope| {
+                let _guard = BpfSnapshotCancellation(Arc::clone(flag));
+                let (started, ready) = std::sync::mpsc::channel();
+                scope.spawn(move || {
+                    started.send(()).unwrap();
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                    while !flag.load(Ordering::Relaxed) && std::time::Instant::now() < deadline {
+                        std::thread::yield_now();
+                    }
+                    done.send(flag.load(Ordering::Relaxed)).unwrap();
+                });
+                ready.recv().unwrap();
+                Err(())
+            })
+        }
+
+        let flag = Arc::new(AtomicBool::new(false));
+        let (done, completed) = std::sync::mpsc::channel();
+        assert!(run(&flag, done).is_err());
+        assert!(completed.recv().unwrap());
+    }
+
+    #[test]
     fn missing_system_wide_lifecycle_does_not_backdate_reused_bpf_address() {
         let mut machine = kernel_test_machine();
         machine.os.bpf_lifecycle_unavailable = true;
@@ -2797,7 +3016,8 @@ mod tests {
         let new = "bpf_prog_1234567890abcdef_new";
         let subprogram = "bpf_prog_0123456789abcdef_sub";
         let mut kallsyms = Cursor::new(format!("{:016x} t {} [bpf]\n", BPF_X, old).into_bytes());
-        let old_names = bpf_kallsyms_names(&mut kallsyms, &HashSet::from([BPF_X])).unwrap();
+        let cancelled = AtomicBool::new(false);
+        let old_names = bpf_kallsyms_names(&mut kallsyms, &HashSet::from([BPF_X]), &cancelled).unwrap().unwrap();
         assert_eq!(Some(&old.to_string()), old_names.get(&BPF_X));
 
         let (pin, mut observer) = UnixStream::pair().unwrap();
@@ -2819,10 +3039,10 @@ mod tests {
             "{:016x} t {} [bpf]\n{:016x} t {} [bpf]\n",
             BPF_X, new, BPF_X + 128, subprogram).into_bytes();
 
-        let functions = finish_bpf_snapshot_batch(programs, |addresses| {
+        let functions = finish_bpf_snapshot_batch(programs, &cancelled, |addresses| {
             assert_eq!(ErrorKind::WouldBlock, observer.read(&mut [0]).unwrap_err().kind());
-            bpf_kallsyms_names(&mut kallsyms, addresses).unwrap()
-        });
+            bpf_kallsyms_names(&mut kallsyms, addresses, &cancelled).unwrap()
+        }).unwrap();
         assert_eq!(0, observer.read(&mut [0]).unwrap());
         assert_eq!(new, functions[0].name);
         assert!(functions[0].name_is_exact);

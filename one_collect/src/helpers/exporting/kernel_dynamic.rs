@@ -506,6 +506,10 @@ impl KernelDynamicSymbols {
                     break;
                 }
 
+                if let Some(unload) = symbol.observed_unload_time.filter(|unload| *unload <= snapshot.time) {
+                    load_time = load_time.max(unload);
+                }
+
                 if matches_snapshot(symbol) {
                     if let Some(unload) = symbol.observed_unload_time.filter(|unload| *unload > snapshot.time) {
                         load_time = load_time.max(snapshot.time);
@@ -938,6 +942,27 @@ mod tests {
         assert_eq!(Some(2), names(&symbols, X, 35));
         assert_eq!(Some(2), names(&symbols, X, 39));
         assert_eq!(None, names(&symbols, X, 40));
+    }
+
+    #[test]
+    fn later_snapshot_starts_after_preserved_unregister() {
+        let bpf = KernelDynamicSymbolKind::Bpf;
+        for separate_passes in [false, true] {
+            let mut symbols = KernelDynamicSymbols::new();
+            symbols.unregister(40, X + 16, 32, bpf, 2);
+            symbols.add_snapshot(25, X, 64, bpf, 1);
+            if separate_passes {
+                symbols.apply_snapshots();
+            }
+            symbols.add_snapshot(45, X, 64, bpf, 3);
+            symbols.apply_snapshots();
+
+            assert_eq!(Some(1), names(&symbols, X + 16, 25));
+            assert_eq!(None, names(&symbols, X + 16, 26));
+            assert_eq!(None, names(&symbols, X + 16, 39));
+            assert_eq!(Some(3), names(&symbols, X + 16, 40));
+            assert_eq!(Some(3), names(&symbols, X + 16, 45));
+        }
     }
 
     #[test]

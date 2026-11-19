@@ -1010,17 +1010,30 @@ impl RingBufDataSource {
         Ok(())
     }
 
+    fn control_ring_bufs(
+        &self,
+        enabling: bool,
+        mut control: impl FnMut(&CpuRingBuf) -> IOResult<()>) -> IOResult<()> {
+        /*
+         * Some leader rings themselves carry KSYMBOL records; classify by
+         * attributes, not just the separately allocated sideband IDs.
+         */
+        for ksymbols in [enabling, !enabling] {
+            for rb in self.ring_bufs.values() {
+                if rb.is_open() && (rb.attributes.flags & FLAG_KSYMBOL != 0) == ksymbols {
+                    control(rb)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn enable(&mut self) -> IOResult<()> {
         debug!("RingBufDataSource::enable: enabling {} ring buffers", self.ring_bufs.len());
 
         // An unsuccessful enable may already have enabled some descriptors.
         self.recording_started = true;
-        for rb in self.ring_bufs.values() {
-            if !rb.is_open() {
-                continue;
-            }
-            rb.enable()?;
-        }
+        self.control_ring_bufs(true, |rb| rb.enable())?;
 
         self.enabled = true;
 
@@ -1032,12 +1045,7 @@ impl RingBufDataSource {
     fn disable(&mut self) -> IOResult<()> {
         debug!("RingBufDataSource::disable: disabling {} ring buffers", self.ring_bufs.len());
 
-        for rb in self.ring_bufs.values() {
-            if !rb.is_open() {
-                continue;
-            }
-            rb.disable()?;
-        }
+        self.control_ring_bufs(false, |rb| rb.disable())?;
 
         self.enabled = false;
 
@@ -1605,6 +1613,68 @@ mod tests {
         let mut buf = CpuRingBuf::new(0, attributes);
         buf.fd = Some(descriptor.into_raw_fd());
         (buf, peer)
+    }
+
+    #[test]
+    fn lifecycle_descriptors_bracket_sampling_descriptors() {
+        let lifecycle = RingBufBuilder::for_kernel().with_ksymbol_records().build();
+        let sample = RingBufBuilder::for_profiling(100).build();
+        let mut source = RingBufDataSource::new(
+            1, None, None, None, None, None, None, None, None, None);
+        let mut peers = Vec::new();
+        for (id, attributes) in [
+            (1, lifecycle.attributes.clone()),
+            (2, sample.attributes.clone()),
+            (3, lifecycle.attributes.clone()),
+            (4, sample.attributes.clone()),
+        ] {
+            let (mut buf, peer) = test_open_buf(attributes);
+            buf.id = Some(id);
+            source.ring_bufs.insert(id, buf);
+            peers.push(peer);
+        }
+        source.leader_ids.insert(0, 1);
+        source.ksymbol_buf_ids.insert(3);
+        source.ring_bufs.insert(5, CpuRingBuf::new(0, lifecycle.attributes.clone()));
+
+        for enabling in [true, false] {
+            let mut ids = Vec::new();
+            source.control_ring_bufs(enabling, |buf| {
+                ids.push(buf.id.unwrap());
+                Ok(())
+            }).unwrap();
+            assert_eq!(4, ids.len());
+            let first: HashSet<_> = ids[..2].iter().copied().collect();
+            let second: HashSet<_> = ids[2..].iter().copied().collect();
+            if enabling {
+                assert_eq!(HashSet::from([1, 3]), first);
+                assert_eq!(HashSet::from([2, 4]), second);
+            } else {
+                assert_eq!(HashSet::from([2, 4]), first);
+                assert_eq!(HashSet::from([1, 3]), second);
+            }
+        }
+    }
+
+    #[test]
+    fn failed_sampling_disable_keeps_lifecycle_descriptors_enabled() {
+        let lifecycle = RingBufBuilder::for_kernel().with_ksymbol_records().build();
+        let sample = RingBufBuilder::for_profiling(100).build();
+        let mut source = RingBufDataSource::new(
+            1, None, None, None, None, None, None, None, None, None);
+        let (mut lifecycle_buf, _lifecycle_peer) = test_open_buf(lifecycle.attributes.clone());
+        let (mut sample_buf, _sample_peer) = test_open_buf(sample.attributes.clone());
+        lifecycle_buf.id = Some(1);
+        sample_buf.id = Some(2);
+        source.ring_bufs.insert(1, lifecycle_buf);
+        source.ring_bufs.insert(2, sample_buf);
+        let mut attempted = Vec::new();
+        let result = source.control_ring_bufs(false, |buf| {
+            attempted.push(buf.id.unwrap());
+            Err(IOError::from_raw_os_error(libc::EIO))
+        });
+        assert_eq!(Some(libc::EIO), result.unwrap_err().raw_os_error());
+        assert_eq!(vec![2], attempted);
     }
 
     #[test]
