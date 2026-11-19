@@ -717,6 +717,23 @@ mod tests {
     }
 
     #[test]
+    fn indexed_lookup_selects_reused_ranges_by_time_and_filter() {
+        let mut lookup = ExportMappingLookup::default();
+        for id in 1..=32 {
+            lookup.mappings_mut().push(new_map(id as u64 * 10, 100, 199, id));
+        }
+        lookup.mappings_mut().push(new_map(0, 200, u64::MAX, 33));
+
+        assert_eq!(None, lookup.find_index(99, Some(100)));
+        assert_eq!(10, lookup.find(100, Some(100)).unwrap().id());
+        assert_eq!(10, lookup.find(199, Some(109)).unwrap().id());
+        let index = lookup.find_index_where(100, Some(100), |map| map.id() != 10).unwrap();
+        assert_eq!(9, lookup.mappings()[index].id());
+        assert_eq!(33, lookup.find(200, Some(100)).unwrap().id());
+        assert_eq!(33, lookup.find(u64::MAX, Some(100)).unwrap().id());
+    }
+
+    #[test]
     fn lookup() {        let mappings = vec!(
             new_map(0, 0, 1023, 1),
             new_map(0, 2048, 3071, 3),

@@ -68,20 +68,52 @@ impl AddressLookup {
 
         items.sort_by(|a,b| a.address.cmp(&b.address));
 
-        for item in items {
-            if item.valid {
-                index_set.insert(item.index);
-            } else {
-                index_set.remove(&item.index);
+        let mut cursor = 0;
+        while cursor < items.len() {
+            let address = items[cursor].address;
+            while cursor < items.len() && items[cursor].address == address {
+                let item = &items[cursor];
+                if item.valid {
+                    index_set.insert(item.index);
+                } else {
+                    index_set.remove(&item.index);
+                }
+                cursor += 1;
             }
 
             for index in index_set.iter() {
                 self.lookup.push(
                     AddressLookupItem::new(
-                        item.address,
+                        address,
                         *index,
                         true));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reused_ranges_store_each_candidate_once_per_boundary() {
+        let mut items = vec![AddressLookupItem::new(0, 0, true)];
+        for index in 1..=5000 {
+            items.push(AddressLookupItem::new(100, index, true));
+            items.push(AddressLookupItem::new(200, index, false));
+        }
+        items.push(AddressLookupItem::new(200, 5001, true));
+        let mut lookup = AddressLookup::default();
+        lookup.update(&mut items);
+
+        assert_eq!(5004, lookup.lookup.len());
+        let mut inside = lookup.find(100).to_vec();
+        inside.sort_unstable();
+        assert_eq!((0..=5000).collect::<Vec<_>>(), inside);
+        let mut after = lookup.find(200).to_vec();
+        after.sort_unstable();
+        assert_eq!(vec![0, 5001], after);
+        assert_eq!(vec![0], lookup.find(99));
     }
 }
