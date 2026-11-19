@@ -823,6 +823,7 @@ pub(crate) struct OSExportMachine {
     dev_nodes: ExportDevNodeLookup,
     va_offsets: HashMap<ExportDevNode, u64>,
     path_buf: Writable<PathBuf>,
+    bpf_lifecycle_unavailable: bool,
 }
 
 impl OSExportMachine {
@@ -832,6 +833,7 @@ impl OSExportMachine {
             dev_nodes: ExportDevNodeLookup::new(),
             va_offsets: HashMap::new(),
             path_buf: Writable::new(PathBuf::new()),
+            bpf_lifecycle_unavailable: false,
         }
     }
 
@@ -1682,6 +1684,11 @@ impl ExportMachineOSHooks for ExportMachine {
             let mut end = kernel_symbols.end();
             let mut in_dynamic_range = false;
 
+            if self.os.bpf_lifecycle_unavailable &&
+                kernel_symbols.name().starts_with("[bpf]") {
+                continue;
+            }
+
             /* An unbounded or invalid kallsyms extent is represented by
              * end == start. Do not turn that sentinel into a range. */
             if end <= start {
@@ -2443,7 +2450,13 @@ fn loaded_bpf_functions() -> Vec<LoadedBpfFunction> {
 fn snapshot_bpf_programs(
     machine: &mut ExportMachine,
     functions: Vec<LoadedBpfFunction>,
-    completed_before_stop: bool) {
+    completed_before_stop: bool,
+    system_wide_ksymbols: bool) {
+    if !system_wide_ksymbols {
+        warn!("BPF snapshot discarded because system-wide kernel symbol lifecycle \
+            collection was unavailable");
+        return;
+    }
     if !completed_before_stop {
         warn!("BPF snapshot did not complete before recording stopped; discarding it \
             to avoid attributing programs observed after the recording");
@@ -2506,9 +2519,16 @@ impl UniversalExporterOSHooks for UniversalExporter {
             session.enable()?;
 
             std::thread::scope(|scope| -> anyhow::Result<()> {
-                let snapshot = if ksymbol_records_supported() {
+                let system_wide_ksymbols = session.has_system_wide_ksymbols();
+                exporter.borrow_mut().os.bpf_lifecycle_unavailable =
+                    ksymbol_records_supported() && !system_wide_ksymbols;
+                let snapshot = if system_wide_ksymbols {
                     Some(scope.spawn(loaded_bpf_functions))
                 } else {
+                    if ksymbol_records_supported() {
+                        warn!("Skipping BPF snapshot because system-wide kernel symbol \
+                            lifecycle collection was unavailable");
+                    }
                     None
                 };
 
@@ -2529,7 +2549,8 @@ impl UniversalExporterOSHooks for UniversalExporter {
                     let functions = handle.join().map_err(|_| {
                         anyhow::anyhow!("BPF snapshot thread panicked")
                     })?;
-                    snapshot_bpf_programs(&mut exporter.borrow_mut(), functions, snapshot_completed);
+                    snapshot_bpf_programs(
+                        &mut exporter.borrow_mut(), functions, snapshot_completed, system_wide_ksymbols);
                 }
                 session.parse_all()?;
                 Ok(())
@@ -2732,9 +2753,27 @@ mod tests {
             name_is_exact: true,
             tag_is_known: true,
         }];
-        snapshot_bpf_programs(&mut machine, functions, false);
+        snapshot_bpf_programs(&mut machine, functions, false, true);
         machine.kernel_dynamic_symbols.apply_snapshots();
         assert!(machine.kernel_dynamic_symbols().is_empty());
+    }
+
+    #[test]
+    fn missing_system_wide_lifecycle_does_not_backdate_reused_bpf_address() {
+        let mut machine = kernel_test_machine();
+        machine.os.bpf_lifecycle_unavailable = true;
+        snapshot_bpf_programs(&mut machine, vec![LoadedBpfFunction {
+            time: 3 * SEC, start: BPF_X, len: 64,
+            name: "bpf_prog_replacement".to_string(),
+            name_is_exact: true, tag_is_known: true,
+        }], true, false);
+        add_kernel_sample(&mut machine, 10, SEC, &[BPF_X]);
+        add_kernel_sample(&mut machine, 10, 4 * SEC, &[BPF_X]);
+        machine.add_kernel_mappings_with(&mut KallsymsMock::new(vec![
+            (BPF_X, BPF_X + 63, "[bpf] bpf_prog_replacement"),
+        ]));
+        assert_eq!(None, resolve_kernel(&machine, 10, BPF_X, SEC));
+        assert_eq!(None, resolve_kernel(&machine, 10, BPF_X, 4 * SEC));
     }
 
     #[test]
@@ -2794,7 +2833,7 @@ mod tests {
         let expected = format!("[bpf] {}", new);
         add_bpf(&mut machine, SEC, BPF_X, 64, false, &expected);
         add_bpf(&mut machine, 4 * SEC, BPF_X, 64, true, &expected);
-        snapshot_bpf_programs(&mut machine, functions, true);
+        snapshot_bpf_programs(&mut machine, functions, true, true);
         add_kernel_sample(&mut machine, 10, 3 * SEC, &[BPF_X]);
         add_kernel_sample(&mut machine, 10, 5 * SEC, &[BPF_X]);
         machine.add_kernel_mappings_with(&mut KallsymsMock::new(vec![]));
@@ -2811,7 +2850,7 @@ mod tests {
             time: 3 * SEC, start: BPF_X, len: 64, name: "replacement".to_string(),
             name_is_exact: true,
             tag_is_known: true,
-        }], true);
+        }], true, true);
         machine.kernel_dynamic_symbols.apply_snapshots();
         assert_eq!(None, machine.kernel_dynamic_symbols().find(BPF_X, SEC));
         assert_eq!(2 * SEC, machine.kernel_dynamic_symbols().find(BPF_X, 3 * SEC).unwrap().load_time());
@@ -2829,7 +2868,7 @@ mod tests {
             name: "bpf_prog_1234567890abcdef_program".to_string(),
             name_is_exact: false,
             tag_is_known: true,
-        }], true);
+        }], true, true);
         add_kernel_sample(&mut machine, 10, 3 * SEC, &[BPF_X]);
         add_kernel_sample(&mut machine, 10, 5 * SEC, &[BPF_X]);
         machine.add_kernel_mappings_with(&mut KallsymsMock::new(vec![]));
@@ -2847,7 +2886,7 @@ mod tests {
             name: "bpf_prog_fedcba0987654321_new".to_string(),
             name_is_exact: false,
             tag_is_known: true,
-        }], true);
+        }], true, true);
         add_kernel_sample(&mut machine, 10, 3 * SEC, &[BPF_X]);
         machine.add_kernel_mappings_with(&mut KallsymsMock::new(vec![]));
         assert_eq!(
@@ -2866,7 +2905,7 @@ mod tests {
             name: "bpf_prog_fedcba0987654321_program".to_string(),
             name_is_exact: false,
             tag_is_known: false,
-        }], true);
+        }], true, true);
         add_kernel_sample(&mut machine, 10, 3 * SEC, &[BPF_X]);
         add_kernel_sample(&mut machine, 10, 5 * SEC, &[BPF_X]);
         machine.add_kernel_mappings_with(&mut KallsymsMock::new(vec![]));

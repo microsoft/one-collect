@@ -216,6 +216,9 @@ pub trait PerfDataSource {
     #[doc(hidden)]
     fn reclaim_optional_fds(&mut self) -> bool { false }
 
+    #[doc(hidden)]
+    fn has_system_wide_ksymbols(&self) -> bool { false }
+
     fn add_event(
         &mut self,
         event: &Event) -> IOResult<()>;
@@ -676,6 +679,10 @@ impl PerfSession {
         &mut self,
         event: Option<&Event>) -> IOResult<Vec<PerfDataFile>> {
         self.source.create_bpf_files(event)
+    }
+
+    pub(crate) fn has_system_wide_ksymbols(&self) -> bool {
+        self.source.has_system_wide_ksymbols()
     }
 
     fn open_bpf_map_with_retry(

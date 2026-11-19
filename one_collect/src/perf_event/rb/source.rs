@@ -521,6 +521,7 @@ pub struct RingBufDataSource {
     leader_ids: HashMap<u32, u64>,
     ring_bufs: HashMap<u64, CpuRingBuf>,
     ksymbol_buf_ids: HashSet<u64>,
+    system_wide_ksymbols: bool,
     pages: usize,
     enabled: bool,
     recording_started: bool,
@@ -558,6 +559,7 @@ impl RingBufDataSource {
             leader_ids: HashMap::new(),
             ring_bufs: HashMap::new(),
             ksymbol_buf_ids: HashSet::new(),
+            system_wide_ksymbols: false,
             pages,
             target_pids,
             target_cpus,
@@ -781,6 +783,7 @@ impl RingBufDataSource {
         } else {
             kernel_builder.build_without_ksymbol_records()
         };
+        let leader_ksymbols = pids.is_empty() && kernel_builder.ksymbol_only().is_some();
 
         self.cpu_to_reader_index.resize(cpu_count() as usize, None);
 
@@ -950,12 +953,14 @@ impl RingBufDataSource {
          * Use one scope at a time: duplicate task and CPU subscriptions can
          * corrupt ksymbol record trailers on some kernels.
          */
+        self.system_wide_ksymbols = leader_ksymbols;
         if !pids.is_empty() {
             if let Some(ksymbols) = self.kernel_builder.as_ref()
                 .and_then(|builder| builder.ksymbol_only()) {
                 let before: HashSet<u64> = self.ring_bufs.keys().copied().collect();
-                if let Err(err) = Self::add_cpu_bufs(
-                    None, &None, &self.leader_ids, &mut self.ring_bufs, &ksymbols, None) {
+                let result = Self::add_cpu_bufs(
+                    None, &None, &self.leader_ids, &mut self.ring_bufs, &ksymbols, None);
+                if let Err(err) = result {
                     Self::remove_new_bufs(&mut self.ring_bufs, &before);
                     warn!("Unable to observe kernel dynamic symbols system wide ({}); \
                         attempting task-scoped collection", err);
@@ -972,6 +977,8 @@ impl RingBufDataSource {
                             break;
                         }
                     }
+                } else {
+                    self.system_wide_ksymbols = true;
                 }
                 self.ksymbol_buf_ids.extend(
                     self.ring_bufs.keys().filter(|id| !before.contains(id)).copied());
@@ -1211,6 +1218,12 @@ impl PerfDataSource for RingBufDataSource {
             &mut self.ksymbol_buf_ids,
             !self.recording_started,
             "a BPF map")
+    }
+
+    fn has_system_wide_ksymbols(&self) -> bool {
+        self.system_wide_ksymbols &&
+            (self.target_pids.as_ref().map_or(true, |pids| pids.is_empty()) ||
+             !self.ksymbol_buf_ids.is_empty())
     }
 
     fn create_bpf_files(
@@ -1592,6 +1605,26 @@ mod tests {
         let mut buf = CpuRingBuf::new(0, attributes);
         buf.fd = Some(descriptor.into_raw_fd());
         (buf, peer)
+    }
+
+    #[test]
+    fn snapshot_coverage_requires_system_wide_ksymbols_that_remain_open() {
+        let mut source = RingBufDataSource::new(
+            1, Some(vec![123]), None, None, None, None, None, None, None, None);
+        let (optional, _peer) = test_open_buf(Rc::new(RingBufBuilder::common_attributes()));
+        source.ring_bufs.insert(1, optional);
+        source.ksymbol_buf_ids.insert(1);
+
+        assert!(!source.has_system_wide_ksymbols());
+        source.system_wide_ksymbols = true;
+        assert!(source.has_system_wide_ksymbols());
+        assert!(source.reclaim_optional_fds());
+        assert!(!source.has_system_wide_ksymbols());
+
+        source.target_pids = None;
+        assert!(source.has_system_wide_ksymbols());
+        source.system_wide_ksymbols = false;
+        assert!(!source.has_system_wide_ksymbols());
     }
 
     #[test]
