@@ -507,7 +507,7 @@ impl TdhDecoder {
         // `(Provider, Id, Version)` tuple (their `Id` is commonly `0`, so
         // multiple such events would collapse onto one key), so they can never
         // form a valid `ManifestEventKey`.
-        let source = match find_schema_tl(record) {
+        let source = match record.extended_data_bytes(EVENT_HEADER_EXT_TYPE_EVENT_SCHEMA_TL as u16) {
             Some(schema_tl_bytes) => SchemaSource::TraceLogging(schema_tl_bytes),
             None => {
                 if (record.EventHeader.Flags & EVENT_HEADER_FLAG_CLASSIC_HEADER) != 0 {
@@ -880,42 +880,16 @@ fn walk_properties(
 
 // ── Internal helpers ────────────────────────────────────────────────
 
-/// Finds the TraceLogging schema metadata in the event's extended-data.
-///
-/// Returns `None` when the event carries no (or an empty) SCHEMA_TL item,
-/// which is the signal for [`TdhDecoder::decode`] to take the manifest path.
-fn find_schema_tl(record: &EVENT_RECORD) -> Option<&[u8]> {
-    let item_ptr = record
-        .find_extended_data(EVENT_HEADER_EXT_TYPE_EVENT_SCHEMA_TL as u16)?;
-    let item = unsafe { &*item_ptr };
-    if item.DataPtr == 0 || item.DataSize == 0 {
-        return None;
-    }
-    Some(unsafe {
-        std::slice::from_raw_parts(item.DataPtr as *const u8, item.DataSize as usize)
-    })
-}
-
 /// Borrows the UTF-8 provider name from an event's provider traits.
 ///
 /// Provider traits begin with a little-endian total length followed by a
 /// NUL-terminated provider name. Optional traits may follow the name.
 fn provider_name_from_traits(record: &EVENT_RECORD) -> Option<&str> {
-    let item_ptr = record
-        .find_extended_data(EVENT_HEADER_EXT_TYPE_PROV_TRAITS as u16)?;
-    // SAFETY: `find_extended_data` returns a pointer to an item in the
-    // `EVENT_RECORD`'s aligned extended-data array, which remains valid for
-    // the lifetime of `record`.
-    let item = unsafe { &*item_ptr };
-    if item.DataPtr == 0 || item.DataSize < 3 {
+    let data = record.extended_data_bytes(EVENT_HEADER_EXT_TYPE_PROV_TRAITS as u16)?;
+    if data.len() < 3 {
         return None;
     }
 
-    // SAFETY: ETW guarantees that a non-null extended-data `DataPtr` points
-    // to `DataSize` initialized bytes that remain valid with the record.
-    let data = unsafe {
-        std::slice::from_raw_parts(item.DataPtr as *const u8, item.DataSize as usize)
-    };
     let traits_len = u16::from_le_bytes([data[0], data[1]]) as usize;
     if traits_len < 3 || traits_len > data.len() {
         return None;

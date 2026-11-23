@@ -562,6 +562,10 @@ pub(crate) trait EventRecordExt {
         &self,
         ext_type: u16,
     ) -> Option<*const EVENT_HEADER_EXTENDED_DATA_ITEM>;
+
+    /// Borrows the first matching item's payload from the record. Returns
+    /// `None` if the item is absent, empty, or has a null data pointer.
+    fn extended_data_bytes(&self, ext_type: u16) -> Option<&[u8]>;
 }
 
 // SAFETY guard for the `provider_guid` / `activity_guid` transmutes below.
@@ -650,6 +654,21 @@ impl EventRecordExt for EVENT_RECORD {
             }
         }
         None
+    }
+
+    fn extended_data_bytes(&self, ext_type: u16) -> Option<&[u8]> {
+        let item = self.find_extended_data(ext_type)?;
+        // SAFETY: The item is in this record's extended-data array. ETW keeps
+        // that array and the DataSize initialized bytes at a non-null DataPtr
+        // readable for the callback; the slice borrows from the record.
+        unsafe {
+            let item = &*item;
+            let data = item.DataPtr as *const u8;
+            if data.is_null() || item.DataSize == 0 {
+                return None;
+            }
+            Some(std::slice::from_raw_parts(data, usize::from(item.DataSize)))
+        }
     }
 }
 

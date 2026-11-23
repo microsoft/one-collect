@@ -231,18 +231,7 @@ impl AncillaryData {
     /// opaque bytes. The borrow is valid for the duration of the ETW callback
     /// (same as `&self`).
     pub fn container_id(&self) -> Option<&[u8]> {
-        let ext = self.find_ext(abi::EVENT_HEADER_EXT_TYPE_CONTAINER_ID)?;
-        // SAFETY: `ext` points into the current event's extended data array,
-        // and a non-null `DataPtr` is readable for `DataSize` bytes while the
-        // event is being processed.
-        unsafe {
-            let size = (*ext).DataSize as usize;
-            let data = (*ext).DataPtr as usize as *const u8;
-            if size == 0 || data.is_null() {
-                return None;
-            }
-            Some(std::slice::from_raw_parts(data, size))
-        }
+        self.record()?.extended_data_bytes(abi::EVENT_HEADER_EXT_TYPE_CONTAINER_ID as u16)
     }
 
     pub fn id(&self) -> u16 {
