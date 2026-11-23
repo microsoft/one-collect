@@ -220,6 +220,31 @@ impl AncillaryData {
         None
     }
 
+    /// Returns the raw payload of the current event's
+    /// `EVENT_HEADER_EXT_TYPE_CONTAINER_ID` extended data item, or `None`
+    /// when the item is absent or empty.
+    ///
+    /// Windows adds the item to events from process-isolated containers when
+    /// the provider is enabled with [`PROPERTY_SOURCE_CONTAINER_TRACKING`].
+    /// The payload format is undocumented (Windows Server 2025 sends an
+    /// uppercase GUID string without a trailing NUL), so it is returned as
+    /// opaque bytes. The borrow is valid for the duration of the ETW callback
+    /// (same as `&self`).
+    pub fn container_id(&self) -> Option<&[u8]> {
+        let ext = self.find_ext(abi::EVENT_HEADER_EXT_TYPE_CONTAINER_ID)?;
+        // SAFETY: `ext` points into the current event's extended data array,
+        // and a non-null `DataPtr` is readable for `DataSize` bytes while the
+        // event is being processed.
+        unsafe {
+            let size = (*ext).DataSize as usize;
+            let data = (*ext).DataPtr as usize as *const u8;
+            if size == 0 || data.is_null() {
+                return None;
+            }
+            Some(std::slice::from_raw_parts(data, size))
+        }
+    }
+
     pub fn id(&self) -> u16 {
         match self.event {
             Some(event) => {
@@ -1556,6 +1581,60 @@ mod tests {
         assert!(
             query_stats(0).is_err(),
             "query_stats(0) must reject the invalid (zero) handle");
+    }
+
+    fn ext_item(ext_type: u32, data: &[u8]) -> EVENT_HEADER_EXTENDED_DATA_ITEM {
+        let mut item: EVENT_HEADER_EXTENDED_DATA_ITEM = unsafe { std::mem::zeroed() };
+        item.ExtType = ext_type as u16;
+        item.DataSize = data.len() as u16;
+        item.DataPtr = data.as_ptr() as u64;
+        item
+    }
+
+    fn container_id_of(items: &mut [EVENT_HEADER_EXTENDED_DATA_ITEM]) -> Option<Vec<u8>> {
+        let mut record: EVENT_RECORD = unsafe { std::mem::zeroed() };
+        record.ExtendedDataCount = items.len() as u16;
+        record.ExtendedData = items.as_mut_ptr();
+        let ancillary = AncillaryData { event: Some(&record as *const _) };
+        ancillary.container_id().map(<[u8]>::to_vec)
+    }
+
+    /// Scenario: The extended data array has unrelated items (related
+    /// activity ID, SID) before a container ID item, and a second container
+    /// ID item after it.
+    /// Guarantees: `container_id` skips unrelated items and returns the first
+    /// container ID payload byte-for-byte.
+    #[test]
+    fn container_id_returns_first_container_id_item() {
+        let id = b"EFF73D44-44E9-5C45-B432-7F67133D3923";
+        let mut items = [
+            ext_item(abi::EVENT_HEADER_EXT_TYPE_RELATED_ACTIVITYID, &[0xAA; 16]),
+            ext_item(abi::EVENT_HEADER_EXT_TYPE_SID, &[0xBB; 28]),
+            ext_item(abi::EVENT_HEADER_EXT_TYPE_CONTAINER_ID, id),
+            ext_item(abi::EVENT_HEADER_EXT_TYPE_CONTAINER_ID, b"second"),
+        ];
+        assert_eq!(container_id_of(&mut items).as_deref(), Some(&id[..]));
+    }
+
+    /// Scenario: No event is being processed, the event has no extended
+    /// data, it has only unrelated items, or its container ID item has
+    /// `DataSize` 0 or a null `DataPtr`.
+    /// Guarantees: `container_id` returns `None` in every case and never
+    /// reads through a null pointer.
+    #[test]
+    fn container_id_absent_or_empty_is_none() {
+        assert_eq!(AncillaryData::default().container_id(), None);
+        assert_eq!(container_id_of(&mut []), None);
+        assert_eq!(
+            container_id_of(&mut [ext_item(abi::EVENT_HEADER_EXT_TYPE_SID, &[0; 28])]),
+            None);
+        assert_eq!(
+            container_id_of(&mut [ext_item(abi::EVENT_HEADER_EXT_TYPE_CONTAINER_ID, b"")]),
+            None);
+        let mut null_data = ext_item(abi::EVENT_HEADER_EXT_TYPE_CONTAINER_ID, b"");
+        null_data.DataSize = 36;
+        null_data.DataPtr = 0;
+        assert_eq!(container_id_of(&mut [null_data]), None);
     }
 
     #[ignore]
