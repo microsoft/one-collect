@@ -710,6 +710,7 @@ impl TraceEnable {
         self.callstack_keyword = Some(keyword);
     }
 
+    /// Omits filter descriptors without dropping explicitly requested provider properties.
     pub fn ensure_no_filtering(
         &mut self) {
         self.no_filtering = true;
@@ -896,11 +897,11 @@ impl TraceEnable {
                 filters.push(callstack_kw);
             }
 
-            params.EnableProperty |= self.properties;
             params.EnableFilterDesc = filters.as_ptr();
             params.FilterDescCount = filters.len() as u32;
         }
 
+        params.EnableProperty |= self.properties;
         enable(&params)
     }
 }
@@ -1263,6 +1264,23 @@ impl Drop for TraceSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_filtering_preserves_explicit_provider_properties() {
+        let mut enable = TraceEnable::new(Guid::default());
+        let properties = EVENT_ENABLE_PROPERTY_ENABLE_SILOS
+            | EVENT_ENABLE_PROPERTY_SOURCE_CONTAINER_TRACKING;
+        enable.ensure_property(properties);
+        enable.add_event(42, true);
+        enable.ensure_no_filtering();
+
+        enable.with_enable_parameters(&None, |params| {
+            assert_eq!(params.EnableProperty, properties);
+            assert_eq!(params.FilterDescCount, 0);
+            assert!(params.EnableFilterDesc.is_null());
+            Ok(())
+        }).unwrap();
+    }
 
     #[test]
     fn ordinary_session_does_not_use_system_logger_mode() {
