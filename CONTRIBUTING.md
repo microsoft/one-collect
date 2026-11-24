@@ -85,6 +85,9 @@ it also installs a test manifest.
 
 ### Architecture Overview
 
+For proposed guidance on optional capabilities and their dependencies, see the
+[Cargo feature design guidelines](docs/cargo-features-design.md).
+
 This framework is highly composable and built around event pipelines:
 
 - Events contain format details for decoding data
