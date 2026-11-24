@@ -3,6 +3,8 @@
 
 use std::hash::BuildHasherDefault;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self};
 
 use twox_hash::XxHash64;
@@ -1219,6 +1221,9 @@ impl EtwSession {
         map
     }
 
+    /// If the consumer fails, stop and join the controller before returning the
+    /// consumer error. A controller cancelled while waiting for `until` runs
+    /// stopping hooks but skips rundown. Callbacks already running must return.
     pub fn parse_until(
         mut self,
         name: &str,
@@ -1245,6 +1250,13 @@ impl EtwSession {
 
         session.start()?;
 
+        self.process_session(&session, until)
+    }
+
+    fn process_session(
+        mut self,
+        session: &TraceSession,
+        until: impl Fn() -> bool + Send + 'static) -> anyhow::Result<()> {
         let handle = session.handle();
         let session_id = session.id();
 
@@ -1270,6 +1282,8 @@ impl EtwSession {
             }
         }
 
+        let consumer_failed = Arc::new(AtomicBool::new(false));
+        let cancelled = consumer_failed.clone();
         let thread = thread::spawn(move || -> anyhow::Result<SessionStats> {
             let context = SessionCallbackContext::new(handle, session_id);
 
@@ -1311,7 +1325,7 @@ impl EtwSession {
             /* Run until told to stop */
             let quantum = std::time::Duration::from_millis(15);
 
-            while !until() {
+            while !cancelled.load(Ordering::Relaxed) && !until() {
                 std::thread::sleep(quantum);
             }
 
@@ -1320,6 +1334,11 @@ impl EtwSession {
                 for callback in callbacks {
                     callback(&context);
                 }
+            }
+
+            // Rundown callbacks may wait for events that can no longer be delivered.
+            if cancelled.load(Ordering::Relaxed) {
+                return TraceSession::remote_stop(handle);
             }
 
             /* Enable rundown providers first */
@@ -1429,19 +1448,27 @@ impl EtwSession {
             }
         }));
 
-        let context = SessionCallbackContext::new(0, session_id);
-
-        /* Run stopped hooks */
-        if let Some(callbacks) = &self.stopped_callbacks {
-            for callback in callbacks {
-                callback(&context);
+        let notify_stopped = || {
+            let context = SessionCallbackContext::new(0, session_id);
+            if let Some(callbacks) = &self.stopped_callbacks {
+                for callback in callbacks {
+                    callback(&context);
+                }
             }
+        };
+
+        if let Err(error) = result {
+            consumer_failed.store(true, Ordering::Relaxed);
+            match thread.join() {
+                Ok(Ok(_)) => {},
+                Ok(Err(cleanup)) => tracing::warn!(%cleanup, "ETW controller also failed during consumer shutdown"),
+                Err(_) => tracing::warn!("ETW controller panicked during consumer shutdown"),
+            }
+            notify_stopped();
+            return Err(error);
         }
 
-        if result.is_err() {
-            return result;
-        }
-
+        notify_stopped();
         /*
          * The control thread owns the stop operation and returns the final
          * properties populated by ETW. Do not run completion callbacks when
@@ -1466,6 +1493,45 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::Duration;
+
+    #[test]
+    fn consumer_failure_joins_controller_with_false_stop_predicate() {
+        use std::sync::mpsc;
+
+        let (done, result) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let mut session = EtwSession::new();
+            let (hooks, calls) = mpsc::channel();
+            let stopping = hooks.clone();
+            session.add_stopping_callback(move |_| stopping.send("stopping").unwrap());
+            let rundown = hooks.clone();
+            session.add_rundown_callback(move |_| rundown.send("rundown").unwrap());
+            let stopped = hooks.clone();
+            session.add_stopped_callback(move |_| stopped.send("stopped").unwrap());
+            session.add_completed_callback(move |_| hooks.send("completed").unwrap());
+
+            // No live session: the native consumer fails without needing ETW permissions.
+            let name = format!("one_collect_missing_controller_test_{}", std::process::id());
+            let trace = TraceSession::new(name, 64, false);
+            let controller_state = Arc::new(());
+            let held = controller_state.clone();
+            let error = session.process_session(&trace, move || {
+                let _ = &held;
+                false
+            }).unwrap_err();
+            let hooks = calls.try_iter().collect::<Vec<_>>();
+            done.send((error, Arc::strong_count(&controller_state), hooks)).unwrap();
+        });
+
+        let (error, owners, hooks) = result.recv_timeout(Duration::from_secs(5))
+            .expect("consumer failure must not wait for the stop predicate");
+        worker.join().unwrap();
+        assert_eq!(owners, 1, "the controller still owns the stop predicate");
+        assert_eq!(hooks, ["stopping", "stopped"]);
+        let message = error.to_string();
+        assert!(message.starts_with("OpenTraceW failed") || message.starts_with("ProcessTrace failed"),
+            "expected the consumer error, got {message}");
+    }
 
     #[test]
     fn ordinary_providers_do_not_request_system_or_debug_capabilities() {
