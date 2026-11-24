@@ -1197,28 +1197,6 @@ impl EtwSession {
             move || { now.elapsed() >= duration })
     }
 
-    fn take_enabled(
-        &mut self) -> HashMap<Guid, TraceEnable> {
-        let mut map = HashMap::default();
-
-        for (k,v) in self.enabled.drain() {
-            map.insert(k, v);
-        }
-
-        map
-    }
-
-    fn take_events(
-        &mut self) -> ProviderLookup {
-        let mut map = HashMap::default();
-
-        for (k,v) in self.providers.drain() {
-            map.insert(k, v);
-        }
-
-        map
-    }
-
     pub fn parse_until(
         mut self,
         name: &str,
@@ -1254,8 +1232,8 @@ impl EtwSession {
 
         let target_pids = self.target_pids.take();
         let target_cpus = self.target_cpus.take();
-        let enabled = self.take_enabled();
-        let mut events = self.take_events();
+        let enabled = self.enabled;
+        let mut events = self.providers;
 
         let starting_callbacks = self.starting_callbacks.take();
         let started_callbacks = self.started_callbacks.take();
