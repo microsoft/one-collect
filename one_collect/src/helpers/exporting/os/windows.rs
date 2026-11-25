@@ -1072,11 +1072,9 @@ impl ExportSessionHelp for EtwSession {
 }
 
 #[cfg(target_os = "windows")]
-impl UniversalExporterOSHooks for UniversalExporter {
-    fn os_parse_until(
-        mut self,
-        name: &str,
-        until: impl Fn() -> bool + Send + 'static) -> anyhow::Result<Writable<ExportMachine>> {
+impl UniversalExporter {
+    pub(crate) fn os_parse_controlled(mut self, name: &str, stop: crate::stop::CaptureStop)
+        -> anyhow::Result<Writable<ExportMachine>> {
         use crate::helpers::callstack::*;
 
         let settings = self.settings()?;
@@ -1131,7 +1129,10 @@ impl UniversalExporterOSHooks for UniversalExporter {
 
             /* Parse as normal */
             exporter.borrow_mut().mark_start();
-            session.parse_until(name, until)?;
+            match stop {
+                crate::stop::CaptureStop::Predicate(until) => session.parse_until(name, until)?,
+                crate::stop::CaptureStop::Token(token) => session.parse_notified(name, token)?,
+            }
             exporter.borrow_mut().mark_end();
 
             /* Attempt to update the actual start times via callback */

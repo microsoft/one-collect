@@ -391,10 +391,9 @@ impl SessionCallbackContext {
     /// The raw ETW session handle for this callback's session.
     ///
     /// Valid for the duration of the session (from the `started`
-    /// callback until the session is stopped/torn down). Capturing this
-    /// value lets other threads poll the session via [`query_stats`];
-    /// the handle becomes stale after teardown, at which point queries
-    /// fail rather than return stale data.
+    /// callback until the session is stopped/torn down). Windows can reuse
+    /// this value immediately after stop. It is zero for teardown hooks if
+    /// the original logger is already gone.
     pub fn handle(&self) -> u64 { 
         self.handle
     }
@@ -402,7 +401,7 @@ impl SessionCallbackContext {
     pub fn id(&self) -> u64 { self.id }
 
     pub fn flush_trace(&self) {
-        abi::flush_trace(self.handle);
+        if self.handle != 0 { abi::flush_trace(self.handle); }
     }
 }
 
@@ -1220,9 +1219,42 @@ impl EtwSession {
     }
 
     pub fn parse_until(
-        mut self,
+        self,
         name: &str,
         until: impl Fn() -> bool + Send + 'static) -> anyhow::Result<()> {
+        self.parse_controlled(name, move || {
+            while !until() {
+                std::thread::sleep(std::time::Duration::from_millis(15));
+            }
+        }, None)
+    }
+
+    /// Consume events until a stop request, then run rundown and wait for teardown.
+    /// An already-stopped token returns [`crate::ParseCancelledBeforeStart`] without starting ETW.
+    /// If another in-process start replaces this logger before its consumer opens,
+    /// this call fails rather than opening the replacement. A native stop error
+    /// is still reported if the subsequent cleanup retry succeeds.
+    /// A request during startup still runs teardown. If Windows reports a processing
+    /// error, it is returned after the controller is joined, even if no events arrived.
+    /// Coordinate with other processes that control the same logger name: wait for
+    /// teardown to finish before reusing it.
+    #[cfg(target_os = "windows")]
+    pub fn parse_until_stop_requested(self, name: &str, token: crate::StopToken) -> anyhow::Result<()> {
+        token.check_before_start()?;
+        self.parse_notified(name, token)
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn parse_notified(self, name: &str, token: crate::StopToken) -> anyhow::Result<()> {
+        let cancel = token.handle();
+        self.parse_controlled(name, move || token.wait(), Some(cancel))
+    }
+
+    fn parse_controlled(
+        mut self,
+        name: &str,
+        wait: impl FnOnce() + Send + 'static,
+        cancel: Option<crate::StopHandle>) -> anyhow::Result<()> {
         /* Run self mutating callbacks for on-demand dynamic hooks */
         if let Some(callbacks) = self.built_callbacks.take() {
             for callback in callbacks {
@@ -1243,13 +1275,14 @@ impl EtwSession {
             session.set_profile_interval(interval)?;
         }
 
-        session.start()?;
+        let stop_owner = session.start()?;
+        let logger = stop_owner.0.clone();
 
         let handle = session.handle();
         let session_id = session.id();
 
         if !self.kernel_callstacks.is_empty() {
-            session.enable_kernel_callstacks(&self.kernel_callstacks)?;
+            logger.with_current(|| session.enable_kernel_callstacks(&self.kernel_callstacks))?;
         }
 
         let target_pids = self.target_pids.take();
@@ -1270,18 +1303,18 @@ impl EtwSession {
             }
         }
 
-        let thread = thread::spawn(move || -> anyhow::Result<SessionStats> {
+        let control = move || -> anyhow::Result<SessionStats> {
             let context = SessionCallbackContext::new(handle, session_id);
 
             /* Enable capture environments first */
-            for enable in enabled.values() {
-                if enable.needs_capture_environment() {
-                    if let Err(err) = enable.enable(handle, &target_pids) {
-                        let _ = TraceSession::remote_stop(handle);
-                        return Err(err);
+            stop_owner.0.with_current(|| {
+                for enable in enabled.values() {
+                    if enable.needs_capture_environment() {
+                        enable.enable(handle, &target_pids)?;
                     }
                 }
-            }
+                Ok(())
+            })?;
 
             /* Run starting hooks */
             if let Some(callbacks) = starting_callbacks {
@@ -1291,15 +1324,14 @@ impl EtwSession {
             }
 
             /* Enable non-capture environments next */
-            for enable in enabled.values() {
-                if !enable.needs_capture_environment() &&
-                   !enable.needs_rundown() {
-                    if let Err(err) = enable.enable(handle, &target_pids) {
-                        let _ = TraceSession::remote_stop(handle);
-                        return Err(err);
+            stop_owner.0.with_current(|| {
+                for enable in enabled.values() {
+                    if !enable.needs_capture_environment() && !enable.needs_rundown() {
+                        enable.enable(handle, &target_pids)?;
                     }
                 }
-            }
+                Ok(())
+            })?;
 
             /* Run started hooks */
             if let Some(callbacks) = started_callbacks {
@@ -1309,42 +1341,39 @@ impl EtwSession {
             }
 
             /* Run until told to stop */
-            let quantum = std::time::Duration::from_millis(15);
+            wait();
 
-            while !until() {
-                std::thread::sleep(quantum);
-            }
-
-            /* Run stopping hooks */
-            if let Some(callbacks) = stopping_callbacks {
+            // ProcessTrace can end because someone else stopped the logger.
+            // Still run cleanup hooks, but do not give them a recycled slot.
+            let run_hooks = |callbacks: Option<Vec<SendClosure>>| {
+                let Some(callbacks) = callbacks else { return };
                 for callback in callbacks {
+                    let context = SessionCallbackContext::new(stop_owner.0.current_handle(handle), session_id);
                     callback(&context);
                 }
-            }
+            };
+            run_hooks(stopping_callbacks);
 
-            /* Enable rundown providers first */
-            for enable in enabled.values() {
-                if enable.needs_rundown() {
-                    let _ = enable.enable(handle, &target_pids);
+            // A stopping hook can end or replace the session. Never operate on
+            // its retained handle based on an identity check made before the hook.
+            let providers = stop_owner.0.with_current(|| {
+                for enable in enabled.values() {
+                    if enable.needs_rundown() {
+                        let _ = enable.enable(handle, &target_pids);
+                    }
                 }
-            }
-
-            /* Disable non-rundown providers last */
-            for enable in enabled.values() {
-                if !enable.needs_rundown() {
-                    let _ = enable.disable(handle);
+                for enable in enabled.values() {
+                    if !enable.needs_rundown() {
+                        let _ = enable.disable(handle);
+                    }
                 }
-            }
+                Ok(())
+            });
 
-            /* Run rundown hooks */
-            if let Some(callbacks) = rundown_callbacks {
-                for callback in callbacks {
-                    callback(&context);
-                }
-            }
-
-            TraceSession::remote_stop(handle)
-        });
+            run_hooks(rundown_callbacks);
+            providers?;
+            stop_owner.0.stop()
+        };
 
         let ancillary = self.ancillary.clone();
         let error_callback = self.event_error_callback.take();
@@ -1352,7 +1381,7 @@ impl EtwSession {
         let has_pid_filter = !pid_lookup.is_empty();
         let has_cpu_filter = target_cpus.is_some();
 
-        let result = session.process(Box::new(move |event| {
+        let consumer = logger.open_consumer(Box::new(move |event| {
             let cpu_index = event.processor_index();
 
             /* Find events by provider ID */
@@ -1429,18 +1458,44 @@ impl EtwSession {
             }
         }));
 
-        let context = SessionCallbackContext::new(0, session_id);
-
-        /* Run stopped hooks */
-        if let Some(callbacks) = &self.stopped_callbacks {
-            for callback in callbacks {
-                callback(&context);
+        // An already-signaled controller must not stop the trace before OpenTraceW.
+        let (thread, result) = match consumer {
+            Ok(consumer) => {
+                let thread = thread::spawn(control);
+                (Some(thread), consumer.process())
             }
-        }
+            Err(err) => {
+                drop(control); // Release the logger before invoking stopped callbacks.
+                (None, Err(err))
+            }
+        };
+        // With our always-continue buffer callback, a successful ProcessTrace
+        // return means the real-time logger is already stopped.
+        if result.is_ok() { logger.ended(); }
+        let run_stopped = || {
+            let context = SessionCallbackContext::new(0, session_id);
+            if let Some(callbacks) = &self.stopped_callbacks {
+                for callback in callbacks {
+                    callback(&context);
+                }
+            }
+        };
 
-        if result.is_err() {
-            return result;
-        }
+        let join = || thread.map(|thread| thread.join());
+        let stopped = if let Some(handle) = cancel {
+            handle.request_stop();
+            let stopped = join();
+            run_stopped();
+            stopped
+        } else {
+            run_stopped();
+            // An arbitrary legacy predicate may itself block and cannot be cancelled.
+            if result.is_err() {
+                logger.cleanup();
+                return result;
+            }
+            join()
+        };
 
         /*
          * The control thread owns the stop operation and returns the final
@@ -1448,7 +1503,9 @@ impl EtwSession {
          * event processing or session stop failed; consumers rely on these
          * counters being a successful final snapshot.
          */
-        let stats = thread.join().unwrap()?;
+        result?;
+        let stats = stopped.expect("successful processing requires a controller")
+            .map_err(|_| anyhow::anyhow!("ETW controller panicked"))??;
 
         if let Some(callbacks) = &self.completed_callbacks {
             for callback in callbacks {

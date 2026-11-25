@@ -144,6 +144,9 @@ jobs:
       - name: Run etw_session_integration
         working-directory: one_collect
         run: cargo test --locked --test etw_session_integration -- --ignored --nocapture --test-threads=1
+      - name: Verify ETW logger ownership across startup and cleanup
+        working-directory: one_collect
+        run: cargo test --locked --lib etw::abi::tests::logger_ownership_ -- --include-ignored --test-threads=1
 
   # Benchmarks ordered by OS (linux, windows) then platform (glibc, musl)
   bench_linux_glibc_x64:

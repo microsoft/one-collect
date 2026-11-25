@@ -286,6 +286,11 @@ impl CpuReadContext {
     }
 }
 
+enum ReadFrom<'a> {
+    Cpu(&'a CpuReadContext),
+    AllCpus { timeout: Duration },
+}
+
 /// Error returned by [`PerfSession::parse_for_cpu`].
 #[derive(Debug)]
 pub enum ParseForCpuError {
@@ -325,8 +330,44 @@ impl From<TryFromSliceError> for ParseForCpuError {
     }
 }
 
+enum SessionSource {
+    Ring(Box<rb::source::RingBufDataSource>),
+    Custom(Box<dyn PerfDataSource>),
+}
+
+impl std::ops::Deref for SessionSource {
+    type Target = dyn PerfDataSource;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Ring(source) => source.as_ref(),
+            Self::Custom(source) => source.as_ref(),
+        }
+    }
+}
+
+impl std::ops::DerefMut for SessionSource {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            Self::Ring(source) => source.as_mut(),
+            Self::Custom(source) => source.as_mut(),
+        }
+    }
+}
+
+impl SessionSource {
+    #[cfg(target_os = "linux")]
+    fn notified_ring(&mut self) -> IOResult<&mut rb::source::RingBufDataSource> {
+        match self {
+            Self::Ring(source) => Ok(source),
+            Self::Custom(_) => Err(std::io::Error::new(std::io::ErrorKind::Unsupported,
+                "notification-based reads require a ring-buffer session")),
+        }
+    }
+}
+
 pub struct PerfSession {
-    source: Box<dyn PerfDataSource>,
+    source: SessionSource,
     source_enabled: bool,
     events: HashMap<usize, Event>,
     errors: Vec<anyhow::Error>,
@@ -394,6 +435,14 @@ impl Drop for PerfSession {
 impl PerfSession {
     pub fn new(
         source: Box<dyn PerfDataSource>) -> Self {
+        Self::from_source(SessionSource::Custom(source))
+    }
+
+    fn from_ring(source: rb::source::RingBufDataSource) -> Self {
+        Self::from_source(SessionSource::Ring(Box::new(source)))
+    }
+
+    fn from_source(source: SessionSource) -> Self {
         debug!("PerfSession::new: creating new PerfSession");
 
         /* Increase rlimit for open files */
@@ -845,7 +894,7 @@ impl PerfSession {
          * drains it; no cross-CPU merge or re-priming loop is needed. The
          * context carries the resolved reader slot so each read avoids
          * re-looking-up the CPU. */
-        while self.parse_perf_data(None, Some(&ctx))? { }
+        while self.parse_perf_data(ReadFrom::Cpu(&ctx))? { }
 
         self.source.end_reading_cpu(&ctx);
 
@@ -868,22 +917,16 @@ impl PerfSession {
 
     fn parse_perf_data(
         &mut self,
-        perf_data: Option<PerfData>,
-        cpu_ctx: Option<&CpuReadContext>) -> Result<bool, TryFromSliceError> {
-        let perf_data = perf_data.or_else(|| {
-            match cpu_ctx {
-                /* Some: drain one CPU's ring; None: drain across all CPUs. */
-                Some(ctx) => self.source.read_cpu(ctx),
-                None => self.source.read(self.read_timeout),
-            }
-        });
-
-        if perf_data.is_none() {
+        from: ReadFrom<'_>) -> Result<bool, TryFromSliceError> {
+        let record = match from {
+            ReadFrom::Cpu(ctx) => self.source.read_cpu(ctx),
+            ReadFrom::AllCpus { timeout } => self.source.read(timeout),
+        };
+        let Some(perf_data) = record else {
             trace!("parse_perf_data: no data available");
             return Ok(false);
-        }
+        };
 
-        let perf_data = perf_data.unwrap();
         let header = abi::Header::from_slice(perf_data.raw_data)?;
 
         trace!(
@@ -1324,26 +1367,91 @@ impl PerfSession {
         should_stop: impl Fn() -> bool) -> Result<(), TryFromSliceError> {
 
         loop {
-            let mut i: u32 = 0;
-
-            self.source.begin_reading();
-
-            while self.parse_perf_data(None, None)? {
-                /* Ensure we cannot read forever without a should_stop call */
-                if i >= 100 {
-                    break;
-                }
-
-                i += 1;
-            }
-
-            self.source.end_reading();
+            self.drain_batch(self.read_timeout)?;
 
             if should_stop() || !self.source.more() {
                 break;
             }
         }
 
+        Ok(())
+    }
+
+    fn drain_batch(&mut self, timeout: Duration) -> Result<bool, TryFromSliceError> {
+        let mut count = 0;
+        self.source.begin_reading();
+        while count < 101 && self.parse_perf_data(ReadFrom::AllCpus { timeout })? {
+            count += 1;
+        }
+        self.source.end_reading();
+        Ok(count != 0)
+    }
+
+    /// Parse until signaled or the source ends. For a live capture, the caller still
+    /// owns shutdown: call [`Self::disable`] and then [`Self::parse_all`] to drain remaining records.
+    /// An already-stopped token returns [`crate::ParseCancelledBeforeStart`] without reading the source.
+    /// Requires a session built with [`RingBufSessionBuilder`]. For custom data sources
+    /// passed to [`Self::new`], returns [`std::io::ErrorKind::Unsupported`] without
+    /// consuming any records. Use [`Self::parse_until`] with those sources instead.
+    /// When idle, waits for data readiness, a stop request, or the configured
+    /// [read timeout](Self::set_read_timeout) (15 ms by default), whichever comes
+    /// first. The timeout lets the reader deliver records below the wakeup threshold.
+    #[cfg(target_os = "linux")]
+    pub fn parse_until_stop_requested(&mut self, token: crate::StopToken) -> anyhow::Result<()> {
+        token.check_before_start()?;
+        self.parse_notified(&token)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn parse_notified(&mut self, stop: &crate::StopToken) -> anyhow::Result<()> {
+        self.source.notified_ring()?;
+        while !stop.requested() {
+            if self.drain_batch(Duration::ZERO)? { continue; }
+            if !self.source.more() { break; }
+            self.source.notified_ring()?.wait_for_data_or_stop(stop.poll_fd(), self.read_timeout)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn with_environment_capture(
+        &mut self,
+        notified: bool,
+        capture_and_disable: impl FnOnce(&mut Self) -> anyhow::Result<()>) -> anyhow::Result<()> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct CancelOnDrop<'a>(&'a AtomicBool);
+        impl Drop for CancelOnDrop<'_> {
+            fn drop(&mut self) { self.0.store(true, Ordering::Relaxed); }
+        }
+
+        let cancelled = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let (space_needed, drain_requests) = std::sync::mpsc::sync_channel(1);
+            let writer = self.source.take_in_process_writer().map(|mut writer| {
+                writer.configure_export(notified, space_needed);
+                writer
+            });
+            let env = scope.spawn(self.capture_environment_task(writer, || cancelled.load(Ordering::Relaxed)));
+            // Cancel before scope joins on error or unwind; the writer may be waiting for space.
+            let _cancel = CancelOnDrop(&cancelled);
+            capture_and_disable(self)?;
+            self.finish_environment(env, drain_requests)
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn finish_environment(
+        &mut self,
+        env: std::thread::ScopedJoinHandle<'_, ()>,
+        drain_requests: std::sync::mpsc::Receiver<()>) -> anyhow::Result<()> {
+        // Kernel events are disabled. The only remaining producer asks for space when
+        // its ring fills, and dropping its sender wakes us for the final drain.
+        while drain_requests.recv().is_ok() {
+            while self.drain_batch(Duration::ZERO)? {}
+        }
+        env.join().map_err(|_| anyhow::anyhow!("environment capture panicked"))?;
+        while self.drain_batch(Duration::ZERO)? {}
         Ok(())
     }
 
@@ -1356,7 +1464,13 @@ impl PerfSession {
     pub fn spawn_capture_environment(
         &mut self) -> std::thread::JoinHandle<()> {
         let writer = self.source.take_in_process_writer();
+        std::thread::spawn(self.capture_environment_task(writer, || false))
+    }
 
+    fn capture_environment_task<'a>(
+        &self,
+        writer: Option<rb::InProcessRingBufWriter>,
+        cancelled: impl Fn() -> bool + Send + 'a) -> impl FnOnce() + Send + 'a {
         let mut pid_lookup = None;
 
         if let Some(pids) = self.source.target_pids() {
@@ -1372,21 +1486,22 @@ impl PerfSession {
 
         let captures_all = self.capture_env_options.all_mmaps();
 
-        std::thread::spawn(move || {
+        move || {
             if let Some(mut writer) = writer {
                 debug!("capture_environment thread: starting");
-                Self::write_environment_comms(&pid_lookup, &mut writer);
-                Self::write_environment_modules(&pid_lookup, captures_all, &mut writer);
-                writer.flush();
+                Self::write_environment_comms(&pid_lookup, &mut writer, &cancelled);
+                Self::write_environment_modules(&pid_lookup, captures_all, &mut writer, &cancelled);
+                if !cancelled() { writer.flush(); }
                 info!("capture_environment thread: completed");
             }
-        })
+        }
     }
 
     /// Write COMM records for all matching processes into the ring buffer.
     fn write_environment_comms(
         pid_lookup: &Option<HashSet<i32>>,
-        writer: &mut rb::InProcessRingBufWriter) {
+        writer: &mut rb::InProcessRingBufWriter,
+        cancelled: &impl Fn() -> bool) {
         debug!(
             "write_environment_comms: starting, pid_filter={}",
             pid_lookup.is_some()
@@ -1399,7 +1514,7 @@ impl PerfSession {
         let id_bytes = 0u64.to_ne_bytes();
         let mut comm_count = 0;
 
-        procfs::iter_processes(|pid, path_buf| {
+        procfs::iter_processes_until(cancelled, |pid, path_buf| {
             if let Some(pid_lookup) = &pid_lookup {
                 if !pid_lookup.contains(&(pid as i32)) {
                     return;
@@ -1427,7 +1542,7 @@ impl PerfSession {
 
             abi::Header::write(PERF_RECORD_COMM, 0, &event_data, &mut full_data);
 
-            writer.write(&full_data);
+            writer.write_cancellable(&full_data, cancelled);
             comm_count += 1;
         });
 
@@ -1438,7 +1553,8 @@ impl PerfSession {
     fn write_environment_modules(
         pid_lookup: &Option<HashSet<i32>>,
         captures_all: bool,
-        writer: &mut rb::InProcessRingBufWriter) {
+        writer: &mut rb::InProcessRingBufWriter,
+        cancelled: &impl Fn() -> bool) {
         debug!(
             "write_environment_modules: starting, pid_filter={}",
             pid_lookup.is_some()
@@ -1454,7 +1570,7 @@ impl PerfSession {
         let id_bytes = 0u64.to_ne_bytes();
         let mut module_count = 0;
 
-        procfs::iter_modules(|pid, module| {
+        procfs::iter_modules_until(cancelled, |pid, module| {
             /*
              * Note: we intentionally do NOT skip mappings without a backing
              * file path here. Anonymous executable mappings are JIT code
@@ -1511,7 +1627,7 @@ impl PerfSession {
 
             abi::Header::write(PERF_RECORD_MMAP2, 0, &event_data, &mut full_data);
 
-            writer.write(&full_data);
+            writer.write_cancellable(&full_data, cancelled);
             module_count += 1;
         });
 
@@ -1984,6 +2100,34 @@ mod tests {
         /* The ring is now drained, so a second call is a no-op. */
         session.parse_for_cpu(cpu).unwrap();
         assert_eq!(1, count.load(Ordering::Relaxed));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn notified_custom_source_is_rejected_before_consuming_records() {
+        let mut mock = MockData::new(0, 0);
+        let mut record = Vec::new();
+        Header::write(abi::PERF_RECORD_LOST, 0, &[0; 40], &mut record);
+        for _ in 0..256 { mock.push(&record); }
+        let mut session = PerfSession::new(Box::new(mock));
+        let (_stop, token) = crate::StopHandle::pair().unwrap();
+        let count = Arc::new(AtomicUsize::new(0));
+        let seen = count.clone();
+        session.lost_event().add_callback(move |_| {
+            seen.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        });
+        // Skipping a parse must leave the caller-owned session and its input intact.
+        let (early, skipped) = crate::StopHandle::pair().unwrap();
+        early.request_stop();
+        let err = session.parse_until_stop_requested(skipped).unwrap_err();
+        assert!(err.is::<crate::ParseCancelledBeforeStart>());
+        assert_eq!(count.load(Ordering::Relaxed), 0);
+        let err = session.parse_until_stop_requested(token).unwrap_err();
+        assert_eq!(err.downcast_ref::<std::io::Error>().unwrap().kind(), std::io::ErrorKind::Unsupported);
+        assert_eq!(count.load(Ordering::Relaxed), 0);
+        session.parse_all().unwrap();
+        assert_eq!(count.load(Ordering::Relaxed), 256);
     }
 
     #[test]

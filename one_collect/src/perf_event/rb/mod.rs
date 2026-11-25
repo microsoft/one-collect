@@ -364,8 +364,8 @@ impl<T> RingBufBuilder<T> {
     /// buffer has accumulated at least `bytes` of data.
     ///
     /// Sets `FLAG_WATERMARK` and `wakeup_events_watermark` on the
-    /// underlying `perf_event_attr`. A value of `0` keeps the kernel
-    /// default of waking on every event.
+    /// underlying `perf_event_attr`. A value of `0` uses the kernel's
+    /// default byte watermark.
     pub(crate) const fn set_wakeup_watermark(&mut self, bytes: u32) {
         self.attributes.flags |= FLAG_WATERMARK;
         self.attributes.wakeup_events_watermark = bytes;
@@ -1109,6 +1109,7 @@ impl Drop for CpuRingBuf {
 /// alongside real kernel events.
 pub(crate) struct InProcessRingBuf {
     data: Vec<u8>,
+    wake: std::sync::Arc<WriterWake>,
     data_offset: usize,
     data_size: usize,
     data_mask: usize,
@@ -1123,6 +1124,8 @@ pub(crate) struct InProcessRingBuf {
 /// data.
 pub struct InProcessRingBufWriter {
     data: *mut u8,
+    wake: Option<std::sync::Arc<WriterWake>>,
+    space_needed: Option<std::sync::mpsc::SyncSender<()>>,
     data_offset: usize,
     data_size: usize,
     data_mask: usize,
@@ -1134,6 +1137,40 @@ pub struct InProcessRingBufWriter {
 // The ring buffer protocol (single writer, single reader, memory barriers)
 // ensures safe concurrent access with a CpuRingReader on another thread.
 unsafe impl Send for InProcessRingBufWriter {}
+
+#[derive(Default)]
+struct WriterWake {
+    armed: std::sync::atomic::AtomicBool,
+    event: std::sync::OnceLock<File>,
+}
+
+impl WriterWake {
+    #[cfg(target_os = "linux")]
+    fn arm(&self) -> IOResult<()> {
+        if self.event.get().is_none() {
+            let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+            if fd < 0 { return Err(std::io::Error::last_os_error()); }
+            let _ = self.event.set(unsafe { File::from_raw_fd(fd) });
+        }
+        // Acquire publications that raced ahead of us; the reader rechecks the
+        // rings after this exchange, before sleeping.
+        self.armed.swap(true, std::sync::atomic::Ordering::AcqRel);
+        Ok(())
+    }
+
+    fn signal(&self) {
+        // Only the first publication after arm needs a syscall. Exchange even
+        // when already disarmed so the next arm acquires the published data.
+        if !self.armed.swap(false, std::sync::atomic::Ordering::AcqRel) { return; }
+        let mut event = self.event.get().expect("armed writer notification has an eventfd");
+        use std::io::Write;
+        if let Err(e) = event.write_all(&1u64.to_ne_bytes()) {
+            if e.kind() != std::io::ErrorKind::WouldBlock {
+                error!("notifying perf reader failed: {}", e);
+            }
+        }
+    }
+}
 
 impl InProcessRingBuf {
     /// Create a new in-process ring buffer with the given number of data pages.
@@ -1162,6 +1199,7 @@ impl InProcessRingBuf {
 
         Self {
             data,
+            wake: Default::default(),
             data_offset,
             data_size,
             data_mask: data_size - 1,
@@ -1187,6 +1225,8 @@ impl InProcessRingBuf {
     pub(crate) fn writer(&mut self) -> InProcessRingBufWriter {
         InProcessRingBufWriter {
             data: self.data.as_mut_ptr(),
+            wake: Some(self.wake.clone()),
+            space_needed: None,
             data_offset: self.data_offset,
             data_size: self.data_size,
             data_mask: self.data_mask,
@@ -1197,6 +1237,12 @@ impl InProcessRingBuf {
 }
 
 impl InProcessRingBufWriter {
+    #[cfg(target_os = "linux")]
+    pub(super) fn configure_export(&mut self, notified: bool, space_needed: std::sync::mpsc::SyncSender<()>) {
+        if !notified { self.wake = None; }
+        self.space_needed = Some(space_needed);
+    }
+
     /// Maximum time to spin-wait for space to become available (100 ms).
     const WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
 
@@ -1220,15 +1266,19 @@ impl InProcessRingBufWriter {
 
     /// Spin-wait until at least `needed` bytes are available or timeout
     /// elapses.  Returns `true` if space is available.
-    fn wait_for_space(&self, needed: usize) -> bool {
+    fn wait_for_space(&self, needed: usize, cancelled: &impl Fn() -> bool) -> bool {
         let start = std::time::Instant::now();
+        if let Some(sender) = &self.space_needed {
+            // A pending request already covers us; on capture failure the receiver goes away.
+            let _ = sender.try_send(());
+        }
 
         loop {
             if self.available() >= needed {
                 return true;
             }
 
-            if start.elapsed() >= Self::WAIT_TIMEOUT {
+            if cancelled() || start.elapsed() >= Self::WAIT_TIMEOUT {
                 return false;
             }
 
@@ -1284,6 +1334,7 @@ impl InProcessRingBufWriter {
             let head_ptr = self.data.add(1024) as *mut u64;
             std::ptr::write_volatile(head_ptr, self.head as u64);
         }
+        if let Some(wake) = &self.wake { wake.signal(); }
 
         trace!(
             "InProcessRingBufWriter::write_raw: record_len={}, head={:#x}",
@@ -1341,6 +1392,10 @@ impl InProcessRingBufWriter {
     /// warning is logged.  On a successful write, any accumulated
     /// lost events are flushed first.
     pub fn write(&mut self, record: &[u8]) {
+        self.write_cancellable(record, &|| false);
+    }
+
+    pub(super) fn write_cancellable(&mut self, record: &[u8], cancelled: &impl Fn() -> bool) {
         let aligned_len = abi::align_to_perf_record(record.len());
 
         if aligned_len > self.data_size {
@@ -1368,7 +1423,8 @@ impl InProcessRingBufWriter {
                 record.len()
             );
 
-            if !self.wait_for_space(needed) {
+            if !self.wait_for_space(needed, cancelled) {
+                if cancelled() { return; }
                 warn!(
                     "InProcessRingBufWriter::write: timed out waiting for space, dropping record_len={}",
                     record.len()
@@ -1386,6 +1442,19 @@ impl InProcessRingBufWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancelled_writer_abandons_a_full_ring_without_recording_a_loss() {
+        let mut ring = InProcessRingBuf::new(1);
+        let mut writer = ring.writer();
+        writer.write(&vec![0; writer.data_size]);
+        // Cancel between retries. A writer that checks only after timing out
+        // would see "not cancelled" there and count the record as lost.
+        let waited = std::cell::Cell::new(false);
+        writer.write_cancellable(&[0; 8], &|| waited.replace(true));
+        assert_eq!(writer.lost_count, 0);
+        assert_eq!(writer.head, writer.data_size);
+    }
 
     fn swap(
         source: &[u8],

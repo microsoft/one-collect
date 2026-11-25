@@ -44,6 +44,15 @@ pub trait UniversalExporterOSHooks {
         until: impl Fn() -> bool + Send + 'static) -> anyhow::Result<Writable<ExportMachine>>;
 }
 
+impl UniversalExporterOSHooks for UniversalExporter {
+    fn os_parse_until(
+        self,
+        name: &str,
+        until: impl Fn() -> bool + Send + 'static) -> anyhow::Result<Writable<ExportMachine>> {
+        self.os_parse_controlled(name, crate::stop::CaptureStop::Predicate(Box::new(until)))
+    }
+}
+
 impl UniversalExporter {
     pub fn new(settings: ExportSettings) -> Self {
         let mut cpu_buf_bytes = 64*1024;
@@ -147,9 +156,39 @@ impl UniversalExporter {
     }
 
     pub fn parse_until(
-        mut self,
+        self,
         name: &str,
         until: impl Fn() -> bool + Send + 'static) -> anyhow::Result<Writable<ExportMachine>> {
+        self.apply_settings()?.os_parse_until(name, until)
+    }
+
+    /// Collect until notified, then finalize the capture before returning the machine.
+    /// An already-stopped token returns [`crate::ParseCancelledBeforeStart`] before running any hooks.
+    /// On Linux, stop wakes the reader independently of the data wakeup threshold.
+    /// The reader also rechecks for records below that threshold when its read timeout
+    /// expires (15 ms by default), without waiting for another event or for shutdown.
+    ///
+    /// Register the handle with your application's shutdown callback. Requesting stop
+    /// does not wait; the collecting thread receives the finalized machine.
+    ///
+    /// ```no_run
+    /// use one_collect::{helpers::exporting::UniversalExporter, StopHandle};
+    ///
+    /// # fn collect(on_shutdown: impl FnOnce(Box<dyn Fn() + Send + Sync>)) -> anyhow::Result<()> {
+    /// let exporter = UniversalExporter::new(Default::default());
+    /// let (stop, token) = StopHandle::pair()?;
+    /// on_shutdown(Box::new(move || stop.request_stop()));
+    /// let machine = exporter.parse_until_stop_requested("my-app-trace", token)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn parse_until_stop_requested(self, name: &str, token: crate::StopToken)
+        -> anyhow::Result<Writable<ExportMachine>> {
+        token.check_before_start()?;
+        self.apply_settings()?.os_parse_controlled(name, crate::stop::CaptureStop::Token(token))
+    }
+
+    fn apply_settings(mut self) -> anyhow::Result<Self> {
         /* Run Setting Hooks */
         if let Some(mut settings) = self.settings.take() {
             for hook in &mut self.setting_hooks {
@@ -159,9 +198,7 @@ impl UniversalExporter {
             self.settings = Some(settings);
         }
 
-        self.os_parse_until(
-            name,
-            until)
+        Ok(self)
     }
 
     pub(crate) const fn cpu_buf_bytes(&self) -> usize { self.cpu_buf_bytes }
@@ -220,5 +257,20 @@ impl UniversalExporter {
 
     pub(crate) const fn settings_mut(&mut self) -> Option<&mut ExportSettings> {
         self.settings.as_mut()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pre_stopped_token_skips_export_setup() {
+        let exporter = UniversalExporter::new(ExportSettings::default())
+            .with_settings_hook(|_| panic!("must not configure a skipped capture"));
+        let (stop, token) = crate::StopHandle::pair().unwrap();
+        stop.request_stop();
+        let result = exporter.parse_until_stop_requested("unused", token);
+        assert!(matches!(result, Err(e) if e.is::<crate::ParseCancelledBeforeStart>()));
     }
 }

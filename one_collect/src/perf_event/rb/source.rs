@@ -174,8 +174,8 @@ impl RingBufSessionBuilder {
     /// readable. [`Self::build`] returns an error if this constraint is
     /// violated.
     ///
-    /// A value of `0` keeps the kernel default of marking the fd
-    /// readable on every event.
+    /// A value of `0` selects the kernel's default byte watermark; it
+    /// does not request a wakeup for every record.
     pub fn with_wakeup_watermark(
         &mut self,
         bytes: u32) -> Self {
@@ -497,7 +497,7 @@ impl RingBufSessionBuilder {
 
         source.build()?;
 
-        let mut session = PerfSession::new(Box::new(source));
+        let mut session = PerfSession::from_ring(source);
 
         if let Some(hooks) = &mut hooks {
             for hook in hooks {
@@ -952,10 +952,16 @@ impl RingBufDataSource {
         if timeout.is_zero() {
             return;
         }
+        if let Err(err) = self.poll_for_data(timeout, &mut []) {
+            warn!("Waiting for perf data failed: {}", err);
+            std::thread::sleep(timeout);
+        }
+    }
 
-        /* Poll every leader, including masked-out CPUs which can still
-         * receive no_cpu_mask events. The in-process ring has no fd, so
-         * retain the timeout as an upper bound on its latency. */
+    #[cfg(target_os = "linux")]
+    fn poll_for_data(&mut self, timeout: Duration, extra: &mut [pollfd]) -> IOResult<()> {
+        let leaders = self.wait_fds.len();
+        self.wait_fds.extend_from_slice(extra);
         let timeout_ms = timeout.as_millis().min(i32::MAX as u128) as i32;
         let result = unsafe {
             if timeout_ms == 0 {
@@ -973,22 +979,24 @@ impl RingBufDataSource {
                 poll(self.wait_fds.as_mut_ptr(), self.wait_fds.len() as nfds_t, timeout_ms)
             }
         };
-        if result < 0 {
-            let err = IOError::last_os_error();
-            if err.kind() != std::io::ErrorKind::Interrupted {
-                warn!("Waiting for perf data failed: {}", err);
-                std::thread::sleep(timeout);
-            }
-        } else {
+        let err = (result < 0).then(IOError::last_os_error);
+        if result > 0 {
+            extra.copy_from_slice(&self.wait_fds[leaders..]);
+        }
+        self.wait_fds.truncate(leaders);
+        if let Some(err) = err {
+            return if err.kind() == std::io::ErrorKind::Interrupted { Ok(()) } else { Err(err) };
+        }
+        if result > 0 {
             self.wait_fds.retain(|fd| {
                 if fd.revents & (POLLERR | POLLNVAL) != 0 {
                     warn!("Perf wait fd={} reported poll events={:#x}", fd.fd, fd.revents);
                 }
-                /* Exited target tasks can hang up their perf fds. Keep
-                 * draining the rings, but don't spin on their readiness. */
+                // Even after leader exit, timeout rescans drain records from surviving writers.
                 fd.revents & (POLLHUP | POLLERR | POLLNVAL) == 0
             });
         }
+        Ok(())
     }
 
     fn read_time<'a>(
@@ -1499,6 +1507,36 @@ impl PerfDataSource for RingBufDataSource {
     }
 }
 
+#[cfg(target_os = "linux")]
+impl RingBufDataSource {
+    pub(in crate::perf_event) fn wait_for_data_or_stop(
+        &mut self, stop_fd: BorrowedFd<'_>, timeout: Duration) -> IOResult<()> {
+        use std::io::Read;
+        use std::os::fd::AsRawFd;
+
+        if timeout.is_zero() { return Ok(()); }
+        let poll_input = |fd| libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+        if let Some(rb) = &self.in_process_ring_buf { rb.wake.arm()?; }
+        self.begin_reading();
+        if self.oldest_cpu.is_some() || !self.enabled {
+            return Ok(());
+        }
+        let writer_fd = self.in_process_ring_buf.as_ref()
+            .and_then(|rb| rb.wake.event.get()).map_or(-1, AsRawFd::as_raw_fd);
+        let mut extra = [poll_input(writer_fd), poll_input(stop_fd.as_raw_fd())];
+        self.poll_for_data(timeout, &mut extra)?;
+        if extra.iter().any(|fd| fd.revents & (libc::POLLNVAL | libc::POLLERR) != 0) {
+            return Err(io_error("error waiting on perf notification descriptor"));
+        }
+        if extra[0].revents & libc::POLLIN != 0 {
+            if let Some(mut writer) = self.in_process_ring_buf.as_ref().and_then(|rb| rb.wake.event.get()) {
+                writer.read_exact(&mut [0; 8])?;
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1563,6 +1601,208 @@ mod tests {
             assert!(source.read(Duration::from_micros(900)).is_none());
         }
         assert!(start.elapsed() >= Duration::from_millis(3));
+    }
+
+    // An actual ring and production waiter without requiring perf_event_open permissions.
+    #[cfg(target_os = "linux")]
+    fn synthetic_source(pages: usize) -> RingBufDataSource {
+        let mut source = RingBufDataSource::new(
+            pages, None, None, None, None, None, None, None, None, None);
+        let mut ring = InProcessRingBuf::new(pages);
+        source.readers.push(ring.create_reader());
+        source.cursors.push(Default::default());
+        source.ring_bufs.insert(0, CpuRingBuf::new(0, Rc::new(RingBufBuilder::common_attributes())));
+        source.in_process_ring_buf = Some(ring);
+        source
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn notified_busy_capture_leaves_remaining_records_for_final_drain() {
+        let mut source = synthetic_source(4);
+        let mut writer = source.take_in_process_writer().unwrap();
+        let mut record = Vec::new();
+        abi::Header::write(abi::PERF_RECORD_LOST, 0, &[0; 40], &mut record);
+        for _ in 0..256 { writer.write(&record); }
+
+        let mut session = PerfSession::from_ring(source);
+        let (stop, token) = crate::StopHandle::pair().unwrap();
+        let count = Arc::new(AtomicUsize::new(0));
+        let seen = count.clone();
+        session.lost_event().add_callback(move |_| {
+            if seen.fetch_add(1, Ordering::Relaxed) == 0 { stop.request_stop(); }
+            Ok(())
+        });
+        session.parse_until_stop_requested(token).unwrap();
+        assert!((1..256).contains(&count.load(Ordering::Relaxed)));
+        session.parse_all().unwrap();
+        assert_eq!(count.load(Ordering::Relaxed), 256);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn notified_idle_reader_wakes_only_for_its_own_handle() {
+        let (stop, token) = crate::StopHandle::pair().unwrap();
+        let (old, _) = crate::StopHandle::pair().unwrap();
+        let (ready, waiting) = std::sync::mpsc::channel();
+        let (done, finished) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut session = PerfSession::from_ring(synthetic_source(1));
+            // Stop must interrupt this wait, not depend on the periodic rescan.
+            session.set_read_timeout(Duration::from_secs(60));
+            session.enable().unwrap();
+            ready.send(()).unwrap();
+            session.parse_until_stop_requested(token).unwrap();
+            done.send(()).unwrap();
+        });
+        waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+        drop(stop.clone());
+        old.request_stop();
+        assert!(matches!(finished.recv_timeout(Duration::from_millis(40)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)));
+        stop.request_stop();
+        stop.request_stop();
+        finished.recv_timeout(Duration::from_secs(5)).unwrap();
+        reader.join().unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn notified_timeout_delivers_one_record_without_a_data_wakeup() {
+        let mut source = synthetic_source(1);
+        let mut writer = source.take_in_process_writer().unwrap();
+        // Model a kernel record too small to trigger the data watermark.
+        writer.wake = None;
+        let wake = source.in_process_ring_buf.as_ref().unwrap().wake.clone();
+        let mut session = PerfSession::from_ring(source);
+        session.set_read_timeout(Duration::from_millis(20));
+        session.enable().unwrap();
+        let (stop, token) = crate::StopHandle::pair().unwrap();
+        let (seen, delivered) = std::sync::mpsc::channel();
+        session.lost_event().add_callback(move |_| { seen.send(())?; Ok(()) });
+        std::thread::scope(|scope| {
+            let producer = scope.spawn(move || {
+                let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                while !wake.armed.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+                    std::thread::yield_now();
+                }
+                std::thread::sleep(Duration::from_millis(5));
+                let mut record = Vec::new();
+                abi::Header::write(abi::PERF_RECORD_LOST, 0, &[0; 40], &mut record);
+                writer.write(&record);
+                let result = delivered.recv_timeout(Duration::from_secs(2));
+                stop.request_stop();
+                result
+            });
+            session.parse_until_stop_requested(token).unwrap();
+            producer.join().unwrap().expect("single record was not delivered before stop");
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn notified_reader_wakes_for_sparse_environment_data() {
+        let mut source = synthetic_source(1);
+        let mut writer = source.take_in_process_writer().unwrap();
+        let mut session = PerfSession::from_ring(source);
+        // Each acknowledgement must come from a notification, not a timeout rescan.
+        session.set_read_timeout(Duration::from_secs(60));
+        session.enable().unwrap();
+        let (stop, token) = crate::StopHandle::pair().unwrap();
+        let (seen, callback) = std::sync::mpsc::channel();
+        session.lost_event().add_callback(move |_| { seen.send(()).unwrap(); Ok(()) });
+        std::thread::scope(|scope| {
+            let producer = scope.spawn(move || {
+                let mut record = Vec::new();
+                abi::Header::write(abi::PERF_RECORD_LOST, 0, &[0; 40], &mut record);
+                let received = (0..64).all(|_| {
+                    for _ in 0..4 { writer.write(&record); }
+                    (0..4).all(|_| callback.recv_timeout(Duration::from_secs(2)).is_ok())
+                });
+                stop.request_stop();
+                received
+            });
+            session.parse_until_stop_requested(token).unwrap();
+            assert!(producer.join().unwrap());
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn final_drain_makes_space_and_delivers_the_tail() {
+        let mut source = synthetic_source(1);
+        let mut writer = source.take_in_process_writer().unwrap();
+        let (space_needed, wake) = std::sync::mpsc::sync_channel(1);
+        writer.configure_export(false, space_needed);
+        let mut session = PerfSession::from_ring(source);
+        let count = Arc::new(AtomicUsize::new(0));
+        let seen = count.clone();
+        session.lost_event().add_callback(move |_| { seen.fetch_add(1, Ordering::Relaxed); Ok(()) });
+        std::thread::scope(|scope| {
+            let env = scope.spawn(move || {
+                let mut record = Vec::new();
+                abi::Header::write(abi::PERF_RECORD_LOST, 0, &[0; 40], &mut record);
+                // More than one ring, followed by a partial ring on writer exit.
+                for _ in 0..4097 { writer.write(&record); }
+            });
+            session.finish_environment(env, wake).unwrap();
+        });
+        assert_eq!(count.load(Ordering::Relaxed), 4097);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn notified_reader_delivers_from_a_shared_ring_after_leader_exit() {
+        let mut source = synthetic_source(1);
+        // Model the kernel ring: its remaining producer does not use the environment wakeup.
+        let mut ring = source.in_process_ring_buf.take().unwrap();
+        let mut producer = ring.writer();
+        let (leader, exited) = UnixStream::pair().unwrap();
+        source.wait_fds.push(pollfd { fd: leader.as_raw_fd(), events: POLLIN, revents: 0 });
+        source.enabled = true;
+        let (stop, token) = crate::StopHandle::pair().unwrap();
+        drop(exited);
+        source.wait_for_data_or_stop(token.poll_fd(), Duration::from_secs(1)).unwrap();
+        assert!(source.wait_fds.is_empty());
+
+        let mut session = PerfSession::from_ring(source);
+        let (seen, delivered) = std::sync::mpsc::channel();
+        session.lost_event().add_callback(move |_| { seen.send(())?; Ok(()) });
+        std::thread::scope(|scope| {
+            let task = scope.spawn(move || {
+                let mut record = Vec::new();
+                abi::Header::write(abi::PERF_RECORD_LOST, 0, &[0; 40], &mut record);
+                // Acknowledge separate bursts so an initial scan alone cannot pass the test.
+                let received = (0..2).all(|_| {
+                    std::thread::sleep(Duration::from_millis(30));
+                    producer.write(&record);
+                    delivered.recv_timeout(Duration::from_secs(2)).is_ok()
+                });
+                stop.request_stop();
+                received
+            });
+            session.parse_until_stop_requested(token).unwrap();
+            assert!(task.join().unwrap(), "records must arrive before stop");
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn environment_burst_signals_once_per_wait() {
+        use std::io::Read;
+        let mut source = synthetic_source(1);
+        let mut writer = source.take_in_process_writer().unwrap();
+        let wake = &source.in_process_ring_buf.as_ref().unwrap().wake;
+        let mut record = Vec::new();
+        abi::Header::write(abi::PERF_RECORD_LOST, 0, &[0; 40], &mut record);
+
+        for _ in 0..2 {
+            wake.arm().unwrap();
+            for _ in 0..16 { writer.write(&record); }
+            let mut count = [0; 8];
+            wake.event.get().unwrap().read_exact(&mut count).unwrap();
+            assert_eq!(u64::from_ne_bytes(count), 1);
+        }
     }
 
     #[test]

@@ -115,6 +115,8 @@ pub mod sharing;
 pub mod helpers;
 pub mod intern;
 pub mod os;
+mod stop;
+pub use stop::{ParseCancelledBeforeStart, StopHandle, StopToken};
 
 mod ruwind;
 

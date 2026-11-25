@@ -8,6 +8,8 @@
  */
 type RawHandle = *mut std::os::raw::c_void;
 
+use std::sync::{Arc, Mutex, RwLock, Weak};
+use windows_sys::Win32::Foundation::{ERROR_ACTIVE_CONNECTIONS, ERROR_MORE_DATA, ERROR_WMI_INSTANCE_NOT_FOUND};
 use super::*;
 
 #[link(name = "kernel32")]
@@ -21,7 +23,7 @@ extern "system" {
         properties: *mut EVENT_TRACE_PROPERTIES) -> u32;
 
     fn OpenTraceW(
-        logfile: *const EVENT_TRACE_LOGFILE) -> u64;
+        logfile: *mut EVENT_TRACE_LOGFILE) -> u64;
 
     fn CloseTrace(
         handle: u64) -> u32;
@@ -248,9 +250,7 @@ impl WNODE_HEADER {
         }
     }
 
-    /// Construct a `WNODE_HEADER` for driving `ControlTraceW` by handle
-    /// (e.g. `flush_trace`, `TraceSession::remote_stop`) where `Wnode.Guid`
-    /// is ignored. The GUID is zero and `WNODE_FLAG_TRACED_GUID` is unset.
+    /// Construct a `WNODE_HEADER` for a control operation, not a new logger.
     fn for_control() -> Self {
         Self {
             BufferSize: std::mem::size_of::<EVENT_TRACE_PROPERTIES>() as u32,
@@ -451,7 +451,7 @@ impl EVENT_TRACE_PROPERTIES {
         properties
     }
 
-    /// Construct properties for driving `ControlTraceW` by handle;
+    /// Construct properties for driving `ControlTraceW`;
     /// see [`WNODE_HEADER::for_control`].
     fn for_control() -> Self {
         Self::with_wnode(WNODE_HEADER::for_control())
@@ -951,6 +951,10 @@ pub(super) struct TraceSession {
     handle: u64,
 }
 
+// Serialize in-process starts against generation-checked native operations.
+// Never hold this lock across user callbacks, ProcessTrace, or a stop wait.
+static LOGGER_LIFECYCLE: RwLock<Vec<Weak<StartedLogger>>> = RwLock::new(Vec::new());
+
 extern "C" fn buffer_callback(_header: *const TRACE_LOGFILE_HEADER) -> u32 {
     1
 }
@@ -989,8 +993,9 @@ impl TraceSession {
     pub(super) fn id(&self) -> u64 { self.properties.Wnode.HistoricalContext }
 
     pub(super) fn start(
-        &mut self) -> anyhow::Result<()> {
+        &mut self) -> anyhow::Result<StopOwner> {
         let trace_name = wide_string(&self.name);
+        let mut loggers = LOGGER_LIFECYCLE.write().unwrap();
 
         unsafe {
             /* Stop any previously running instance */
@@ -1015,11 +1020,24 @@ impl TraceSession {
             }
         }
 
-        Ok(())
+        let logger = Arc::new(StartedLogger {
+            name: trace_name,
+            id: self.id(),
+            thread_id: self.properties.LoggerThreadId as usize,
+            stop_attempts_left: Mutex::new(2), // Initial stop plus one cleanup retry.
+        });
+        // Retire previous in-process owners even if Windows also reused the thread ID.
+        loggers.retain(|weak| {
+            let Some(old) = weak.upgrade() else { return false };
+            if old.id == logger.id || old.name == logger.name { old.ended(); }
+            old.can_stop()
+        });
+        loggers.push(Arc::downgrade(&logger));
+        Ok(StopOwner(logger))
     }
 
     fn open_trace(
-        name: &str,
+        name: &[u16],
         context: *mut std::ffi::c_void) -> anyhow::Result<u64> {
         let mut log = EVENT_TRACE_LOGFILE {
                 LogFileName: std::ptr::null(),
@@ -1038,9 +1056,7 @@ impl TraceSession {
                 Context: std::ptr::null(),
             };
 
-        let log_name = wide_string(name);
-
-        log.LoggerName = log_name.as_ptr();
+        log.LoggerName = name.as_ptr();
 
         log.ProcessTraceMode = PROCESS_TRACE_MODE_EVENT_RECORD |
                                PROCESS_TRACE_MODE_REAL_TIME |
@@ -1049,83 +1065,13 @@ impl TraceSession {
         log.Context = context;
 
         unsafe {
-            let handle = OpenTraceW(&log);
+            let handle = OpenTraceW(&mut log);
 
             if handle == 0xFFFFFFFFFFFFFFFF {
                 anyhow::bail!("OpenTraceW failed with {}", GetLastError());
             }
 
             Ok(handle)
-        }
-    }
-
-    pub(super) fn process(
-        &self,
-        parse: Box<dyn FnMut(&EVENT_RECORD)>) -> anyhow::Result<()> {
-        /* Create thin pointer */
-        let thin = Box::new(parse);
-
-        /* Create raw pointer */
-        let raw = Box::into_raw(thin);
-
-        /* Use raw pointer with ETW */
-        let context = raw as *mut std::ffi::c_void;
-
-        let handle = Self::open_trace(
-            &self.name,
-            context)?;
-
-        unsafe {
-            /* Process traces */
-            let result = ProcessTrace(
-                &handle,
-                1,
-                std::ptr::null(),
-                std::ptr::null());
-
-            CloseTrace(handle);
-
-            if result != 0 {
-                anyhow::bail!("ProcessTrace failed with {}", GetLastError());
-            }
-        }
-
-        Ok(())
-    }
-
-    pub(super) fn remote_stop(
-        handle: u64) -> anyhow::Result<super::SessionStats> {
-        let mut properties = EVENT_TRACE_PROPERTIES::for_control();
-
-        /*
-         * EVENT_TRACE_CONTROL_STOP writes the session's final counters into
-         * the supplied properties buffer. Reading this result is preferable
-         * to querying immediately before stop because rundown and shutdown
-         * can still change the cumulative loss counters.
-         */
-        let result = unsafe {
-            ControlTraceW(
-                handle,
-                std::ptr::null::<u16>(),
-                &mut properties,
-                EVENT_TRACE_CONTROL_STOP)
-        };
-
-        if result != 0 {
-            anyhow::bail!("ControlTraceW stop failed with {}", result);
-        }
-
-        Ok(session_stats(&properties))
-    }
-
-    pub(super) fn stop(
-        &mut self) {
-        unsafe {
-            ControlTraceW(
-                self.handle,
-                std::ptr::null::<u16>(),
-                &mut self.properties,
-                EVENT_TRACE_CONTROL_STOP);
         }
     }
 
@@ -1254,15 +1200,197 @@ impl TraceSession {
     }
 }
 
-impl Drop for TraceSession {
+// A TRACEHANDLE is a reusable logger slot, not a reference to a session.
+// Keep the name for native STOP, the logger thread ID to detect replacement,
+// and a bounded stop budget shared with the consumer's error path.
+pub(super) struct StartedLogger {
+    name: Vec<u16>,
+    id: u64,
+    thread_id: usize,
+    stop_attempts_left: Mutex<u8>,
+}
+
+impl StartedLogger {
+    pub(super) fn ended(&self) {
+        *self.stop_attempts_left.lock().unwrap() = 0;
+    }
+
+    fn can_stop(&self) -> bool {
+        *self.stop_attempts_left.lock().unwrap() != 0
+    }
+
+    fn control(&self, code: u32, props: &mut EVENT_TRACE_PROPERTIES) -> u32 {
+        unsafe { ControlTraceW(0, self.name.as_ptr(), props, code) }
+    }
+
+    fn verify_identity(&self, attempts: &mut u8, query: impl FnOnce(&mut EVENT_TRACE_PROPERTIES) -> u32)
+        -> anyhow::Result<()> {
+        let mut props = EVENT_TRACE_PROPERTIES::for_control();
+        let status = query(&mut props);
+        if status == ERROR_WMI_INSTANCE_NOT_FOUND { *attempts = 0; }
+        anyhow::ensure!(status == 0, "ControlTraceW identity query failed with {}", status);
+        if props.Wnode.HistoricalContext != self.id || props.LoggerThreadId as usize != self.thread_id {
+            *attempts = 0;
+            anyhow::bail!("ETW session was replaced");
+        }
+        Ok(())
+    }
+
+    pub(super) fn current_handle(&self, handle: u64) -> u64 {
+        self.with_current(|| Ok(handle)).unwrap_or(0)
+    }
+
+    pub(super) fn with_current<T>(&self, operate: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
+        let _no_restarts = LOGGER_LIFECYCLE.read().unwrap();
+        let mut attempts = self.stop_attempts_left.lock().unwrap();
+        anyhow::ensure!(*attempts != 0, "ETW session is no longer owned");
+        self.verify_identity(&mut attempts, |p| self.control(EVENT_TRACE_CONTROL_QUERY, p))?;
+        operate()
+    }
+
+    pub(super) fn open_consumer(
+        &self,
+        parse: Box<dyn FnMut(&EVENT_RECORD)>) -> anyhow::Result<TraceConsumer> {
+        let mut callback = Box::new(parse);
+        let context = std::ptr::from_mut(callback.as_mut()).cast();
+        // OpenTraceW resolves by name. A start must not replace us between
+        // checking who owns that name and opening the consumer.
+        let handle = self.with_current(|| TraceSession::open_trace(&self.name, context))?;
+        Ok(TraceConsumer { handle, _callback: callback })
+    }
+
+    pub(super) fn stop(&self) -> anyhow::Result<super::SessionStats> {
+        self.stop_using(|code, p| self.control(code, p))
+    }
+
+    fn stop_using(&self, mut control: impl FnMut(u32, &mut EVENT_TRACE_PROPERTIES) -> u32)
+        -> anyhow::Result<super::SessionStats> {
+        let _no_restarts = LOGGER_LIFECYCLE.read().unwrap();
+        let mut attempts = self.stop_attempts_left.lock().unwrap();
+        anyhow::ensure!(*attempts != 0, "ETW stop ownership has ended");
+        *attempts -= 1;
+        self.verify_identity(&mut attempts, |p| control(EVENT_TRACE_CONTROL_QUERY, p))?;
+        let mut props = EVENT_TRACE_PROPERTIES::for_control();
+        let status = control(EVENT_TRACE_CONTROL_STOP, &mut props);
+        // MORE_DATA on STOP means the logger stopped but ETW couldn't return all
+        // properties. ACTIVE_CONNECTIONS means stop is already in progress.
+        if matches!(status, 0 | ERROR_MORE_DATA | ERROR_ACTIVE_CONNECTIONS | ERROR_WMI_INSTANCE_NOT_FOUND) {
+            *attempts = 0;
+        }
+        anyhow::ensure!(status == 0, "ControlTraceW stop failed with {}", status);
+        Ok(session_stats(&props))
+    }
+
+    pub(super) fn cleanup(&self) {
+        while self.can_stop() {
+            if let Err(err) = self.stop() {
+                tracing::warn!("ETW cleanup: {}", err);
+            }
+        }
+    }
+}
+
+pub(super) struct StopOwner(pub(super) Arc<StartedLogger>);
+
+impl Drop for StopOwner {
     fn drop(&mut self) {
-        self.stop();
+        self.0.cleanup();
+    }
+}
+
+pub(super) struct TraceConsumer {
+    handle: u64,
+    // ETW needs a stable, thin pointer to the boxed trait object until CloseTrace.
+    _callback: Box<Box<dyn FnMut(&EVENT_RECORD)>>,
+}
+
+impl TraceConsumer {
+    pub(super) fn process(self) -> anyhow::Result<()> {
+        let status = unsafe { ProcessTrace(&self.handle, 1, std::ptr::null(), std::ptr::null()) };
+        if status != 0 {
+            anyhow::bail!("ProcessTrace failed with {}", status);
+        }
+        Ok(())
+    }
+}
+
+impl Drop for TraceConsumer {
+    fn drop(&mut self) {
+        unsafe { CloseTrace(self.handle); }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires ETW session permissions"]
+    fn logger_ownership_stale_open_stop_and_drop_leave_the_replacement_running() {
+        let name = format!("one_collect_stop_ownership_{}", std::process::id());
+        let start = || TraceSession::new(name.clone(), 64, false).start().unwrap();
+        let first = start();
+        // start() reclaims the previous logger by name. The old owner is still
+        // around and Windows is free to reuse its numeric slot immediately.
+        let second = start();
+        assert!(first.0.open_consumer(Box::new(|_| {})).is_err(),
+            "superseded owner opened a consumer on the replacement");
+        drop(second.0.open_consumer(Box::new(|_| {})).expect("replacement must open its own consumer"));
+        assert!(first.0.stop().is_err(), "old owner returned the new logger's statistics");
+        drop(first);
+        second.0.stop().expect("stale teardown stopped the replacement");
+
+        let third = start();
+        drop(second); // Already explicitly stopped; Drop must not send another STOP.
+        third.0.stop().expect("dropping a completed owner stopped a later capture");
+    }
+
+    #[test]
+    #[ignore = "requires ETW session permissions"]
+    fn logger_ownership_drop_retries_transient_query_and_stop_failures() {
+        use windows_sys::Win32::Foundation::ERROR_BUSY;
+        let name = format!("one_collect_retry_test_{}", std::process::id());
+        for fail_op in [EVENT_TRACE_CONTROL_QUERY, EVENT_TRACE_CONTROL_STOP] {
+            let owner = TraceSession::new(name.clone(), 64, false).start().unwrap();
+            let logger = owner.0.clone();
+            let result = logger.stop_using(|op, p| {
+                if op == fail_op { ERROR_BUSY } else { logger.control(op, p) }
+            });
+            assert!(result.is_err(), "failed stop must not produce final statistics");
+            drop(owner);
+            let mut props = EVENT_TRACE_PROPERTIES::for_control();
+            let status = logger.control(EVENT_TRACE_CONTROL_QUERY, &mut props);
+            if status == 0 { logger.control(EVENT_TRACE_CONTROL_STOP, &mut props); }
+            assert_eq!(status, ERROR_WMI_INSTANCE_NOT_FOUND, "cleanup left the original logger running");
+        }
+    }
+
+    #[test]
+    fn logger_ownership_retry_rechecks_identity_and_is_bounded() {
+        use windows_sys::Win32::Foundation::ERROR_BUSY;
+        for replaced in [false, true] {
+            let logger = StartedLogger {
+                name: Vec::new(), id: 10, thread_id: 20, stop_attempts_left: Mutex::new(2),
+            };
+            let mut stops = 0;
+            for attempt in 0..2 {
+                let result = logger.stop_using(|op, p| {
+                    if op == EVENT_TRACE_CONTROL_QUERY {
+                        p.Wnode.HistoricalContext = logger.id;
+                        let tid = if replaced && attempt == 1 { 21 } else { logger.thread_id };
+                        p.LoggerThreadId = tid as RawHandle;
+                        0
+                    } else {
+                        stops += 1;
+                        ERROR_BUSY
+                    }
+                });
+                assert!(result.is_err());
+            }
+            assert_eq!(stops, if replaced { 1 } else { 2 });
+            assert!(logger.stop_using(|_, _| panic!("unbounded stop retry")).is_err());
+        }
+    }
 
     #[test]
     fn ordinary_session_does_not_use_system_logger_mode() {
