@@ -51,6 +51,16 @@ struct MetadataBlock {
     size: usize,
 }
 
+#[derive(Default)]
+/// Describes contiguous payload blocks to copy while packing an event.
+/// `ranges` holds bounded blocks separated by gaps; `tail_offset` starts the
+/// final block, which is copied through the end of the payload.
+struct RecordDataLayout {
+    ranges: Vec<std::ops::Range<usize>>,
+    tail_offset: usize,
+    minimum_size: usize,
+}
+
 const MAX_BLOCK_SIZE: usize = 0x00FF_FFFF;
 
 const TYPE_ID_SBYTE: u8 = 5;
@@ -282,6 +292,7 @@ struct NetTraceWriter {
     symbol_event_id: u32,
     mapping_meta_event_id: u32,
     original_meta_event_ids: HashSet<u32>,
+    record_data_layouts: Vec<RecordDataLayout>,
     last_time: u64,
     sync_time: u64,
     flush_time: u64,
@@ -327,6 +338,7 @@ impl NetTraceWriter {
             symbol_event_id: 0,
             mapping_meta_event_id: 0,
             original_meta_event_ids: HashSet::new(),
+            record_data_layouts: Vec::new(),
             last_time: 0,
             sync_time: 0,
             flush_time: 0,
@@ -746,7 +758,11 @@ impl NetTraceWriter {
             }
 
             /* Write the extra data after the value */
-            self.buffer.write_all(data.record_data())?;
+            Self::write_record_data(
+                &mut self.buffer,
+                &self.record_data_layouts[data.record_type_id() as usize],
+                data.record_type(),
+                data.record_data())?;
         }
 
         self.write_event_blob_from_buffer(
@@ -1014,6 +1030,27 @@ impl NetTraceWriter {
         }
     }
 
+    fn write_record_data(
+        buffer: &mut Vec<u8>,
+        layout: &RecordDataLayout,
+        record_type: &ExportRecordType,
+        data: &[u8]) -> anyhow::Result<()> {
+        // Reject truncated records before copying: payloads must meet the minimum
+        // size required by the metadata's fixed offsets.
+        anyhow::ensure!(
+            data.len() >= layout.minimum_size,
+            "NetTrace record {} exceeds the record data size: minimum size {}, data size {}",
+            record_type.name(), layout.minimum_size, data.len());
+
+        for range in &layout.ranges {
+            buffer.write_bytes(&data[range.clone()])?;
+        }
+
+        // The last run includes variable/unsupported fields and trailing data.
+        // Layouts without gaps use a single copy of the entire payload.
+        buffer.write_bytes(&data[layout.tail_offset..])
+    }
+
     fn write_metadata_object(
         &mut self,
         stack_kinds: &[String],
@@ -1047,9 +1084,11 @@ impl NetTraceWriter {
         self.record_id_offset = meta_id;
 
         let mut record_fields = Vec::new();
+        self.record_data_layouts.clear();
 
         for record_type in record_types {
             record_fields.clear();
+            let mut layout = RecordDataLayout::default();
 
             /* Original data does not change its format */
             if record_type.is_original_data() {
@@ -1064,10 +1103,9 @@ impl NetTraceWriter {
             for field in record_type.format().fields() {
                 match Self::event_field_to_type(field) {
                     Some(type_id) => {
-                        // Metadata describes packed fields; record bytes are copied verbatim.
                         anyhow::ensure!(
-                            variable || field.offset == offset,
-                            "NetTrace record {} field {} has an unsupported layout: expected offset {}, got {}",
+                            variable || field.offset >= offset,
+                            "NetTrace record {} field {} has an unsupported layout: minimum offset {}, got {}",
                             record_type.name(), field.name, offset, field.offset);
                         let size = match type_id {
                             TYPE_ID_SBYTE | TYPE_ID_BYTE => Some(1),
@@ -1086,8 +1124,26 @@ impl NetTraceWriter {
                             type_id != TYPE_ID_NULL_UTF16_STRING || field.location != LocationType::StaticString,
                             "NetTrace record {} field {} has an unsupported UTF8 string layout",
                             record_type.name(), field.name);
+                        let end = field.offset.checked_add(field.size)
+                            .ok_or_else(|| anyhow::anyhow!(
+                                "NetTrace record {} field {} has an overflowing layout",
+                                record_type.name(), field.name))?;
+                        if !variable {
+                            if field.offset > offset {
+                                // Coalesce adjacent fields before the gap into one copy range.
+                                // For example, 0..4 and 4..12 become 0..12; skip 12..16 and copy
+                                // the remaining payload starting at 16.
+                                if layout.tail_offset < offset {
+                                    layout.ranges.push(layout.tail_offset..offset);
+                                }
+                                layout.tail_offset = field.offset;
+                            }
+                            layout.minimum_size = end;
+                        }
+                        // Only the fixed prefix has usable offsets. The first variable
+                        // field and everything after it remain in the final, unchanged run.
                         variable |= field.size == 0;
-                        offset += field.size;
+                        offset = end;
 
                         let element_type_id = match type_id {
                             TYPE_ID_ARRAY => Self::event_field_to_element_type(field),
@@ -1134,6 +1190,7 @@ impl NetTraceWriter {
                     &record_fields)?;
             }
 
+            self.record_data_layouts.push(layout);
             meta_id += 1;
         }
 
@@ -2197,7 +2254,6 @@ mod tests {
     #[test]
     fn incompatible_record_layouts_are_rejected() {
         for field in [
-            EventField::new("gap".into(), "u32".into(), LocationType::Static, 4, 4),
             EventField::new("width".into(), "double".into(), LocationType::Static, 0, 4),
             EventField::new("encoding".into(), "string".into(), LocationType::StaticString, 0, 0),
         ] {
@@ -2216,18 +2272,245 @@ mod tests {
     }
 
     #[test]
-    fn packed_variable_record_layouts_are_accepted() {
-        let path = unique_temp_path("variable-record-layout");
+    fn tracepoint_alignment_is_packed_in_exported_payloads() {
+        for ret_offset in [12, 16] {
+            for ret in [1i64, -1, i64::MIN, i64::MAX] {
+                let path = unique_temp_path("tracepoint-alignment");
+                let mut writer = NetTraceWriter::new(path.to_str().unwrap()).unwrap();
+                let mut machine = ExportMachine::new(ExportSettings::default());
+                let kind = machine.sample_kind("syscalls/sys_exit_write");
+                let mut event = crate::event::Event::new(1, "syscalls/sys_exit_write".into());
+                for (name, type_name, offset, size) in [
+                    ("common_type", "unsigned short", 0, 2),
+                    ("common_flags", "unsigned char", 2, 1),
+                    ("common_preempt_count", "unsigned char", 3, 1),
+                    ("common_pid", "int", 4, 4),
+                    ("__syscall_nr", "int", 8, 4),
+                    ("ret", "long", ret_offset, 8),
+                ] {
+                    event.format_mut().add_field(EventField::new(
+                        name.into(), type_name.into(), LocationType::Static, offset, size));
+                }
+                let record_type = machine.record_type(ExportRecordType::from_event(kind, &event));
+                writer.write_metadata_object(machine.sample_kinds(), machine.record_types()).unwrap();
+                let mut native = vec![0xA5; ret_offset + 8];
+                native[..2].copy_from_slice(&123u16.to_le_bytes());
+                native[2] = 0;
+                native[3] = 0;
+                native[4..8].copy_from_slice(&42i32.to_le_bytes());
+                native[8..12].copy_from_slice(&1i32.to_le_bytes());
+                native[ret_offset..].copy_from_slice(&ret.to_le_bytes());
+                let sample = ExportProcessSample::new(1, MetricValue::Count(1), 0, kind, 42, 0, 0);
+                machine.add_custom_sample_with_record(42, sample, record_type, &native).unwrap();
+                let replay = machine.find_process(42).unwrap().to_replay();
+                let converter = DefaultExportGraphMetricValueConverter::default();
+                writer.write_replay_event(&machine, &replay, &converter).unwrap();
+
+                let mut input = CodedInputStream::from_bytes(&writer.event_block);
+                assert_eq!(input.read_raw_byte().unwrap(), 223);
+                for _ in 0..8 {
+                    input.read_raw_varint64().unwrap();
+                }
+                assert_eq!(input.read_raw_varint32().unwrap(), 20);
+                assert_eq!(read_u16(&mut input), 123);
+                assert_eq!(input.read_raw_byte().unwrap(), 0);
+                assert_eq!(input.read_raw_byte().unwrap(), 0);
+                assert_eq!(input.read_raw_little_endian32().unwrap(), 42);
+                assert_eq!(input.read_raw_little_endian32().unwrap(), 1);
+                assert_eq!(input.read_raw_little_endian64().unwrap() as i64, ret);
+                assert!(input.eof().unwrap());
+                assert_eq!(machine.sample_record_data(replay.sample_event().unwrap()).record_data(), native);
+                drop(input);
+                drop(writer);
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn record_packing_handles_leading_and_multiple_gaps() {
+        let path = unique_temp_path("record-copy-ranges");
         let mut writer = NetTraceWriter::new(path.to_str().unwrap()).unwrap();
         let mut format = crate::event::EventFormat::new();
-        format.add_field(EventField::new("first".into(), "u32".into(), LocationType::Static, 0, 4));
-        format.add_field(EventField::new("text".into(), "string".into(), LocationType::StaticUTF16String, 4, 0));
-        format.add_field(EventField::new("tail".into(), "u64".into(), LocationType::Static, 4, 8));
-        let mut record = ExportRecordType::new(0, 1, "Audit/Layout".into(), format);
-        record.set_original_data_flag();
-        writer.write_metadata_object(&[], &[record]).unwrap();
+        for (name, type_name, offset, size) in [
+            ("first", "u8", 1, 1),
+            ("second", "u32", 4, 4),
+            ("third", "u64", 16, 8),
+        ] {
+            format.add_field(EventField::new(
+                name.into(), type_name.into(), LocationType::Static, offset, size));
+        }
+        let record = ExportRecordType::new(0, 1, "padded".into(), format);
+        writer.write_metadata_object(&[], std::slice::from_ref(&record)).unwrap();
+        let layout = &writer.record_data_layouts[0];
+        let mut native = vec![0xA5; 24];
+        native[1] = 7;
+        native[4..8].copy_from_slice(&3u32.to_le_bytes());
+        native[16..24].copy_from_slice(&1u64.to_le_bytes());
+        let mut packed = vec![99];
+        NetTraceWriter::write_record_data(&mut packed, layout, &record, &native).unwrap();
+        assert_eq!(packed, [99, 7, 3, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
+
+        let mut output = vec![99];
+        let error = NetTraceWriter::write_record_data(&mut output, layout, &record, &native[..23]).unwrap_err();
+        assert!(error.to_string().contains("exceeds the record data size"));
+        assert_eq!(output, [99]);
         drop(writer);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn record_copy_plans_coalesce_fields_and_preserve_metadata() {
+        let path = unique_temp_path("record-copy-plans");
+        let mut writer = NetTraceWriter::new(path.to_str().unwrap()).unwrap();
+        let mut records = Vec::new();
+        for last_offset in [8, 16] {
+            let mut format = crate::event::EventFormat::new();
+            for (name, type_name, offset, size) in [
+                ("first", "u32", 0, 4),
+                ("second", "u32", 4, 4),
+                ("third", "u64", last_offset, 8),
+            ] {
+                format.add_field(EventField::new(
+                    name.into(), type_name.into(), LocationType::Static, offset, size));
+            }
+            let mut record = ExportRecordType::new(0, 1, "test/record".into(), format);
+            record.set_original_data_flag();
+            records.push(record);
+        }
+        writer.write_metadata_object(&[], &records).unwrap();
+        assert!(writer.record_data_layouts[0].ranges.is_empty());
+        assert_eq!(writer.record_data_layouts[0].tail_offset, 0);
+        assert_eq!(writer.record_data_layouts[1].ranges, [0..8]);
+        assert_eq!(writer.record_data_layouts[1].tail_offset, 16);
+
+        for index in [1, 0, 1, 0] {
+            let record = &records[index];
+            let layout = &writer.record_data_layouts[index];
+            let mut data = vec![0xA5; layout.minimum_size];
+            data[..8].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+            let last = record.format().fields()[2].offset;
+            data[last..last + 8].copy_from_slice(&[9, 10, 11, 12, 13, 14, 15, 16]);
+            data.extend_from_slice(&[17, 18]); // Trailing bytes are not padding between fields.
+            let mut packed = Vec::new();
+            NetTraceWriter::write_record_data(&mut packed, layout, record, &data).unwrap();
+            assert_eq!(packed, (1..=18).collect::<Vec<u8>>());
+            assert!(NetTraceWriter::write_record_data(
+                &mut Vec::new(), layout, record, &data[..layout.minimum_size - 1]).is_err());
+        }
+
+        writer.output.flush().unwrap();
+        drop(writer);
+        let data = std::fs::read(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        let blocks = blocks(&data);
+        let mut input = CodedInputStream::from_bytes(blocks[0].1);
+        assert_eq!(read_u16(&mut input), 0);
+        for id in 1..=2 {
+            let size = read_u16(&mut input);
+            let row = input.read_raw_bytes(size as u32).unwrap();
+            let mut row = CodedInputStream::from_bytes(&row);
+            assert_eq!(row.read_raw_varint32().unwrap(), id);
+            assert_eq!(row.read_string().unwrap(), "test");
+            assert_eq!(row.read_raw_varint32().unwrap(), 1);
+            assert_eq!(row.read_string().unwrap(), "record");
+            assert_eq!(read_u16(&mut row), 3);
+            for (name, type_id) in [
+                ("first", TYPE_ID_UINT32), ("second", TYPE_ID_UINT32), ("third", TYPE_ID_UINT64),
+            ] {
+                let size = read_u16(&mut row);
+                let field = row.read_raw_bytes(size as u32).unwrap();
+                let mut field = CodedInputStream::from_bytes(&field);
+                assert_eq!(field.read_string().unwrap(), name);
+                assert_eq!(field.read_raw_byte().unwrap(), type_id);
+                assert!(field.eof().unwrap());
+            }
+            assert_eq!(read_u16(&mut row), 0);
+            assert!(row.eof().unwrap());
+        }
+    }
+
+    #[test]
+    fn overlapping_record_fields_are_rejected() {
+        let path = unique_temp_path("overlapping-record-layout");
+        let mut writer = NetTraceWriter::new(path.to_str().unwrap()).unwrap();
+        let mut format = crate::event::EventFormat::new();
+        format.add_field(EventField::new("first".into(), "u64".into(), LocationType::Static, 0, 8));
+        format.add_field(EventField::new("second".into(), "u32".into(), LocationType::Static, 4, 4));
+        let record = ExportRecordType::new(0, 1, "overlap".into(), format);
+        let error = writer.write_metadata_object(&[], &[record]).unwrap_err();
+        assert!(error.to_string().contains("unsupported layout"));
+        drop(writer);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn overflowing_record_fields_are_rejected_before_caching() {
+        let path = unique_temp_path("overflowing-record-layout");
+        let mut writer = NetTraceWriter::new(path.to_str().unwrap()).unwrap();
+        let mut format = crate::event::EventFormat::new();
+        format.add_field(EventField::new(
+            "overflow".into(), "u64".into(), LocationType::Static, usize::MAX - 3, 8));
+        let record = ExportRecordType::new(0, 1, "overflow".into(), format);
+        let error = writer.write_metadata_object(&[], &[record]).unwrap_err();
+        assert!(error.to_string().contains("overflowing layout"));
+        assert!(writer.record_data_layouts.is_empty());
+        drop(writer);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn record_packing_preserves_unsupported_field_tail() {
+        let path = unique_temp_path("unsupported-record-tail");
+        let mut writer = NetTraceWriter::new(path.to_str().unwrap()).unwrap();
+        let mut format = crate::event::EventFormat::new();
+        for (name, type_name, offset, size) in [
+            ("__syscall_nr", "int", 0, 4),
+            ("fd", "unsigned int", 8, 8),
+            ("buf", "const char *", 16, 8),
+            ("count", "unsigned long", 24, 8),
+        ] {
+            format.add_field(EventField::new(
+                name.into(), type_name.into(), LocationType::Static, offset, size));
+        }
+        let record = ExportRecordType::new(0, 1, "syscalls/sys_enter_write".into(), format);
+        writer.write_metadata_object(&[], std::slice::from_ref(&record)).unwrap();
+        let mut native = vec![0xA5; 32];
+        native[..4].copy_from_slice(&1u32.to_le_bytes());
+        native[8..16].copy_from_slice(&3u64.to_le_bytes());
+        let mut packed = Vec::new();
+        NetTraceWriter::write_record_data(
+            &mut packed, &writer.record_data_layouts[0], &record, &native).unwrap();
+        assert_eq!(u32::from_le_bytes(packed[..4].try_into().unwrap()), 1);
+        assert_eq!(u64::from_le_bytes(packed[4..12].try_into().unwrap()), 3);
+        assert_eq!(&packed[12..], &native[16..]);
+        drop(writer);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn packed_variable_record_layouts_are_accepted() {
+        for text_offset in [4, 8] {
+            let path = unique_temp_path("variable-record-layout");
+            let mut writer = NetTraceWriter::new(path.to_str().unwrap()).unwrap();
+            let mut format = crate::event::EventFormat::new();
+            format.add_field(EventField::new("first".into(), "u32".into(), LocationType::Static, 0, 4));
+            format.add_field(EventField::new("text".into(), "string".into(), LocationType::StaticUTF16String, text_offset, 0));
+            format.add_field(EventField::new("tail".into(), "u64".into(), LocationType::Static, 4, 8));
+            let mut record = ExportRecordType::new(0, 1, "Audit/Layout".into(), format);
+            record.set_original_data_flag();
+            writer.write_metadata_object(&[], std::slice::from_ref(&record)).unwrap();
+            let data = [1, 0, 0, 0, b'A', 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0];
+            let mut native = data[..4].to_vec();
+            native.resize(text_offset, 0xA5);
+            native.extend_from_slice(&data[4..]);
+            let mut packed = Vec::new();
+            NetTraceWriter::write_record_data(
+                &mut packed, &writer.record_data_layouts[0], &record, &native).unwrap();
+            assert_eq!(packed, data);
+            drop(writer);
+            std::fs::remove_file(path).unwrap();
+        }
     }
 
     #[test]
