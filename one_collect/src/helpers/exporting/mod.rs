@@ -85,11 +85,20 @@ pub use process::{
     ExportProcess,
     ExportProcessSample,
     ExportProcessReplay,
+    ExportMappingUnload,
 };
 
 pub mod mappings;
 pub use mappings::{
     ExportMapping,
+};
+
+pub mod kernel_dynamic;
+pub use kernel_dynamic::{
+    KernelDynamicSymbol,
+    KernelDynamicSymbolKind,
+    KernelDynamicSymbolStats,
+    KernelDynamicSymbols,
 };
 
 #[derive(Default)]
@@ -1321,6 +1330,15 @@ pub enum ExportFilterAction {
     Drop,
 }
 
+struct PendingKernelDynamicSymbol {
+    time: u64,
+    address: u64,
+    len: u64,
+    kind: KernelDynamicSymbolKind,
+    unregister: bool,
+    name_id: usize,
+}
+
 pub struct ExportMachine {
     settings: ExportSettings,
     strings: InternedStrings,
@@ -1335,6 +1353,8 @@ pub struct ExportMachine {
     kinds: Vec<String>,
     record_types: Vec<ExportRecordType>,
     map_index: usize,
+    kernel_dynamic_symbols: KernelDynamicSymbols,
+    pending_kernel_dynamic_symbols: Vec<PendingKernelDynamicSymbol>,
     drop_closures: Vec<Box<dyn FnMut()>>,
     start_date: Option<DateTime<Utc>>,
     start_qpc: Option<u64>,
@@ -1423,6 +1443,8 @@ impl ExportMachine {
             kinds: Vec::new(),
             record_types,
             map_index: 0,
+            kernel_dynamic_symbols: KernelDynamicSymbols::new(),
+            pending_kernel_dynamic_symbols: Vec::new(),
             drop_closures: Vec::new(),
             start_date: None,
             start_qpc: None,
@@ -1526,6 +1548,7 @@ impl ExportMachine {
             /* Sort */
             process.sort_samples_by_time();
             process.sort_mappings_by_time();
+            process.sort_mapping_unloads_by_time();
         }
 
         /* Replays are immutable refs */
@@ -1832,6 +1855,89 @@ impl ExportMachine {
         &mut self,
         symbol: &DynamicSymbol) -> anyhow::Result<()> {
         self.os_add_dynamic_symbol(symbol)
+    }
+
+    /// Records a kernel dynamic symbol (e.g. a BPF JIT image) being
+    /// registered or unregistered at `time`. These are used when kernel
+    /// mappings are added so that samples resolve against the code that was
+    /// loaded when they were taken, even if it was unloaded before the
+    /// trace was finalized. Records must be supplied in time order.
+    pub fn add_kernel_dynamic_symbol(
+        &mut self,
+        time: u64,
+        address: u64,
+        len: u64,
+        kind: KernelDynamicSymbolKind,
+        unregister: bool,
+        name: &str) {
+        let name_id = self.strings.to_id(name);
+
+        if unregister {
+            self.kernel_dynamic_symbols.unregister(time, address, len, kind, name_id);
+        } else {
+            self.kernel_dynamic_symbols.register(time, address, len, kind, name_id);
+        }
+    }
+
+    pub fn kernel_dynamic_symbols(&self) -> &KernelDynamicSymbols {
+        &self.kernel_dynamic_symbols
+    }
+
+    fn queue_kernel_dynamic_symbol(
+        &mut self,
+        time: u64,
+        address: u64,
+        len: u64,
+        kind: KernelDynamicSymbolKind,
+        unregister: bool,
+        name: &str) {
+        let name_id = self.strings.to_id(name);
+        self.pending_kernel_dynamic_symbols.push(PendingKernelDynamicSymbol {
+            time, address, len, kind, unregister, name_id,
+        });
+    }
+
+    fn apply_pending_kernel_dynamic_symbols(&mut self) {
+        self.pending_kernel_dynamic_symbols.sort_by_key(|event| (event.time, !event.unregister));
+        for event in self.pending_kernel_dynamic_symbols.drain(..) {
+            if event.unregister {
+                self.kernel_dynamic_symbols.unregister(
+                    event.time, event.address, event.len, event.kind, event.name_id);
+            } else {
+                self.kernel_dynamic_symbols.register(
+                    event.time, event.address, event.len, event.kind, event.name_id);
+            }
+        }
+    }
+
+    /// Records that `name` was observed loaded at `[address, address + len)`
+    /// at `time` by enumerating the system (e.g. already loaded BPF
+    /// programs). Unlike [`Self::add_kernel_dynamic_symbol`], this may be
+    /// called at any point relative to records; snapshots are reconciled
+    /// with records when kernel mappings are added.
+    pub fn add_kernel_dynamic_snapshot(
+        &mut self,
+        time: u64,
+        address: u64,
+        len: u64,
+        kind: KernelDynamicSymbolKind,
+        name: &str) {
+        self.add_kernel_dynamic_snapshot_with_name_certainty(time, address, len, kind, name, true, true);
+    }
+
+    fn add_kernel_dynamic_snapshot_with_name_certainty(
+        &mut self,
+        time: u64,
+        address: u64,
+        len: u64,
+        kind: KernelDynamicSymbolKind,
+        name: &str,
+        name_is_exact: bool,
+        tag_is_known: bool) {
+        let name_id = self.strings.to_id(name);
+
+        self.kernel_dynamic_symbols.add_snapshot_with_name_certainty(
+            time, address, len, kind, name_id, name_is_exact, tag_is_known);
     }
 
     pub fn capture_file_symbol_metadata(&mut self) {

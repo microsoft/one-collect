@@ -129,13 +129,39 @@ pub(crate) fn cgroup_sample_supported() -> bool {
         .. Default::default()
     };
 
+    dummy_attr_supported(
+        &attr,
+        "PERF_SAMPLE_CGROUP unsupported; cgroup ids will not be recorded")
+}
+
+/// Determine whether `PERF_RECORD_KSYMBOL` side-band records can be
+/// requested. They were added in kernel 5.1; older kernels reject the
+/// attribute bit with `EINVAL`, which would otherwise fail the session.
+pub(crate) fn ksymbol_records_supported() -> bool {
+    let attr = perf_event_attr {
+        size: PERF_ATTR_SIZE_VER4,
+        event_type: PERF_TYPE_SOFTWARE,
+        config: PERF_COUNT_SW_DUMMY,
+        flags: FLAG_DISABLED | FLAG_KSYMBOL,
+        .. Default::default()
+    };
+
+    dummy_attr_supported(
+        &attr,
+        "PERF_RECORD_KSYMBOL unsupported; symbols of BPF programs unloaded \
+         before trace finalization will be unknown")
+}
+
+fn dummy_attr_supported(
+    attr: &perf_event_attr,
+    unsupported_warning: &str) -> bool {
     // SAFETY: `attr` is the fully initialized perf_event_attr that
     // outlives the call. The syscall only reads through the pointer
     // and returns an fd or -1.
     let result = unsafe {
         syscall(
             SYS_perf_event_open,
-            &attr as *const perf_event_attr as usize,
+            attr as *const perf_event_attr as usize,
             0,                /* pid: calling process */
             (-1i32) as usize, /* cpu: any */
             (-1i32) as usize, /* group_fd: none */
@@ -151,7 +177,7 @@ pub(crate) fn cgroup_sample_supported() -> bool {
         let err = std::io::Error::last_os_error();
 
         if err.raw_os_error() == Some(EINVAL) {
-            warn!("PERF_SAMPLE_CGROUP unsupported; cgroup ids will not be recorded");
+            warn!("{}", unsupported_warning);
             false
         } else {
             /* Not a kernel support failure (but, e.g., permissions) */
@@ -349,6 +375,8 @@ impl RingBufBuilder {
         attributes.event_type = PERF_TYPE_SOFTWARE;
         attributes.config = PERF_COUNT_SW_BPF_OUTPUT;
         attributes.sample_period_freq = 1;
+        /* PERF_EVENT_ARRAY rejects inherited events. */
+        attributes.flags &= !FLAG_INHERIT;
 
         attributes.sample_type |= abi::PERF_SAMPLE_RAW;
 
@@ -512,8 +540,22 @@ impl RingBufBuilder<Kernel> {
         }
     }
 
-    pub fn with_task_records(&self) -> Self {
+    /// Request `PERF_RECORD_KSYMBOL` records, which describe kernel
+    /// dynamic symbols (BPF programs, trampolines and dispatchers) as they
+    /// are registered and unregistered. Callers should first check
+    /// kernel support, as kernels before 5.1 reject this attribute.
+    pub fn with_ksymbol_records(&self) -> Self {
         let mut attributes = self.attributes;
+
+        attributes.flags |= FLAG_KSYMBOL;
+
+        Self {
+            attributes,
+            _type: self._type,
+        }
+    }
+
+    pub fn with_task_records(&self) -> Self {        let mut attributes = self.attributes;
 
         attributes.flags |= FLAG_TASK;
 
@@ -536,6 +578,38 @@ impl RingBufBuilder<Kernel> {
 
     pub(crate) fn build(&self) -> CommonRingBuf {
         CommonRingBuf::new(self.attributes)
+    }
+
+    pub(crate) fn build_without_ksymbol_records(&self) -> CommonRingBuf {
+        let mut attributes = self.attributes;
+        attributes.flags &= !FLAG_KSYMBOL;
+        CommonRingBuf::new(attributes)
+    }
+
+    /*
+     * Returns a ring buffer producing only kernel dynamic symbol records with
+     * the same record layout, or None if those records were not requested.
+     * Used to observe code loaded by tasks outside of a PID filtered set.
+     */
+    pub(crate) fn ksymbol_only(&self) -> Option<CommonRingBuf> {
+        if self.attributes.flags & FLAG_KSYMBOL == 0 {
+            return None;
+        }
+
+        let mut attributes = self.attributes;
+
+        attributes.flags &= !(FLAG_MMAP | FLAG_MMAP2 | FLAG_MMAP_DATA |
+            FLAG_COMM | FLAG_COMM_EXEC | FLAG_TASK | FLAG_CONTEXT_SWITCH |
+            FLAG_NAMESPACES | FLAG_CGROUP | FLAG_BPF_EVENT | FLAG_TEXT_POKE |
+            FLAG_INHERIT);
+
+        Some(CommonRingBuf::new(attributes))
+    }
+
+    pub(crate) fn task_ksymbol_only(&self) -> Option<CommonRingBuf> {
+        let mut attributes = *self.ksymbol_only()?.attributes;
+        attributes.flags |= self.attributes.flags & FLAG_INHERIT;
+        Some(CommonRingBuf::new(attributes))
     }
 }
 
@@ -1396,6 +1470,43 @@ mod tests {
             dest[i] = *b;
             i += 1;
         }
+    }
+
+    #[test]
+    fn ksymbol_only_keeps_layout_and_drops_other_records() {
+        let kernel = RingBufBuilder::for_kernel()
+            .with_comm_records()
+            .with_task_records()
+            .with_all_mmap_records();
+
+        assert!(kernel.ksymbol_only().is_none());
+
+        let kernel = kernel.with_ksymbol_records();
+        let full = kernel.build();
+        let ksymbols = kernel.ksymbol_only().unwrap();
+        let task = kernel.task_ksymbol_only().unwrap();
+        let without = kernel.build_without_ksymbol_records();
+
+        let records = FLAG_MMAP | FLAG_MMAP2 | FLAG_MMAP_DATA |
+            FLAG_COMM | FLAG_COMM_EXEC | FLAG_TASK;
+
+        assert_eq!(0, ksymbols.attributes.flags & records);
+        assert_ne!(0, ksymbols.attributes.flags & FLAG_KSYMBOL);
+        assert_eq!(0, without.attributes.flags & FLAG_KSYMBOL);
+        assert_eq!(0, ksymbols.attributes.flags & FLAG_INHERIT);
+        assert_eq!(full.attributes.flags & FLAG_INHERIT, task.attributes.flags & FLAG_INHERIT);
+        assert_ne!(0, task.attributes.flags & FLAG_KSYMBOL);
+        assert_eq!(full.attributes.sample_type, ksymbols.attributes.sample_type);
+        assert_eq!(full.attributes.clockid, ksymbols.attributes.clockid);
+        assert_eq!(
+            full.attributes.flags & (FLAG_SAMPLE_ID_ALL | FLAG_USE_CLOCKID),
+            ksymbols.attributes.flags & (FLAG_SAMPLE_ID_ALL | FLAG_USE_CLOCKID));
+    }
+
+    #[test]
+    fn bpf_output_disables_inherit_for_perf_event_array() {
+        let bpf = RingBufBuilder::for_bpf().build();
+        assert_eq!(0, bpf.attributes.flags & FLAG_INHERIT);
     }
 
     #[test]

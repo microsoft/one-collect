@@ -61,7 +61,7 @@ pub(crate) fn bpf_get_map_fd(
     unsafe {
         match syscall(
             SYS_bpf,
-            15, /* BPF_MAP_GET_FD_BY_ID */
+            14, /* BPF_MAP_GET_FD_BY_ID */
             &get as *const bpf_get_id as usize,
             size_of::<bpf_get_id>()) {
             -1 => Err(std::io::Error::last_os_error()),
@@ -88,5 +88,17 @@ pub(crate) fn bpf_set_map_element(
             -1 => Err(std::io::Error::last_os_error()),
             _ => Ok(()),
         }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    #[test]
+    fn missing_map_id_is_not_treated_as_a_file_descriptor() {
+        let err = super::bpf_get_map_fd(0).unwrap_err();
+        assert!(
+            matches!(err.raw_os_error(),
+                Some(libc::ENOENT | libc::EPERM | libc::EACCES | libc::ENOSYS)),
+            "unexpected error for a nonexistent map ID: {err}");
     }
 }

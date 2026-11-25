@@ -398,14 +398,42 @@ impl ExportProcessSample {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExportMappingUnload {
+    time: u64,
+    id: usize,
+    start: u64,
+    end: u64,
+}
+
+impl ExportMappingUnload {
+    pub fn new(
+        time: u64,
+        id: usize,
+        start: u64,
+        end: u64) -> Self {
+        Self { time, id, start, end }
+    }
+
+    pub fn time(&self) -> u64 { self.time }
+
+    pub fn id(&self) -> usize { self.id }
+
+    pub fn start(&self) -> u64 { self.start }
+
+    pub fn end(&self) -> u64 { self.end }
+}
+
 const EXPORT_PROCESS_FLAG_CREATED: u8 = 1 << 0;
 const EXPORT_PROCESS_FLAG_EXITED: u8 = 1 << 1;
+const EXPORT_PROCESS_FLAG_CREATE_REPORTED: u8 = 1 << 2;
 
 pub struct ExportProcessReplay<'a> {
     process: &'a ExportProcess,
     current_time: u64,
     sample_index: usize,
     mapping_index: usize,
+    mapping_unload_index: usize,
     flags: u8,
 }
 
@@ -416,6 +444,7 @@ impl<'a> ExportProcessReplay<'a> {
             current_time: u64::MAX,
             sample_index: 0,
             mapping_index: 0,
+            mapping_unload_index: 0,
             flags: 0,
         };
 
@@ -429,7 +458,16 @@ impl<'a> ExportProcessReplay<'a> {
 
     pub fn time(&self) -> u64 { self.current_time }
 
+    /*
+     * Several replay steps can share a time. Create is reported on the
+     * first; unloads precede mappings and samples; exit is reported on
+     * the last.
+     */
     pub fn created_event(&self) -> bool {
+        if self.flags & EXPORT_PROCESS_FLAG_CREATE_REPORTED != 0 {
+            return false;
+        }
+
         if let Some(time) = self.process.create_time_qpc {
             if time == self.current_time {
                 return true;
@@ -442,7 +480,7 @@ impl<'a> ExportProcessReplay<'a> {
     pub fn exited_event(&self) -> bool {
         if let Some(time) = self.process.exit_time_qpc {
             if time == self.current_time {
-                return true;
+                return !self.more_at_current_time();
             }
         }
 
@@ -450,6 +488,11 @@ impl<'a> ExportProcessReplay<'a> {
     }
 
     pub fn sample_event(&self) -> Option<&'a ExportProcessSample> {
+        if self.mapping_unload_event().is_some() ||
+           self.mapping_event().is_some() {
+            return None;
+        }
+
         if let Some(sample) = self.try_get_sample() {
             if sample.time() == self.current_time {
                 return Some(sample);
@@ -459,7 +502,44 @@ impl<'a> ExportProcessReplay<'a> {
         None
     }
 
+    fn more_at_current_time(&self) -> bool {
+        let at_time = |time: Option<u64>| time == Some(self.current_time);
+
+        if self.mapping_unload_event().is_some() {
+            return at_time(
+                self.process.mapping_unloads.get(self.mapping_unload_index + 1)
+                    .map(|unload| unload.time())) ||
+                at_time(self.try_get_mapping().map(|mapping| mapping.time())) ||
+                at_time(self.try_get_sample().map(|sample| sample.time()));
+        }
+
+        if self.mapping_event().is_some() {
+            return at_time(self.process.mappings().get(self.mapping_index + 1).map(|m| m.time())) ||
+                at_time(self.try_get_sample().map(|s| s.time()));
+        }
+
+        if self.sample_event().is_some() {
+            return at_time(self.process.samples().get(self.sample_index + 1).map(|s| s.time()));
+        }
+
+        false
+    }
+
+    pub fn mapping_unload_event(&self) -> Option<&'a ExportMappingUnload> {
+        if let Some(unload) = self.try_get_mapping_unload() {
+            if unload.time() == self.current_time {
+                return Some(unload);
+            }
+        }
+
+        None
+    }
+
     pub fn mapping_event(&self) -> Option<&'a ExportMapping> {
+        if self.mapping_unload_event().is_some() {
+            return None;
+        }
+
         if let Some(mapping) = self.try_get_mapping() {
             if mapping.time() == self.current_time {
                 return Some(mapping);
@@ -477,9 +557,17 @@ impl<'a> ExportProcessReplay<'a> {
         self.process.mappings().get(self.mapping_index)
     }
 
+    pub(crate) fn try_get_mapping_unload(&self) -> Option<&'a ExportMappingUnload> {
+        self.process.mapping_unloads.get(self.mapping_unload_index)
+    }
+
     pub(crate) const fn done(&self) -> bool { self.current_time == u64::MAX }
 
     pub(crate) fn advance(&mut self) {
+        if self.created_event() {
+            self.flags |= EXPORT_PROCESS_FLAG_CREATE_REPORTED;
+        }
+
         /* Advance index by time */
         if self.sample_event().is_some() {
             self.sample_index += 1;
@@ -487,6 +575,10 @@ impl<'a> ExportProcessReplay<'a> {
 
         if self.mapping_event().is_some() {
             self.mapping_index += 1;
+        }
+
+        if self.mapping_unload_event().is_some() {
+            self.mapping_unload_index += 1;
         }
 
         /* Reset to find the earliest time */
@@ -502,6 +594,12 @@ impl<'a> ExportProcessReplay<'a> {
         if let Some(mapping) = self.try_get_mapping() {
             if mapping.time() < self.current_time {
                 self.current_time = mapping.time();
+            }
+        }
+
+        if let Some(unload) = self.try_get_mapping_unload() {
+            if unload.time() < self.current_time {
+                self.current_time = unload.time();
             }
         }
 
@@ -546,6 +644,8 @@ pub struct ExportProcess {
     pub(crate) os: OSExportProcess,
     samples: Vec<ExportProcessSample>,
     mappings: ExportMappingLookup,
+    mapping_unloads: Vec<ExportMappingUnload>,
+    mapping_unloads_by_id: HashMap<usize, Vec<ExportMappingUnload>>,
     anon_maps: bool,
     create_time_qpc: Option<u64>,
     exit_time_qpc: Option<u64>,
@@ -581,6 +681,8 @@ impl ExportProcess {
             os: OSExportProcess::new(),
             samples: Vec::new(),
             mappings: ExportMappingLookup::default(),
+            mapping_unloads: Vec::new(),
+            mapping_unloads_by_id: HashMap::new(),
             anon_maps: false,
             create_time_qpc: None,
             exit_time_qpc: None,
@@ -621,7 +723,18 @@ impl ExportProcess {
         &self,
         ip: u64,
         time: Option<u64>) -> Option<&ExportMapping> {
-        self.mappings.find(ip, time)
+        let time = time.unwrap_or(u64::MAX);
+        let index = self.mappings.find_index_where(ip, Some(time), |mapping| {
+            !self.mapping_unloads_by_id.get(&mapping.id()).is_some_and(|unloads| {
+                unloads.iter().any(|unload| {
+                    unload.start() <= ip &&
+                    ip <= unload.end() &&
+                    unload.time() <= time
+                })
+            })
+        })?;
+
+        self.mappings.mappings().get(index)
     }
 
     pub fn add_mapping(
@@ -632,6 +745,13 @@ impl ExportProcess {
         }
 
         self.mappings.mappings_mut().push(mapping);
+    }
+
+    pub fn add_mapping_unload(
+        &mut self,
+        unload: ExportMappingUnload) {
+        self.mapping_unloads_by_id.entry(unload.id()).or_default().push(unload);
+        self.mapping_unloads.push(unload);
     }
 
     pub fn needs_dynamic_symbol(
@@ -787,6 +907,10 @@ impl ExportProcess {
         self.mappings.sort_mappings_by_time();
     }
 
+    pub fn sort_mapping_unloads_by_time(&mut self) {
+        self.mapping_unloads.sort_by_key(|unload| unload.time());
+    }
+
     pub fn pid(&self) -> u32 { self.pid }
 
     pub fn ns_pid(&self) -> Option<u32> { self.ns_pid }
@@ -804,6 +928,10 @@ impl ExportProcess {
     pub fn mappings(&self) -> &Vec<ExportMapping> { self.mappings.mappings() }
 
     pub fn mappings_mut(&mut self) -> &mut Vec<ExportMapping> { self.mappings.mappings_mut() }
+
+    pub fn mapping_unloads(&self) -> &[ExportMappingUnload] {
+        &self.mapping_unloads
+    }
 
     pub fn has_anon_mappings(&self) -> bool { self.anon_maps }
 
@@ -836,6 +964,47 @@ impl ExportProcess {
                 }
             }
         }
+    }
+
+    /// Collects `(address, sample time)` for every kernel frame accepted by
+    /// `filter`, sorted and deduplicated.
+    pub fn get_kernel_ip_times(
+        &self,
+        filter: impl Fn(u64) -> bool,
+        ip_times: &mut Vec<(u64, u64)>,
+        frames: &mut Vec<u64>,
+        callstacks: &InternedCallstacks) {
+        ip_times.clear();
+        frames.clear();
+
+        for sample in &self.samples {
+            if sample.ip() < KERNEL_START {
+                continue;
+            }
+
+            let time = sample.time();
+
+            if filter(sample.ip()) {
+                ip_times.push((sample.ip(), time));
+            }
+
+            if callstacks.from_id(
+                sample.callstack_id(),
+                frames).is_ok() {
+                for frame in frames.iter() {
+                    if *frame < KERNEL_START {
+                        break;
+                    }
+
+                    if filter(*frame) {
+                        ip_times.push((*frame, time));
+                    }
+                }
+            }
+        }
+
+        ip_times.sort_unstable();
+        ip_times.dedup();
     }
 
     pub fn add_matching_anon_symbols(
@@ -955,6 +1124,8 @@ impl ExportProcess {
 
         fork.comm_id = self.comm_id;
         fork.mappings = self.mappings.clone();
+        fork.mapping_unloads = self.mapping_unloads.clone();
+        fork.mapping_unloads_by_id = self.mapping_unloads_by_id.clone();
         fork.os = self.os.clone();
 
         fork
@@ -1231,6 +1402,33 @@ mod tests {
     }
 
     #[test]
+    fn find_mapping_after_partial_unload_keeps_other_ranges_live() {
+        let mut proc = ExportProcess::new(1);
+        proc.add_mapping(new_mapping(0, 0, 99, 1));
+        proc.add_mapping(new_mapping(10, 20, 79, 2));
+        proc.add_mapping_unload(ExportMappingUnload::new(20, 2, 40, 59));
+
+        assert_eq!(2, proc.find_mapping(30, Some(20)).unwrap().id());
+        assert_eq!(1, proc.find_mapping(50, Some(20)).unwrap().id());
+        assert_eq!(2, proc.find_mapping(60, Some(20)).unwrap().id());
+        assert_eq!(2, proc.find_mapping(50, Some(19)).unwrap().id());
+        let fork = proc.fork(2);
+        assert_eq!(1, fork.find_mapping(50, Some(20)).unwrap().id());
+        assert_eq!(2, fork.find_mapping(50, Some(19)).unwrap().id());
+    }
+
+    #[test]
+    fn find_mapping_after_full_unload_reveals_underlying_mapping() {
+        let mut proc = ExportProcess::new(1);
+        proc.add_mapping(new_mapping(0, 0, 99, 1));
+        proc.add_mapping(new_mapping(10, 20, 79, 2));
+        proc.add_mapping_unload(ExportMappingUnload::new(20, 2, 20, 79));
+
+        assert_eq!(2, proc.find_mapping(50, Some(19)).unwrap().id());
+        assert_eq!(1, proc.find_mapping(50, Some(20)).unwrap().id());
+    }
+
+    #[test]
     fn sort_samples_by_time() {
         let mut proc = ExportProcess::new(1);
 
@@ -1249,6 +1447,83 @@ mod tests {
         for (i,sample) in proc.samples().iter().enumerate() {
             assert_eq!(i as u64, sample.time());
         }
+    }
+
+    #[test]
+    fn replay_orders_events_at_same_time() {
+        let mut proc = ExportProcess::new(1);
+
+        proc.set_create_time_qpc(10);
+        proc.set_exit_time_qpc(10);
+        proc.add_sample(ExportProcessSample::new(10, MetricValue::Count(0), 0, 0, 0, 0, 0));
+        proc.add_sample(ExportProcessSample::new(10, MetricValue::Count(0), 0, 0, 0, 0, 0));
+        proc.add_mapping(new_mapping(10, 10, 19, 1));
+        proc.add_mapping(new_mapping(10, 20, 29, 2));
+
+        proc.sort_samples_by_time();
+        proc.sort_mappings_by_time();
+
+        let mut replay = proc.to_replay();
+        let mut steps = Vec::new();
+
+        while !replay.done() {
+            assert_eq!(10, replay.time());
+
+            steps.push((
+                replay.created_event(),
+                replay.mapping_event().is_some(),
+                replay.sample_event().is_some(),
+                replay.exited_event()));
+
+            replay.advance();
+        }
+
+        assert_eq!(
+            vec![
+                (true, true, false, false),
+                (false, true, false, false),
+                (false, false, true, false),
+                (false, false, true, true),
+            ],
+            steps);
+    }
+
+    #[test]
+    fn replay_orders_unloads_before_mappings_and_samples() {
+        let mut proc = ExportProcess::new(1);
+
+        proc.set_create_time_qpc(10);
+        proc.set_exit_time_qpc(10);
+        proc.add_mapping_unload(ExportMappingUnload::new(10, 1, 10, 19));
+        proc.add_mapping(new_mapping(10, 10, 19, 2));
+        proc.add_sample(ExportProcessSample::new(10, MetricValue::Count(0), 0, 0, 0, 0, 0));
+        proc.sort_mapping_unloads_by_time();
+        proc.sort_mappings_by_time();
+        proc.sort_samples_by_time();
+
+        let mut replay = proc.to_replay();
+        let mut steps = Vec::new();
+
+        while !replay.done() {
+            assert_eq!(10, replay.time());
+
+            steps.push((
+                replay.created_event(),
+                replay.mapping_unload_event().is_some(),
+                replay.mapping_event().is_some(),
+                replay.sample_event().is_some(),
+                replay.exited_event()));
+
+            replay.advance();
+        }
+
+        assert_eq!(
+            vec![
+                (true, true, false, false, false),
+                (false, false, true, false, false),
+                (false, false, false, true, true),
+            ],
+            steps);
     }
 
     #[test]

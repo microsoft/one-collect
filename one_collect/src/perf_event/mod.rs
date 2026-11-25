@@ -211,6 +211,14 @@ pub trait PerfDataSource {
         &mut self,
         event: Option<&Event>) -> IOResult<Vec<PerfDataFile>>;
 
+    /// Release optional descriptors after fd exhaustion, before recording starts.
+    /// Returns true only if descriptors were released.
+    #[doc(hidden)]
+    fn reclaim_optional_fds(&mut self) -> bool { false }
+
+    #[doc(hidden)]
+    fn has_system_wide_ksymbols(&self) -> bool { false }
+
     fn add_event(
         &mut self,
         event: &Event) -> IOResult<()>;
@@ -362,6 +370,7 @@ pub struct PerfSession {
     exit_event: Event,
     fork_event: Event,
     mmap_event: Event,
+    ksymbol_event: Event,
     lost_samples_event: Event,
     cswitch_event: Event,
     soft_page_fault_event: Event,
@@ -467,6 +476,7 @@ impl PerfSession {
             exit_event: events::exit(),
             fork_event: events::fork(),
             mmap_event: events::mmap(),
+            ksymbol_event: events::ksymbol(),
             lost_samples_event: events::lost_samples(),
             cswitch_event: events::cswitch(),
             drop_event: Event::new(0, "__session_drop".into()),
@@ -530,6 +540,10 @@ impl PerfSession {
 
     pub fn mmap_event(&mut self) -> &mut Event {
         &mut self.mmap_event
+    }
+
+    pub fn ksymbol_event(&mut self) -> &mut Event {
+        &mut self.ksymbol_event
     }
 
     pub fn lost_samples_event(&mut self) -> &mut Event {
@@ -667,13 +681,29 @@ impl PerfSession {
         self.source.create_bpf_files(event)
     }
 
+    pub(crate) fn has_system_wide_ksymbols(&self) -> bool {
+        self.source.has_system_wide_ksymbols()
+    }
+
+    fn open_bpf_map_with_retry(
+        source: &mut dyn PerfDataSource,
+        mut open: impl FnMut() -> IOResult<i32>) -> IOResult<i32> {
+        match open() {
+            Err(err) if matches!(err.raw_os_error(), Some(libc::EMFILE | libc::ENFILE))
+                && source.reclaim_optional_fds() => open(),
+            result => result,
+        }
+    }
+
     pub fn attach_to_bpf_map_path(
         &mut self,
         path: &str,
         event: Event) -> IOResult<()> {
         let path = std::ffi::CString::new(path)?;
 
-        let fd = bpf::bpf_get_map_fd_by_path(&path)?;
+        let fd = Self::open_bpf_map_with_retry(
+            self.source.as_mut(),
+            || bpf::bpf_get_map_fd_by_path(&path))?;
 
         self.attach_to_bpf_map_fd(fd, event)
     }
@@ -682,15 +712,26 @@ impl PerfSession {
         &mut self,
         id: u32,
         event: Event) -> IOResult<()> {
-        let fd = bpf::bpf_get_map_fd(id)?;
+        let fd = Self::open_bpf_map_with_retry(
+            self.source.as_mut(),
+            || bpf::bpf_get_map_fd(id))?;
 
         self.attach_to_bpf_map_fd(fd, event)
     }
 
+    /// Takes ownership of `fd`, including when attachment fails.
     pub fn attach_to_bpf_map_fd(
         &mut self,
         fd: i32,
         event: Event) -> IOResult<()> {
+        self.attach_to_bpf_map_fd_with(fd, event, bpf::bpf_set_map_element)
+    }
+
+    fn attach_to_bpf_map_fd_with(
+        &mut self,
+        fd: i32,
+        event: Event,
+        mut set_map_element: impl FnMut(i32, u64, u64) -> IOResult<()>) -> IOResult<()> {
         debug!(
             "attach_to_bpf_map_fd: attaching event_name={}, event_id={}, fd={}",
             event.name(), event.id(), fd
@@ -699,15 +740,11 @@ impl PerfSession {
         let bpf_files = match self.create_bpf_files(Some(&event)) {
             Ok(bpf_files) => { bpf_files },
             Err(err) => {
-                /* Close FD, no BPF programs */
                 warn!(
                     "attach_to_bpf_map_fd failed: cannot create BPF files for event_name={}, fd={}, error={}",
                     event.name(), fd, err
                 );
-                unsafe {
-                    libc::close(fd);
-                }
-
+                unsafe { libc::close(fd); }
                 return Err(err);
             }
         };
@@ -715,38 +752,35 @@ impl PerfSession {
         let event = Writable::new(event);
 
         for (i, perf_file) in bpf_files.iter().enumerate() {
-            match bpf::bpf_set_map_element(
+            match set_map_element(
                 fd,
                 i as u64,
                 (perf_file.fd()) as u64) {
                 Ok(()) => {
-                    /* Take ownership of FD */
-                    let file = unsafe {
-                        File::from_raw_fd(fd)
-                    };
-
-                    self.bpf_map_files.push(file);
-                    self.bpf_events.insert(perf_file.id(), event.clone());
                     trace!(
                         "attach_to_bpf_map_fd: attached perf_file, index={}, id={}, fd={}",
                         i, perf_file.id(), perf_file.fd()
                     );
                 },
                 Err(err) => {
-                    /* Close FD on error */
                     warn!(
                         "attach_to_bpf_map_fd: bpf_set_map_element failed, index={}, fd={}, error={}",
                         i, fd, err
                     );
-                    unsafe {
-                        libc::close(fd);
-                    }
-
+                    unsafe { libc::close(fd); }
                     return Err(err);
                 }
             }
         }
 
+        if bpf_files.is_empty() {
+            unsafe { libc::close(fd); }
+        } else {
+            self.bpf_map_files.push(unsafe { File::from_raw_fd(fd) });
+            for perf_file in &bpf_files {
+                self.bpf_events.insert(perf_file.id(), event.clone());
+            }
+        }
         info!(
             "attach_to_bpf_map_fd completed: event_name={}, fd={}, bpf_file_count={}",
             event.borrow().name(), fd, bpf_files.len()
@@ -1286,6 +1320,17 @@ impl PerfSession {
                 self.log_errors(&self.mmap_event);
             },
 
+            abi::PERF_RECORD_KSYMBOL => {
+                let offset = abi::Header::data_offset();
+
+                self.ksymbol_event.process(
+                    perf_data.raw_data,
+                    &perf_data.raw_data[offset..],
+                    &mut self.errors);
+
+                self.log_errors(&self.ksymbol_event);
+            },
+
             abi::PERF_RECORD_LOST_SAMPLES => {
                 let offset = abi::Header::data_offset();
 
@@ -1523,6 +1568,7 @@ impl PerfSession {
 mod tests {
     use super::*;
 
+    use std::cell::RefCell;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
@@ -1533,6 +1579,7 @@ mod tests {
         attr: Rc<perf_event_attr>,
         index: usize,
         cpu: u32,
+        bpf_files: Vec<PerfDataFile>,
     }
 
     impl MockData {
@@ -1550,6 +1597,7 @@ mod tests {
                 attr: Rc::new(attr),
                 index: 0,
                 cpu: 0,
+                bpf_files: Vec::new(),
             }
         }
 
@@ -1582,7 +1630,7 @@ mod tests {
         fn create_bpf_files(
             &mut self,
             _event: Option<&Event>) -> IOResult<Vec<PerfDataFile>> {
-            Ok(Vec::new())
+            Ok(std::mem::take(&mut self.bpf_files))
         }
 
         fn add_event(
@@ -1649,6 +1697,68 @@ mod tests {
     }
 
     #[test]
+    fn bpf_map_fd_has_one_owner_for_multiple_output_buffers() {
+        use std::io::Read;
+        use std::os::fd::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let mut mock = MockData::new(0, 0);
+        mock.bpf_files = vec![PerfDataFile::new(11, 101), PerfDataFile::new(12, 102)];
+        let mut session = PerfSession::new(Box::new(mock));
+        let (map, mut peer) = UnixStream::pair().unwrap();
+        peer.set_nonblocking(true).unwrap();
+        let fd = map.into_raw_fd();
+        let mut updates = Vec::new();
+
+        session.attach_to_bpf_map_fd_with(
+            fd,
+            Event::new(1, "bpf".into()),
+            |map_fd, index, perf_fd| {
+                updates.push((map_fd, index, perf_fd));
+                Ok(())
+            }).unwrap();
+
+        assert_eq!(vec![(fd, 0, 101), (fd, 1, 102)], updates);
+        assert_eq!(1, session.bpf_map_files.len());
+        assert_eq!(2, session.bpf_events.len());
+        assert_eq!(
+            std::io::ErrorKind::WouldBlock,
+            peer.read(&mut [0]).unwrap_err().kind());
+        drop(session);
+        assert_eq!(0, peer.read(&mut [0]).unwrap());
+    }
+
+    #[test]
+    fn bpf_map_update_failure_closes_map_once() {
+        use std::io::Read;
+        use std::os::fd::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let mut mock = MockData::new(0, 0);
+        mock.bpf_files = vec![PerfDataFile::new(11, 101), PerfDataFile::new(12, 102)];
+        let mut session = PerfSession::new(Box::new(mock));
+        let (map, mut peer) = UnixStream::pair().unwrap();
+        peer.set_nonblocking(true).unwrap();
+
+        let result = session.attach_to_bpf_map_fd_with(
+            map.into_raw_fd(),
+            Event::new(1, "bpf".into()),
+            |_fd, index, _perf_fd| {
+                if index == 1 {
+                    Err(IOError::from_raw_os_error(libc::EINVAL))
+                } else {
+                    Ok(())
+                }
+            });
+
+        assert_eq!(Some(libc::EINVAL), result.unwrap_err().raw_os_error());
+        assert!(session.bpf_map_files.is_empty());
+        assert!(session.bpf_events.is_empty());
+        assert_eq!(0, peer.read(&mut [0]).unwrap());
+        drop(session);
+    }
+
+    #[test]
     fn it_works() {
         let mock = MockData::new(abi::PERF_SAMPLE_RAW, 0);
         let mut e = Event::new(1, "test".into());
@@ -1693,6 +1803,120 @@ mod tests {
         });
 
         session.add_event(e).unwrap();
+    }
+
+    fn ksymbol_record(
+        time: u64,
+        addr: u64,
+        len: u32,
+        ksym_type: u16,
+        flags: u16,
+        name: &str) -> Vec<u8> {
+        let mut payload = Vec::new();
+        let mut record = Vec::new();
+
+        payload.extend_from_slice(&addr.to_ne_bytes());
+        payload.extend_from_slice(&len.to_ne_bytes());
+        payload.extend_from_slice(&ksym_type.to_ne_bytes());
+        payload.extend_from_slice(&flags.to_ne_bytes());
+        payload.extend_from_slice(name.as_bytes());
+        payload.push(0);
+
+        while payload.len() % 8 != 0 {
+            payload.push(0);
+        }
+
+        /* sample_id: pid, tid, time, id */
+        payload.extend_from_slice(&1234u32.to_ne_bytes());
+        payload.extend_from_slice(&1235u32.to_ne_bytes());
+        payload.extend_from_slice(&time.to_ne_bytes());
+        payload.extend_from_slice(&7u64.to_ne_bytes());
+
+        abi::Header::write(abi::PERF_RECORD_KSYMBOL, 0, &payload, &mut record);
+
+        record
+    }
+
+    #[test]
+    fn ksymbol_records_parse() {
+        let mut mock = MockData::new(
+            abi::PERF_SAMPLE_TID | abi::PERF_SAMPLE_TIME | abi::PERF_SAMPLE_ID,
+            0);
+
+        let mut attr = perf_event_attr::default();
+        attr.sample_type = mock.attr.sample_type;
+        attr.flags = abi::FLAG_SAMPLE_ID_ALL;
+        mock.attr = Rc::new(attr);
+
+        mock.push(&ksymbol_record(
+            100,
+            0xffffffffc0001000,
+            256,
+            abi::PERF_RECORD_KSYMBOL_TYPE_BPF,
+            0,
+            "bpf_prog_0123456789abcdef_short"));
+
+        mock.push(&ksymbol_record(
+            200,
+            0xffffffffc0001000,
+            256,
+            abi::PERF_RECORD_KSYMBOL_TYPE_BPF,
+            abi::PERF_RECORD_KSYMBOL_FLAGS_UNREGISTER,
+            "bpf_prog_0123456789abcdef_short"));
+
+        mock.push(&ksymbol_record(
+            300,
+            0xffffffffc0002000,
+            64,
+            abi::PERF_RECORD_KSYMBOL_TYPE_OOL,
+            0,
+            "bpf_trampoline_6442491234"));
+
+        let mut session = PerfSession::new(Box::new(mock));
+        let time_field = session.time_data_ref();
+        let pid_field = session.pid_field_ref();
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let seen_cb = seen.clone();
+        let event = session.ksymbol_event();
+        let fmt = event.format();
+        let addr = fmt.get_field_ref_unchecked("addr");
+        let len = fmt.get_field_ref_unchecked("len");
+        let ksym_type = fmt.get_field_ref_unchecked("ksym_type");
+        let flags = fmt.get_field_ref_unchecked("flags");
+        let name = fmt.get_field_ref_unchecked("name[]");
+
+        event.add_callback(move |data| {
+            let fmt = data.format();
+            let full_data = data.full_data();
+            let data = data.event_data();
+
+            seen_cb.borrow_mut().push((
+                time_field.get_u64(full_data)?,
+                pid_field.get_u32(full_data)?,
+                fmt.get_u64(addr, data)?,
+                fmt.get_u32(len, data)?,
+                fmt.get_u16(ksym_type, data)?,
+                fmt.get_u16(flags, data)?,
+                fmt.get_str(name, data)?.to_string()));
+
+            Ok(())
+        });
+
+        session.parse_all().unwrap();
+
+        let seen = seen.borrow();
+
+        assert_eq!(3, seen.len());
+        assert_eq!(
+            (100, 1234, 0xffffffffc0001000, 256, 1, 0,
+             "bpf_prog_0123456789abcdef_short".to_string()),
+            seen[0]);
+        assert_eq!(200, seen[1].0);
+        assert_eq!(abi::PERF_RECORD_KSYMBOL_FLAGS_UNREGISTER, seen[1].5);
+        assert_eq!(
+            (300, 1234, 0xffffffffc0002000, 64, 2, 0,
+             "bpf_trampoline_6442491234".to_string()),
+            seen[2]);
     }
 
     #[test]
