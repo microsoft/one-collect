@@ -374,14 +374,21 @@ pub fn iter_proc_modules(
 ///     The callback function takes two parameters: a u32 representing the PID and a reference to the ModuleInfo struct.
 ///
 pub fn iter_modules(
+    callback: impl FnMut(u32, &ModuleInfo)) {
+    iter_modules_until(&|| false, callback);
+}
+
+pub(crate) fn iter_modules_until(
+    cancelled: &impl Fn() -> bool,
     mut callback: impl FnMut(u32, &ModuleInfo)) {
-    iter_processes(|pid,path| {
+    iter_processes_until(cancelled, |pid,path| {
         path.push("maps");
         let result = File::open(&path);
         path.pop();
 
         if let Ok(file) = result {
             for line in BufReader::new(file).lines() {
+                if cancelled() { break; }
                 match line {
                     Ok(line) => {
                         if let Some(module) = ModuleInfo::from_line(&line) {
@@ -453,12 +460,19 @@ fn parse_long_comm(
 ///     The callback function takes two parameters: a u32 representing the PID and a mutable reference to the
 ///     PathBuf instance representing the process path.
 ///
-pub fn iter_processes(mut callback: impl FnMut(u32, &mut PathBuf)) {
+pub fn iter_processes(callback: impl FnMut(u32, &mut PathBuf)) {
+    iter_processes_until(&|| false, callback);
+}
+
+pub(crate) fn iter_processes_until(
+    cancelled: &impl Fn() -> bool,
+    mut callback: impl FnMut(u32, &mut PathBuf)) {
     let mut path_buf = PathBuf::new();
     path_buf.push("/proc");
 
     for entry in fs::read_dir(path_buf)
         .expect("Unable to open procfs") {
+            if cancelled() { break; }
             let entry = entry.expect("Unable to get path");
             let mut path = entry.path();
 

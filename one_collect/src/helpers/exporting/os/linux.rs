@@ -1794,11 +1794,10 @@ impl ExportSessionHelp for PerfSession {
 }
 
 #[cfg(target_os = "linux")]
-impl UniversalExporterOSHooks for UniversalExporter {
-    fn os_parse_until(
-        mut self,
-        _name: &str,
-        until: impl Fn() -> bool + Send + 'static) -> anyhow::Result<Writable<ExportMachine>> {
+impl UniversalExporter {
+    pub(crate) fn os_parse_controlled(mut self, _name: &str, stop: crate::stop::CaptureStop)
+        -> anyhow::Result<Writable<ExportMachine>> {
+        use crate::stop::CaptureStop;
         let settings = self.settings()?;
 
         let page_size = unsafe { libc::sysconf(libc::_SC_PAGE_SIZE) as usize };
@@ -1837,26 +1836,17 @@ impl UniversalExporterOSHooks for UniversalExporter {
             /* Spawn capture_environment in a background thread so that
              * the ring buffers are already enabled when .NET diagnostic
              * commands trigger runtime events (see issue #243). */
-            let env_handle = session.spawn_capture_environment();
-
-            session.parse_until(until)?;
-            session.disable()?;
-            exporter.borrow_mut().mark_end();
-
-            /* When the session is disabled very early (for example, because
-             * the memory limit is reached immediately), the environment-capture
-             * thread may spend several minutes waiting for ring-buffer space on
-             * systems with many processes or modules. Continue parsing
-             * concurrently so the writer can finish promptly. */
-            while !env_handle.is_finished() {
-                session.parse_all()?;
-            }
-
-            /* Wait for the background capture to finish */
-            let _ = env_handle.join();
-
-            /* Parse any remaining data including in-process events. */
-            session.parse_all()?;
+            session.with_environment_capture(matches!(stop, CaptureStop::Token(_)), |session| {
+                let parsed = match stop {
+                    CaptureStop::Predicate(until) => session.parse_until(until).map_err(Into::into),
+                    CaptureStop::Token(token) => session.parse_notified(&token),
+                };
+                let disabled = session.disable();
+                parsed?;
+                disabled?;
+                exporter.borrow_mut().mark_end();
+                Ok(())
+            })?;
 
             self.run_parsed_hooks(&exporter)?;
 
