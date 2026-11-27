@@ -26,6 +26,8 @@
 //! TraceLogging path when an inline SCHEMA_TL item is present and the
 //! manifest path otherwise.  `TdhGetEventInformation` is the same entry
 //! point for both, so the byte-level decoding is entirely source-agnostic.
+//! On a schema miss, TDH writes into the decoder's retained buffer if it
+//! fits; only an empty or undersized buffer needs a second TDH call.
 //!
 //! Variable-length field resolution (scanning for null terminators, reading
 //! length prefixes) is handled lazily by the framework's existing
@@ -971,7 +973,7 @@ impl AlignedTeiBuf {
 
     fn ensure_capacity(&mut self, byte_count: usize) {
         let elem_size = std::mem::size_of::<TeiBufElem>();
-        let elem_count = (byte_count + elem_size - 1) / elem_size;
+        let elem_count = byte_count.div_ceil(elem_size);
         if self.storage.len() < elem_count {
             self.storage.resize(elem_count, 0);
         }
@@ -985,6 +987,39 @@ impl AlignedTeiBuf {
     fn as_mut_ptr(&mut self) -> *mut TRACE_EVENT_INFO {
         self.storage.as_mut_ptr() as *mut TRACE_EVENT_INFO
     }
+
+    fn fill(
+        &mut self,
+        mut query: impl FnMut(*mut TRACE_EVENT_INFO, &mut u32) -> u32,
+    ) -> Result<(), TdhDecodeError> {
+        self.len = 0;
+        // Offer initialized storage, not the previous schema length or spare Vec capacity.
+        let mut available = u32::try_from(std::mem::size_of_val(self.storage.as_slice()))
+            .unwrap_or(u32::MAX);
+        let ptr = if available == 0 { core::ptr::null_mut() } else { self.as_mut_ptr() };
+        let mut size = available;
+        let mut status = query(ptr, &mut size);
+        if status == ERROR_INSUFFICIENT_BUFFER && size > available {
+            self.ensure_capacity(size as usize);
+            available = size;
+            status = query(self.as_mut_ptr(), &mut size);
+        }
+        match status {
+            ERROR_NOT_FOUND => Err(TdhDecodeError::NotFound),
+            0 | ERROR_INSUFFICIENT_BUFFER if size == 0 =>
+                Err(TdhDecodeError::Malformed("TDH returned zero buffer size")),
+            0 if size > available => Err(TdhDecodeError::Malformed("TDH exceeded supplied buffer size")),
+            0 => {
+                self.len = size as usize;
+                trace!(buffer_size = size, "TdhGetEventInformation succeeded");
+                Ok(())
+            }
+            code => {
+                warn!(win32_error = code, "TdhGetEventInformation failed");
+                Err(TdhDecodeError::Win32(code))
+            }
+        }
+    }
 }
 
 /// Calls `TdhGetEventInformation`, growing the buffer as needed.
@@ -992,37 +1027,11 @@ fn call_tdh_get_event_information(
     record: &EVENT_RECORD,
     buf: &mut AlignedTeiBuf,
 ) -> Result<(), TdhDecodeError> {
-    let mut buffer_size: u32 = 0;
-    let status = unsafe {
+    buf.fill(|ptr, size| unsafe {
         TdhGetEventInformation(
-            record as *const EVENT_RECORD, 0u32,
-            core::ptr::null(), core::ptr::null_mut(), &mut buffer_size,
+            record, 0, core::ptr::null(), ptr, size,
         )
-    };
-    if status == ERROR_NOT_FOUND {
-        return Err(TdhDecodeError::NotFound);
-    }
-    if status != ERROR_INSUFFICIENT_BUFFER {
-        warn!(win32_error = status, "TdhGetEventInformation sizing call failed");
-        return Err(TdhDecodeError::Win32(status));
-    }
-    if buffer_size == 0 {
-        return Err(TdhDecodeError::Malformed("TDH returned zero buffer size"));
-    }
-    buf.ensure_capacity(buffer_size as usize);
-    let status = unsafe {
-        TdhGetEventInformation(
-            record as *const EVENT_RECORD, 0u32,
-            core::ptr::null(), buf.as_mut_ptr(), &mut buffer_size,
-        )
-    };
-    if status != 0 {
-        warn!(win32_error = status, "TdhGetEventInformation fill call failed");
-        return Err(TdhDecodeError::Win32(status));
-    }
-    buf.len = buffer_size as usize;
-    trace!(buffer_size, "TdhGetEventInformation succeeded");
-    Ok(())
+    })
 }
 
 // SAFETY guard for the `EventNameOffset` union read below.
@@ -1746,6 +1755,54 @@ mod tests {
     fn split_tl_schema(blob: &[u8]) -> (&[u8], &[u8]) {
         let prov_size = u16::from_le_bytes([blob[0], blob[1]]) as usize;
         (&blob[..prov_size], &blob[prov_size..])
+    }
+
+    #[test]
+    fn tdh_buffer_reuses_storage_across_schema_misses() {
+        let mut buf = AlignedTeiBuf::new();
+        // The last schema fits the retained storage, but not the preceding schema's used length.
+        for (name, expected_calls) in [("First", 2), ("LargerSchemaName", 2), ("A", 1), ("Medium", 1)] {
+            let blob = build_tl_schema("TestProvider", name, &[("Value", TL_UINT32)]);
+            let (prov, evt) = split_tl_schema(&blob);
+            let mut items = unsafe { std::mem::zeroed() };
+            let data = 42u32.to_le_bytes();
+            let record = build_test_record(prov, evt, &mut items, &data);
+            let mut calls = 0;
+            let mut used = 0;
+            buf.fill(|ptr, size| {
+                calls += 1;
+                let status = unsafe { TdhGetEventInformation(&record, 0, core::ptr::null(), ptr, size) };
+                used = *size;
+                status
+            }).unwrap();
+            assert_eq!(calls, expected_calls, "{name}");
+            assert_eq!(buf.as_bytes().len(), used as usize);
+            let schema = build_cached_schema(buf.as_bytes(), false).unwrap();
+            assert_eq!(schema.event_name, name);
+            assert_eq!(schema.format.fields()[0].name, "Value");
+        }
+    }
+
+    #[test]
+    fn tdh_buffer_propagates_lookup_errors_after_growth() {
+        use windows_sys::Win32::Foundation::ERROR_INVALID_PARAMETER;
+        for code in [ERROR_NOT_FOUND, ERROR_INVALID_PARAMETER] {
+            let mut buf = AlignedTeiBuf::new();
+            let error = buf.fill(|ptr, size| {
+                if ptr.is_null() {
+                    *size = 128;
+                    ERROR_INSUFFICIENT_BUFFER
+                } else {
+                    code
+                }
+            }).unwrap_err();
+            if code == ERROR_NOT_FOUND {
+                assert!(matches!(error, TdhDecodeError::NotFound));
+            } else {
+                assert!(matches!(error, TdhDecodeError::Win32(status) if status == code));
+            }
+            assert!(buf.as_bytes().is_empty());
+        }
     }
 
     #[test]
