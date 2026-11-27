@@ -1061,16 +1061,9 @@ impl TraceSession {
 
     pub(super) fn process(
         &self,
-        parse: Box<dyn FnMut(&EVENT_RECORD)>) -> anyhow::Result<()> {
-        /* Create thin pointer */
-        let thin = Box::new(parse);
-
-        /* Create raw pointer */
-        let raw = Box::into_raw(thin);
-
-        /* Use raw pointer with ETW */
-        let context = raw as *mut std::ffi::c_void;
-
+        mut parse: Box<dyn FnMut(&EVENT_RECORD)>) -> anyhow::Result<()> {
+        // ETW borrows the local Box through synchronous processing and trace closure.
+        let context = std::ptr::from_mut(&mut parse).cast();
         let handle = Self::open_trace(
             &self.name,
             context)?;
@@ -1086,7 +1079,7 @@ impl TraceSession {
             CloseTrace(handle);
 
             if result != 0 {
-                anyhow::bail!("ProcessTrace failed with {}", GetLastError());
+                anyhow::bail!("ProcessTrace failed with {}", result);
             }
         }
 
@@ -1263,6 +1256,21 @@ impl Drop for TraceSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn processing_a_missing_session_releases_the_callback() {
+        use std::{cell::Cell, rc::Rc};
+        use windows_sys::Win32::Foundation::ERROR_WMI_INSTANCE_NOT_FOUND;
+
+        let name = format!("one_collect_missing_session_{}", std::process::id());
+        let session = TraceSession::new(name, 64, false);
+        let state = Rc::new(Cell::new(false));
+        let captured = Rc::clone(&state);
+        let error = session.process(Box::new(move |_| captured.set(true))).unwrap_err();
+
+        assert_eq!(Rc::strong_count(&state), 1);
+        assert_eq!(error.to_string(), format!("ProcessTrace failed with {ERROR_WMI_INSTANCE_NOT_FOUND}"));
+    }
 
     #[test]
     fn ordinary_session_does_not_use_system_logger_mode() {
